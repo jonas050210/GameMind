@@ -14,6 +14,7 @@ import {
   MinecraftAdapter,
   type MinecraftAdapterConfig,
 } from "../src/games/minecraft/minecraft-adapter.js";
+import { minecraftObservationSchema } from "../src/games/minecraft/observation.js";
 import {
   MINECRAFT_HARVEST_BERRIES_CAPABILITY,
   MINECRAFT_PICKUP_ITEM_CAPABILITY,
@@ -70,6 +71,14 @@ interface MockOptions {
   readonly isAlive?: boolean;
   readonly time?: { timeOfDay: number; day: number; isDay: boolean } | null;
   readonly regenerate?: boolean;
+  /**
+   * Per-block line-of-sight outcome, shaped like Mineflayer's `canSeeBlock`, which ends with
+   * `raycastHit && raycastHit.position.equals(block.position)`:
+   * "clear" → true (the ray reaches the block); "blocked" → false (the ray hit another block first);
+   * "no-hit" → null (the ray hit nothing, so the expression short-circuits to null, not false).
+   * Defaults to "clear" for every block.
+   */
+  readonly lineOfSight?: (block: { name: string; position: { x: number; y: number; z: number } }) => "clear" | "blocked" | "no-hit";
 }
 
 /** A navigation goal the double cannot path to (within the adapter's 48-block limit). */
@@ -138,7 +147,10 @@ function createLiveMock(options: MockOptions = {}) {
       return found.sort((a, b) => a.distanceTo(player.position) - b.distanceTo(player.position)).slice(0, search.count);
     },
     canDigBlock: () => true,
-    canSeeBlock: () => true,
+    canSeeBlock: (block: { name: string; position: { x: number; y: number; z: number } }) => {
+      const verdict = options.lineOfSight?.(block) ?? "clear";
+      return verdict === "clear" ? true : verdict === "blocked" ? false : null;
+    },
     activateBlock: async (block: { name: string; position: Vec }) => {
       const stored = blocks.get(key(block.position.x, block.position.y, block.position.z));
       if (stored?.name === "sweet_berry_bush" && (stored.age ?? 0) >= 2) {
@@ -614,4 +626,103 @@ test("a payload that does not match the contract fails as a named validation err
     },
   );
   await adapter.disconnect("test");
+});
+
+// Live regression: `bot.canSeeBlock` returns `null` (not `false`) when its raycast hits nothing, and the
+// observation schema rejects that as OBSERVATION_SCHEMA_INVALID. The sightings below are the live shapes
+// that reached the schema: a stone found by the wide mineable scan whose ray hits nothing, a log the ray
+// hits behind another block, and a cube block with the same "no hit" outcome.
+test("a line-of-sight ray that hits nothing is reported as not visible, not as a schema failure", async () => {
+  const mock = createLiveMock({
+    lineOfSight: (block) => {
+      if (block.name === "stone" && block.position.x === 12) return "no-hit";
+      if (block.name === "oak_log" && block.position.x === 14) return "blocked";
+      if (block.name === "dirt" && block.position.x === 1) return "no-hit";
+      return "clear";
+    },
+  });
+  mock.blocks.set("12,64,0", { name: "stone", type: 1, boundingBox: "block" });
+  mock.blocks.set("14,64,0", { name: "oak_log", type: 1, boundingBox: "block" });
+  mock.blocks.set("1,64,0", { name: "dirt", type: 3, boundingBox: "block" });
+  const adapter = await connectAdapter(mock);
+  const state = (await adapter.observe()).state;
+
+  const stone = state.minableSightings?.find((sighting) => sighting.name === "stone");
+  assert.ok(stone, "the wide mineable scan found the stone");
+  assert.equal(stone.visible, false, "a ray that hit nothing is a measured not-visible, not an unknown");
+  const log = state.resourceSightings.find((sighting) => sighting.name === "oak_log");
+  assert.equal(log?.visible, false, "a ray stopped by another block is not visible");
+  const cubeDirt = state.nearbyBlocks.find((block) => block.name === "dirt");
+  assert.equal(cubeDirt?.visible, false);
+  for (const sighting of state.minableSightings ?? []) {
+    assert.equal(typeof sighting.visible, "boolean", "every reported visibility is a real boolean");
+  }
+  await adapter.disconnect("test");
+});
+
+test("a rejected observation names the value that arrived, so the live log shows what the session sent", async () => {
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  // A non-string username reaches the contract unchanged; the message must quote the received value.
+  (mock.bot as unknown as { username: unknown }).username = 42;
+  await assert.rejects(
+    () => adapter.observe(),
+    (error: unknown) => {
+      const failure = error as { code?: string; message?: string };
+      assert.equal(failure.code, "OBSERVATION_SCHEMA_INVALID");
+      assert.match(String(failure.message), /player\.username: expected string, received 42/);
+      return true;
+    },
+  );
+  await adapter.disconnect("test");
+});
+
+test("a line-of-sight test that throws stays unknown: the field is omitted, not guessed", async () => {
+  const mock = createLiveMock();
+  mock.blocks.set("12,64,0", { name: "stone", type: 1, boundingBox: "block" });
+  (mock.bot as unknown as { canSeeBlock: () => boolean }).canSeeBlock = () => {
+    throw new Error("chunk is being replaced");
+  };
+  const adapter = await connectAdapter(mock);
+  const stone = (await adapter.observe()).state.minableSightings?.find((sighting) => sighting.name === "stone");
+  assert.ok(stone);
+  assert.equal("visible" in stone, false);
+  await adapter.disconnect("test");
+});
+
+test("the observation contract still rejects a non-boolean visibility; the adapter now produces only booleans", () => {
+  const base = {
+    player: {
+      username: "GameMind",
+      position: { x: 0, y: 64, z: 0 },
+      orientation: { yaw: 0, pitch: 0 },
+      dimension: "overworld",
+      gameMode: "survival",
+      health: 20,
+      food: 20,
+      foodSaturation: 5,
+      oxygenLevel: 300,
+      onGround: true,
+    },
+    inventory: [],
+    equipment: { hand: null, offhand: null, head: null, torso: null, legs: null, feet: null },
+    entities: [],
+    nearbyBlocks: [],
+    resourceSightings: [],
+    resourceScan: { radius: 24, limit: 192, center: { x: 0, y: 64, z: 0 }, truncated: false },
+    itemDrops: [],
+    sampledRegion: { radius: 5, verticalRadius: 2, center: { x: 0, y: 64, z: 0 }, sampledCells: 0, unknownCells: 0, truncated: false },
+  };
+  const sighting = { name: "stone", position: { x: 12, y: 64, z: 0 }, distance: 12 };
+  assert.equal(minecraftObservationSchema.safeParse({ ...base, minableSightings: [{ ...sighting, visible: false }] }).success, true);
+  assert.equal(minecraftObservationSchema.safeParse({ ...base, minableSightings: [{ ...sighting }] }).success, true);
+  assert.equal(
+    minecraftObservationSchema.safeParse({ ...base, minableSightings: [{ ...sighting, visible: null }] }).success,
+    false,
+    "null is not a visibility value and must stay invalid",
+  );
+  assert.equal(
+    minecraftObservationSchema.safeParse({ ...base, minableSightings: [{ ...sighting, visible: "yes" }] }).success,
+    false,
+  );
 });

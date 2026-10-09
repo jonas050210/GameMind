@@ -29,6 +29,10 @@ function text(response: import("node:http").ServerResponse, status: number, body
   response.end(body);
 }
 
+function scriptJson(value: string): string {
+  return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -91,9 +95,20 @@ export class ControlCenter {
 
   async start(): Promise<ControlCenterHandle> {
     const port = this.options.port ?? 8787;
+    const host = this.options.host ?? "0.0.0.0";
     await new Promise<void>((resolve, reject) => {
-      this.server.once("error", reject);
-      this.server.listen(port, this.options.host ?? "0.0.0.0", () => resolve());
+      this.server.once("error", (error: NodeJS.ErrnoException) => {
+        // A bare EADDRINUSE stack appeared after the agent had already connected and said nothing about
+        // the fix. Name the port and the option that changes it.
+        if (error.code === "EADDRINUSE") {
+          reject(new Error(
+            `Control Center port ${port} is already in use on ${host}. Stop the other GameMind run, or pass --control-port PORT (0 picks a free port).`,
+          ));
+          return;
+        }
+        reject(error);
+      });
+      this.server.listen(port, host, () => resolve());
     });
     const address = this.server.address();
     this.portValue = typeof address === "object" && address ? address.port : port;
@@ -201,7 +216,8 @@ export class ControlCenter {
   private async serveStatic(pathname: string, response: import("node:http").ServerResponse, headOnly: boolean): Promise<void> {
     const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
     const target = path.join(this.staticDirectory, relative);
-    if (!target.startsWith(this.staticDirectory)) {
+    // A bare prefix test also accepts a sibling such as `public-old/`; require the separator as well.
+    if (target !== this.staticDirectory && !target.startsWith(this.staticDirectory + path.sep)) {
       text(response, 403, "Outside the Control Center asset directory.");
       return;
     }
@@ -216,10 +232,13 @@ export class ControlCenter {
     let body = content.toString("utf8");
     if (target.endsWith("index.html")) {
       // The token is injected into the served page instead of being readable from an API endpoint.
+      // Values go in as JSON inside a <script> element: `<`, `>`, `&` and the JS line separators are escaped
+      // so text such as `</script>` cannot end the element early. Function replacers keep `$&`-style
+      // sequences in a value from being read as replacement patterns.
       body = body
-        .replace('"__CONTROL_TOKEN__"', JSON.stringify(this.token))
-        .replace('"__BANNER__"', JSON.stringify(this.options.banner ?? ""))
-        .replace('"__TITLE__"', JSON.stringify(this.host.title));
+        .replace('"__CONTROL_TOKEN__"', () => scriptJson(this.token))
+        .replace('"__BANNER__"', () => scriptJson(this.options.banner ?? ""))
+        .replace('"__TITLE__"', () => scriptJson(this.host.title));
     }
     response.writeHead(200, {
       "content-type": CONTENT_TYPES[extension] ?? "application/octet-stream",
