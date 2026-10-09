@@ -95,6 +95,8 @@ export interface TaskMetrics {
   readonly shelterSidesClosed: number;
   readonly combatActions: number;
   readonly hungerRecoveryActions: number;
+  readonly deathsObserved: number;
+  readonly respawnRecoveries: number;
 }
 
 export interface MinecraftTaskResult {
@@ -274,6 +276,16 @@ class TaskDeadlineExceeded extends Error {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function playerIsAlive(state: MinecraftObservation): boolean {
+  if (state.player.alive !== undefined) return state.player.alive;
+  // Missing health is not evidence of death for older or partial adapters.
+  return state.player.health === null || state.player.health > 0;
+}
+
 function actionSummary(
   decisionGoalId: string,
   decisionTargetKey: string | null,
@@ -349,6 +361,24 @@ export class MinecraftTaskRunner {
     });
   }
 
+  private async waitForRespawn(taskBudgetMs: number): Promise<"respawned" | "timed_out" | "task_timed_out" | "aborted" | "disconnected"> {
+    const budget = Math.max(0, Math.min(30_000, taskBudgetMs));
+    const wallDeadline = Date.now() + budget;
+    while (Date.now() < wallDeadline) {
+      if (this.options.shouldStop?.()) return "aborted";
+      if (this.runtime.adapter.status !== "connected") return "disconnected";
+      await delay(Math.min(500, Math.max(1, wallDeadline - Date.now())));
+      if (this.runtime.adapter.status !== "connected") return "disconnected";
+      try {
+        const world = await this.runtime.observe();
+        if (playerIsAlive(world.state)) return "respawned";
+      } catch {
+        if (this.runtime.adapter.status !== "connected") return "disconnected";
+      }
+    }
+    return taskBudgetMs <= 30_000 ? "task_timed_out" : "timed_out";
+  }
+
   async run(task: MinecraftTask): Promise<MinecraftTaskResult> {
     const startedClock = this.clock();
     const deadline = startedClock + task.maxDurationMs;
@@ -386,6 +416,9 @@ export class MinecraftTaskRunner {
     let foodSourcesUsed = 0;
     let recoveryAttempts = 0;
     let successfulRecoveries = 0;
+    let deathsObserved = 0;
+    let respawnRecoveries = 0;
+    let initialDeathCount = 0;
     let stuckActions = 0;
     let oscillations = 0;
     let targetStalls = 0;
@@ -435,6 +468,7 @@ export class MinecraftTaskRunner {
       if (!firstState) throw new Error("Task started without a valid initial world state.");
       initialTargetCount = task.kind === "secure_food" ? 0 : targetCountOf(firstState);
       maximumTargetCount = initialTargetCount;
+      initialDeathCount = firstState.player.deathCount ?? 0;
       minHealth = firstState.player.health;
       initialFood = firstState.player.food;
       origin = { x: firstState.player.position.x, z: firstState.player.position.z };
@@ -469,6 +503,46 @@ export class MinecraftTaskRunner {
         if (!world) {
           status = "disconnected";
           failure = { code: "WORLD_STATE_UNAVAILABLE", message: "No current world state is available." };
+          break;
+        }
+        if (!playerIsAlive(world.state)) {
+          deathsObserved = Math.max(deathsObserved, 1, (world.state.player.deathCount ?? initialDeathCount + 1) - initialDeathCount);
+          recoveryAttempts += 1;
+          await this.runtime.trace.record({
+            eventType: "player.death",
+            gameId: world.gameId,
+            sessionId: world.sessionId,
+            data: {
+              health: world.state.player.health,
+              deathCount: world.state.player.deathCount ?? null,
+              resumeCondition: "adapter reports the player alive",
+              actionsWhileDead: "none",
+              recoveryTimeoutMs: 30_000,
+            },
+          });
+          const recovery = await this.waitForRespawn(deadline - this.clock());
+          if (recovery === "respawned") {
+            respawnRecoveries += 1;
+            successfulRecoveries += 1;
+            consecutiveFailures = 0;
+            consecutiveNoProgress = 0;
+            movementHistory.length = 0;
+            this.logger.warn({ taskId: task.id, respawnRecoveries }, "Minecraft player respawned; task loop is observing and replanning");
+            continue;
+          }
+          if (recovery === "aborted") {
+            status = "aborted";
+            failure = { code: "OPERATOR_STOP", message: this.options.shouldStop?.() ?? "Task stopped while awaiting respawn." };
+          } else if (recovery === "disconnected") {
+            status = "disconnected";
+            failure = { code: "ADAPTER_DISCONNECTED_DURING_RESPAWN", message: "Minecraft disconnected while the player was awaiting respawn." };
+          } else if (recovery === "task_timed_out") {
+            status = "timed_out";
+            failure = { code: "TASK_DEADLINE", message: "The task time budget expired while the player was awaiting respawn." };
+          } else {
+            status = "failed";
+            failure = { code: "RESPAWN_TIMEOUT", message: "Player stayed dead for 30 seconds; no further actions were attempted." };
+          }
           break;
         }
         memory.observe(world.state, world.sequence);
@@ -807,6 +881,13 @@ export class MinecraftTaskRunner {
         }
 
         previousGoalKey = selected.targetKey;
+        if (after && !playerIsAlive(after.state)) {
+          // Death is a recoverable world event, not a reason to hit the generic consecutive-failure cutoff.
+          deathsObserved = Math.max(deathsObserved, 1, (after.state.player.deathCount ?? initialDeathCount + 1) - initialDeathCount);
+          consecutiveFailures = 0;
+          consecutiveNoProgress = 0;
+          movementHistory.length = 0;
+        }
 
         if (skillResult.action.status === "disconnected") {
           status = "disconnected";
@@ -923,6 +1004,8 @@ export class MinecraftTaskRunner {
           : 0,
       combatActions,
       hungerRecoveryActions,
+      deathsObserved,
+      respawnRecoveries,
     };
     if (learner) {
       try {

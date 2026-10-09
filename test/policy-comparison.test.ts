@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  baselinePolicyMetricsFromReport,
   comparePolicyAgainstBaseline,
   evaluatePolicyMetricSet,
 } from "../src/testing/eval/policy-comparison.js";
 import { evaluationScenarios } from "../src/testing/eval/scenarios.js";
+import { runEvaluationSuite } from "../src/testing/eval/harness.js";
 import { BASELINE_POLICY_WEIGHTS, derivePolicyWeights } from "../src/core/learning/policy-weights.js";
 import { contextKeyFor } from "../src/core/learning/skill-statistics.js";
 import { episodeFeaturesSchema } from "../src/core/learning/episode.js";
@@ -29,6 +31,21 @@ test("the policy comparison measures a weight set by running the real decision l
   for (const scenario of baseline.scenarios) {
     assert.ok(scenario.medianActions > 0 || scenario.successRate === 0, `${scenario.scenarioId} has no actions`);
   }
+});
+
+test("a candidate gate can reuse the exact baseline aggregates from the main evaluation report", async () => {
+  const report = await runEvaluationSuite(scenarios(), seeds, undefined, { learningScenarioIds: [] });
+  const baseline = baselinePolicyMetricsFromReport(report);
+  assert.equal(baseline.runs, report.totals.runs);
+  assert.equal(baseline.successRate, report.totals.successRate);
+  assert.equal(baseline.medianActions, report.totals.medianActions);
+  assert.deepEqual(
+    baseline.scenarios.map((scenario) => scenario.scenarioId),
+    report.scenarios.map((scenario) => scenario.scenarioId),
+  );
+  assert.equal(baseline.unsafeActions, 0);
+  assert.equal(baseline.deaths, 0);
+  assert.equal(baseline.unverifiedConfirmations, 0);
 });
 
 test("a candidate that re-scales every context alike is not an improvement", async () => {

@@ -60,6 +60,11 @@ export const minecraftTimeInfoSchema = z.object({
 
 export type MinecraftTimeInfo = z.infer<typeof minecraftTimeInfoSchema>;
 
+const minecraftChunkCoordinateSchema = z.object({
+  x: z.number().int(),
+  z: z.number().int(),
+});
+
 export const minecraftObservationSchema = z.object({
   player: z.object({
     username: z.string(),
@@ -79,6 +84,10 @@ export const minecraftObservationSchema = z.object({
      * agent still needs.
      */
     inventoryFull: z.boolean().optional(),
+    /** Mineflayer's life state. Optional for older adapters that cannot expose it. */
+    alive: z.boolean().optional(),
+    /** Death events observed by this adapter process; a counter survives an automatic respawn. */
+    deathCount: z.number().int().nonnegative().optional(),
   }),
   inventory: z.array(minecraftItemStackSchema),
   equipment: z.object({
@@ -115,6 +124,8 @@ export const minecraftObservationSchema = z.object({
     limit: z.number().int().positive(),
     center: blockPositionSchema,
     truncated: z.boolean(),
+    /** Exact chunk columns the client currently has loaded inside the scan radius. Missing means unknown. */
+    loadedChunks: z.array(minecraftChunkCoordinateSchema).optional(),
   }),
   /**
    * Mineable stone-class and ore blocks found by a second wide scan. Optional so older adapters and
@@ -129,6 +140,8 @@ export const minecraftObservationSchema = z.object({
       truncated: z.boolean(),
       /** True when the scanner could not distinguish the block state, e.g. an unloaded chunk. */
       approximate: z.boolean().optional(),
+      /** Exact loaded chunk columns when the adapter can enumerate them. */
+      loadedChunks: z.array(minecraftChunkCoordinateSchema).optional(),
     })
     .optional(),
   time: minecraftTimeInfoSchema.optional(),
@@ -141,8 +154,25 @@ export const minecraftObservationSchema = z.object({
     unknownCells: z.number().int().nonnegative(),
     truncated: z.boolean(),
   }),
+  /** Actual cost and yield of the last perception pass, measured by the adapter. */
+  perception: z.object({
+    totalMs: z.number().finite().nonnegative(),
+    localScanMs: z.number().finite().nonnegative(),
+    strategicScanMs: z.number().finite().nonnegative(),
+    entityScanMs: z.number().finite().nonnegative(),
+    validationMs: z.number().finite().nonnegative(),
+    sampledCells: z.number().int().nonnegative(),
+    unknownCells: z.number().int().nonnegative(),
+    localBlocksFound: z.number().int().nonnegative(),
+    localBlocksReturned: z.number().int().nonnegative(),
+    entitiesReturned: z.number().int().nonnegative(),
+    resourceSightings: z.number().int().nonnegative(),
+    minableSightings: z.number().int().nonnegative(),
+    loadedChunks: z.number().int().nonnegative().nullable(),
+  }).optional(),
 });
 
 export type MinecraftObservation = z.infer<typeof minecraftObservationSchema>;
 export type MinecraftVector = z.infer<typeof vectorSchema>;
 export type MinecraftBlockPosition = z.infer<typeof blockPositionSchema>;
+export type MinecraftChunkCoordinate = z.infer<typeof minecraftChunkCoordinateSchema>;

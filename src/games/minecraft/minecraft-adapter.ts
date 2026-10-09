@@ -111,6 +111,8 @@ export interface MinecraftAdapterConfig {
   readonly navigationStuckTimeoutMs: number;
   readonly resourceScanRadius: number;
   readonly resourceScanLimit: number;
+  /** Allow Mineflayer's health plugin to request a vanilla respawn after death. */
+  readonly autoRespawn: boolean;
 }
 
 export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
@@ -122,9 +124,9 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   connectTimeoutMs: 15_000,
   shutdownTimeoutMs: 2_000,
   viewDistance: "short",
-  observationRadius: 3,
-  maxObservedBlocks: 64,
-  entityRadius: 16,
+  observationRadius: 5,
+  maxObservedBlocks: 256,
+  entityRadius: 24,
   maxNavigationDistance: 48,
   maxResourceGatherDistance: 24,
   maxCraftingTableDistance: 4.5,
@@ -133,8 +135,9 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   dropSettleMs: 2_000,
   digTimeoutSlackMs: 5_000,
   navigationStuckTimeoutMs: 10_000,
-  resourceScanRadius: 24,
-  resourceScanLimit: 64,
+  resourceScanRadius: 32,
+  resourceScanLimit: 192,
+  autoRespawn: true,
 };
 
 export type MinecraftBotFactory = (options: BotOptions) => Bot;
@@ -378,6 +381,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private pendingSessionId: string | null = null;
   private bot: Bot | null = null;
   private sequence = 0;
+  private deathCount = 0;
   private activeActionId: string | null = null;
   private activeCapability: string | null = null;
   private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
@@ -417,11 +421,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (!Number.isFinite(config.entityRadius) || config.entityRadius <= 0) {
       throw new Error("Minecraft entity observation radius must be positive.");
     }
-    if (!Number.isInteger(config.observationRadius) || config.observationRadius < 1) {
-      throw new Error("Minecraft observation radius must be a positive integer.");
+    if (!Number.isInteger(config.observationRadius) || config.observationRadius < 1 || config.observationRadius > 16) {
+      throw new Error("Minecraft observation radius must be an integer from 1 through 16.");
     }
-    if (!Number.isInteger(config.maxObservedBlocks) || config.maxObservedBlocks < 1) {
-      throw new Error("Maximum observed block count must be a positive integer.");
+    if (!Number.isInteger(config.maxObservedBlocks) || config.maxObservedBlocks < 1 || config.maxObservedBlocks > 4_096) {
+      throw new Error("Maximum observed block count must be an integer from 1 through 4096.");
     }
     if (!Number.isFinite(config.maxNavigationDistance) || config.maxNavigationDistance < 1) {
       throw new Error("Maximum navigation distance must be at least one block.");
@@ -447,8 +451,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (typeof config.allowCombat !== "boolean") {
       throw new Error("allowCombat must be a boolean.");
     }
-    if (!Number.isInteger(config.resourceScanLimit) || config.resourceScanLimit < 1 || config.resourceScanLimit > 256) {
-      throw new Error("Resource scan limit must be an integer from 1 through 256.");
+    if (!Number.isInteger(config.resourceScanLimit) || config.resourceScanLimit < 1 || config.resourceScanLimit > 512) {
+      throw new Error("Resource scan limit must be an integer from 1 through 512.");
+    }
+    if (typeof config.autoRespawn !== "boolean") {
+      throw new Error("autoRespawn must be a boolean.");
     }
   }
 
@@ -491,6 +498,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         viewDistance: this.config.viewDistance,
         hideErrors: true,
         logErrors: false,
+        respawn: this.config.autoRespawn,
       });
       this.bot = bot;
       this.installPlugins(bot);
@@ -517,7 +525,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       };
 
       const onSpawn = (): void => {
-        if (settled || this.bot !== bot) return;
+        if (this.bot !== bot) return;
+        if (settled) {
+          // Mineflayer emits spawn again after a death/respawn. Pathfinder movement state is
+          // re-applied because plugins may reset their world context on respawn.
+          if (this.statusValue === "connected" && this.sessionValue?.id === sessionId) {
+            try {
+              this.configureSafeMovements(bot);
+              this.logger.info({ sessionId, deathCount: this.deathCount }, "Minecraft player spawned; safe movement policy reapplied");
+            } catch (error) {
+              this.logger.error({ err: error, sessionId }, "Could not reapply safe movement after respawn");
+            }
+          }
+          return;
+        }
         try {
           this.configureSafeMovements(bot);
         } catch (error) {
@@ -572,6 +593,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       };
 
       bot.on("spawn", onSpawn);
+      bot.on("death", () => {
+        this.deathCount += 1;
+        this.logger.warn({ sessionId, deathCount: this.deathCount }, this.config.autoRespawn
+          ? "Minecraft player died; Mineflayer automatic respawn is enabled"
+          : "Minecraft player died; automatic respawn is disabled");
+      });
       bot.on("error", onError);
       bot.on("kicked", onKicked);
       bot.on("end", onEnd);
@@ -591,10 +618,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const session = this.sessionValue;
     if (!session) throw new MinecraftAdapterError("No active session.", "NO_ACTIVE_SESSION");
 
+    const observationStartedAt = performance.now();
     const position = bot.entity.position;
     const center = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
     const radius = this.config.observationRadius;
     const verticalRadius = 2;
+    const localScanStartedAt = performance.now();
     const cube: MinecraftObservation["nearbyBlocks"][number][] = [];
     let sampledCells = 0;
     let unknownCells = 0;
@@ -633,11 +662,15 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       })
       .slice(0, this.config.maxObservedBlocks)
       .map(({ block }) => block);
+    const localScanMs = performance.now() - localScanStartedAt;
 
+    const strategicScanStartedAt = performance.now();
     const resourceSightings = this.scanResourceSightings(bot, position);
     const minableSightings = this.scanMineableSightings(bot, position);
     const itemDrops = this.scanItemDrops(bot, position);
+    const strategicScanMs = performance.now() - strategicScanStartedAt;
 
+    const entityScanStartedAt = performance.now();
     const playerEntityId = bot.entity.id;
     const entities = Object.values(bot.entities)
       .filter((entity) => entity.id !== playerEntityId)
@@ -653,12 +686,14 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         distance,
         health: finiteOrNull(entity.health),
       }));
+    const entityScanMs = performance.now() - entityScanStartedAt;
 
     const equipmentSlot = (destination: EquipmentDestination) => {
       const slot = bot.getEquipmentDestSlot(destination);
       return bot.inventory.slots[slot] ?? null;
     };
-    const state = minecraftObservationSchema.parse({
+    const validationStartedAt = performance.now();
+    const parsedState = minecraftObservationSchema.parse({
       player: {
         username: bot.username,
         position: { x: position.x, y: position.y, z: position.z },
@@ -673,6 +708,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         onGround: bot.entity.onGround,
         // `items()` covers the 27 main-inventory slots; a full one cannot accept a new stack name.
         inventoryFull: bot.inventory.items().length >= 27,
+        alive: (bot as Bot & { isAlive?: boolean }).isAlive ?? (finiteOrNull(bot.health) ?? 0) > 0,
+        deathCount: this.deathCount,
       },
       inventory: bot.inventory.items().map((item) => ({
         slot: item.slot,
@@ -698,6 +735,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         limit: this.config.resourceScanLimit,
         center,
         truncated: resourceSightings.truncated,
+        ...(resourceSightings.loadedChunks !== undefined ? { loadedChunks: resourceSightings.loadedChunks } : {}),
       },
       itemDrops,
       sampledRegion: {
@@ -715,8 +753,33 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         limit: this.config.resourceScanLimit,
         center,
         truncated: minableSightings.truncated,
+        ...(minableSightings.loadedChunks !== undefined ? { loadedChunks: minableSightings.loadedChunks } : {}),
+      },
+      perception: {
+        totalMs: 0,
+        localScanMs,
+        strategicScanMs,
+        entityScanMs,
+        validationMs: 0,
+        sampledCells,
+        unknownCells,
+        localBlocksFound: cube.length,
+        localBlocksReturned: nearbyBlocks.length,
+        entitiesReturned: entities.length,
+        resourceSightings: resourceSightings.blocks.length,
+        minableSightings: minableSightings.blocks.length,
+        loadedChunks: resourceSightings.loadedChunks?.length ?? null,
       },
     });
+
+    const validationMs = performance.now() - validationStartedAt;
+    const totalMs = performance.now() - observationStartedAt;
+    const state = parsedState.perception
+      ? {
+          ...parsedState,
+          perception: { ...parsedState.perception, validationMs, totalMs },
+        }
+      : parsedState;
 
     return {
       schemaVersion: 1,
@@ -733,7 +796,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private scanResourceSightings(
     bot: Bot,
     position: BotPosition,
-  ): { blocks: MinecraftObservation["resourceSightings"]; truncated: boolean } {
+  ): { blocks: MinecraftObservation["resourceSightings"]; truncated: boolean; loadedChunks?: { x: number; z: number }[] } {
     return this.scanBlocks(bot, position, isResourceBlockName, true);
   }
 
@@ -741,8 +804,29 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private scanMineableSightings(
     bot: Bot,
     position: BotPosition,
-  ): { blocks: MinecraftObservation["minableSightings"]; truncated: boolean } {
+  ): { blocks: NonNullable<MinecraftObservation["minableSightings"]>; truncated: boolean; loadedChunks?: { x: number; z: number }[] } {
     return this.scanBlocks(bot, position, isMineableBlockName, false);
+  }
+
+  private loadedChunksWithinScanRadius(bot: Bot, position: BotPosition): { x: number; z: number }[] | undefined {
+    const world = bot.world as unknown as {
+      // prismarine-world's current implementation returns decimal strings despite its numeric types.
+      getColumns?: () => readonly { readonly chunkX: number | string; readonly chunkZ: number | string }[];
+    } | undefined;
+    if (!world || typeof world.getColumns !== "function") return undefined;
+    const radius = this.config.resourceScanRadius;
+    const chunks: { x: number; z: number }[] = [];
+    for (const column of world.getColumns()) {
+      const chunkX = Number(column.chunkX);
+      const chunkZ = Number(column.chunkZ);
+      if (!Number.isInteger(chunkX) || !Number.isInteger(chunkZ)) continue;
+      const minX = chunkX * 16;
+      const minZ = chunkZ * 16;
+      const nearestX = Math.max(minX, Math.min(position.x, minX + 16));
+      const nearestZ = Math.max(minZ, Math.min(position.z, minZ + 16));
+      if (Math.hypot(nearestX - position.x, nearestZ - position.z) <= radius) chunks.push({ x: chunkX, z: chunkZ });
+    }
+    return chunks;
   }
 
   private scanBlocks(
@@ -750,8 +834,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     position: BotPosition,
     matches: (name: string) => boolean,
     withProperties: boolean,
-  ): { blocks: NonNullable<MinecraftObservation["minableSightings"]>; truncated: boolean } {
-    if (typeof bot.findBlocks !== "function") return { blocks: [], truncated: false };
+  ): { blocks: NonNullable<MinecraftObservation["minableSightings"]>; truncated: boolean; loadedChunks?: { x: number; z: number }[] } {
+    const loadedChunks = this.loadedChunksWithinScanRadius(bot, position);
+    if (typeof bot.findBlocks !== "function") {
+      return { blocks: [], truncated: false, ...(loadedChunks !== undefined ? { loadedChunks } : {}) };
+    }
     const limit = this.config.resourceScanLimit;
     const found = bot.findBlocks({
       point: position,
@@ -762,7 +849,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const blocks: MinecraftObservation["resourceSightings"] = [];
     for (const blockPosition of found) {
       const block = bot.blockAt(blockPosition);
-      if (!block || !isResourceBlockName(block.name)) continue;
+      // This shared scanner must recheck the requested class. A hard-coded resource check used to
+      // silently discard every wide-range stone and ore result.
+      if (!block || !matches(block.name)) continue;
       const sighting: MinecraftObservation["resourceSightings"][number] = {
         name: block.name,
         position: {
@@ -780,7 +869,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       }
       blocks.push(sighting);
     }
-    return { blocks, truncated: found.length >= limit };
+    return {
+      blocks,
+      truncated: found.length >= limit,
+      ...(loadedChunks !== undefined ? { loadedChunks } : {}),
+    };
   }
 
   /** Dropped items are read from the entity metadata; nothing is inferred from names alone. */
@@ -2179,17 +2272,89 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   }
 }
 
+function numericEnvironmentSetting(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  fallback: number,
+  min: number,
+  max: number,
+  integer = false,
+): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
+    throw new Error(`${name} must be ${integer ? "an integer" : "a number"} from ${min} through ${max}.`);
+  }
+  return value;
+}
+
 export function minecraftAdapterConfigFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): MinecraftAdapterConfig {
-  const port = Number(env.MINECRAFT_PORT ?? DEFAULT_MINECRAFT_CONFIG.port);
-  const connectTimeoutMs = Number(
-    env.MINECRAFT_CONNECT_TIMEOUT_MS ?? DEFAULT_MINECRAFT_CONFIG.connectTimeoutMs,
+  const port = numericEnvironmentSetting(env, "MINECRAFT_PORT", DEFAULT_MINECRAFT_CONFIG.port, 1, 65_535, true);
+  const connectTimeoutMs = numericEnvironmentSetting(
+    env,
+    "MINECRAFT_CONNECT_TIMEOUT_MS",
+    DEFAULT_MINECRAFT_CONFIG.connectTimeoutMs,
+    1,
+    120_000,
+    true,
   );
+  const observationRadius = numericEnvironmentSetting(
+    env,
+    "MINECRAFT_OBSERVATION_RADIUS",
+    DEFAULT_MINECRAFT_CONFIG.observationRadius,
+    1,
+    16,
+    true,
+  );
+  const maxObservedBlocks = numericEnvironmentSetting(
+    env,
+    "MINECRAFT_MAX_OBSERVED_BLOCKS",
+    DEFAULT_MINECRAFT_CONFIG.maxObservedBlocks,
+    1,
+    4_096,
+    true,
+  );
+  const entityRadius = numericEnvironmentSetting(
+    env,
+    "MINECRAFT_ENTITY_RADIUS",
+    DEFAULT_MINECRAFT_CONFIG.entityRadius,
+    1,
+    128,
+  );
+  const resourceScanRadius = numericEnvironmentSetting(
+    env,
+    "MINECRAFT_RESOURCE_SCAN_RADIUS",
+    DEFAULT_MINECRAFT_CONFIG.resourceScanRadius,
+    observationRadius,
+    128,
+  );
+  const resourceScanLimit = numericEnvironmentSetting(
+    env,
+    "MINECRAFT_RESOURCE_SCAN_LIMIT",
+    DEFAULT_MINECRAFT_CONFIG.resourceScanLimit,
+    1,
+    512,
+    true,
+  );
+  const viewDistanceValue = env.MINECRAFT_VIEW_DISTANCE ?? DEFAULT_MINECRAFT_CONFIG.viewDistance;
+  if (!("tiny short normal far".split(" ") as string[]).includes(viewDistanceValue)) {
+    throw new Error("MINECRAFT_VIEW_DISTANCE must be one of: tiny, short, normal, far.");
+  }
   const authValue = env.MINECRAFT_AUTH ?? DEFAULT_MINECRAFT_CONFIG.auth;
   if (authValue !== "offline" && authValue !== "microsoft") {
     throw new Error("MINECRAFT_AUTH must be either 'offline' or 'microsoft'.");
   }
+  const respawnValue = env.MINECRAFT_AUTO_RESPAWN;
+  const autoRespawn = respawnValue === undefined
+    ? DEFAULT_MINECRAFT_CONFIG.autoRespawn
+    : respawnValue.toLowerCase() === "true"
+      ? true
+      : respawnValue.toLowerCase() === "false"
+        ? false
+        : (() => { throw new Error("MINECRAFT_AUTO_RESPAWN must be 'true' or 'false'."); })();
 
   return {
     ...DEFAULT_MINECRAFT_CONFIG,
@@ -2199,5 +2364,12 @@ export function minecraftAdapterConfigFromEnv(
     version: env.MINECRAFT_VERSION ?? DEFAULT_MINECRAFT_CONFIG.version,
     auth: authValue,
     connectTimeoutMs,
+    viewDistance: viewDistanceValue as MinecraftAdapterConfig["viewDistance"],
+    observationRadius,
+    maxObservedBlocks,
+    entityRadius,
+    resourceScanRadius,
+    resourceScanLimit,
+    autoRespawn,
   };
 }

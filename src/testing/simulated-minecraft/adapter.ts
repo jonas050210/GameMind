@@ -70,7 +70,8 @@ import {
 const PLAYER_DROP_PICKUP_DELAY_MS = 1_000;
 
 
-const MAX_OBSERVED_BLOCKS = 64;
+const MAX_OBSERVED_BLOCKS = 256;
+const MAX_RESOURCE_SCAN_BLOCKS = 192;
 const MAX_NAVIGATION_DISTANCE = 48;
 const MAX_RESOURCE_GATHER_DISTANCE = 24;
 const MAX_CRAFTING_TABLE_DISTANCE = 4.5;
@@ -91,6 +92,9 @@ export interface SimulatedAdapterOptions {
   readonly omitCapabilities?: readonly string[];
   /** Mirrors the live adapter's operator switch: attacks are refused unless this is true. */
   readonly allowCombat?: boolean;
+  /** Perception budget overrides for scan-cap regression tests. */
+  readonly maxObservedBlocks?: number;
+  readonly resourceScanLimit?: number;
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -117,6 +121,8 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
   private sessionValue: GameSession | null = null;
   private sequence = 0;
   private connectionCount = 0;
+  private readonly maxObservedBlocks: number;
+  private readonly resourceScanLimit: number;
   private yaw = 0;
   private pitch = 0;
   private readonly equipment: Record<string, { name: string; type: number; count: number; slot: number } | null> = {
@@ -132,6 +138,8 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
 
   constructor(private readonly options: SimulatedAdapterOptions) {
     this.combatEnabled = options.allowCombat ?? false;
+    this.maxObservedBlocks = options.maxObservedBlocks ?? MAX_OBSERVED_BLOCKS;
+    this.resourceScanLimit = options.resourceScanLimit ?? MAX_RESOURCE_SCAN_BLOCKS;
     const omitted = new Set(options.omitCapabilities ?? []);
     this.capabilities = minecraftCapabilities.filter((capability) => !omitted.has(capability.name));
     this.world = new SimulatedMinecraftWorld(options.definition);
@@ -276,10 +284,10 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         const interest = blockObservationPriority(right.block.name) - blockObservationPriority(left.block.name);
         return interest || left.distance - right.distance;
       })
-      .slice(0, MAX_OBSERVED_BLOCKS)
+      .slice(0, this.maxObservedBlocks)
       .map(({ block }) => block);
-    const resources = world.resourceSightings(MAX_OBSERVED_BLOCKS);
-    const mineable = world.minableSightings(MAX_OBSERVED_BLOCKS);
+    const resources = world.resourceSightings(this.resourceScanLimit);
+    const mineable = world.minableSightings(this.resourceScanLimit);
     const equipmentSnapshot = (key: string) => {
       const stack = this.equipment[key];
       return stack
@@ -314,16 +322,18 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
       resourceSightings: resources.blocks,
       resourceScan: {
         radius: 24,
-        limit: MAX_OBSERVED_BLOCKS,
+        limit: this.resourceScanLimit,
         center,
         truncated: resources.truncated,
+        loadedChunks: world.loadedChunksWithinRadius(center.x, center.z, 24),
       },
       minableSightings: mineable.blocks,
       minableScan: {
         radius: 24,
-        limit: MAX_OBSERVED_BLOCKS,
+        limit: this.resourceScanLimit,
         center,
         truncated: mineable.truncated,
+        loadedChunks: world.loadedChunksWithinRadius(center.x, center.z, 24),
       },
       time: {
         dayTicks: world.dayTicks,
@@ -332,12 +342,12 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
       },
       itemDrops: world.itemDropList(),
       sampledRegion: {
-        radius: 3,
+        radius: 5,
         verticalRadius: 2,
         center,
         sampledCells: localCube.sampledCells,
         unknownCells: localCube.unknownCells,
-        truncated: localCube.blocks.length > MAX_OBSERVED_BLOCKS,
+        truncated: localCube.blocks.length > this.maxObservedBlocks,
       },
     });
     return state;

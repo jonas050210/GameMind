@@ -1,5 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { ExperienceLearner } from "./core/learning/learner.js";
+import {
+  baselinePolicyMetricsFromReport,
+  comparePolicyAgainstBaseline,
+} from "./testing/eval/policy-comparison.js";
 import {
   evaluationScenarios,
   learningEvaluationScenarioIds,
@@ -12,6 +17,7 @@ interface EvalOptions {
   readonly scenarioId: string | null;
   readonly out: string;
   readonly learning: boolean;
+  readonly learningDirectory: string;
 }
 
 function parseEvalArgs(args: readonly string[]): EvalOptions {
@@ -19,6 +25,7 @@ function parseEvalArgs(args: readonly string[]): EvalOptions {
   let scenarioId: string | null = null;
   let out = path.join("data", "eval", "offline-report.json");
   let learning = true;
+  let learningDirectory = process.env.GAMEMIND_LEARNING_DIR ?? path.join("data", "learning");
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     const next = args[index + 1];
@@ -40,13 +47,16 @@ function parseEvalArgs(args: readonly string[]): EvalOptions {
       case "--out":
         out = value();
         break;
+      case "--learning-dir":
+        learningDirectory = value();
+        break;
       case "--no-learning":
         learning = false;
         break;
       case "--help":
       case "-h":
         console.log(
-    "Usage: npm run eval:offline -- [--seeds N] [--scenario ID] [--out PATH] [--no-learning]",
+    "Usage: npm run eval:offline -- [--seeds N] [--scenario ID] [--out PATH] [--learning-dir PATH] [--no-learning]",
   );
         process.exit(0);
         break;
@@ -54,7 +64,7 @@ function parseEvalArgs(args: readonly string[]): EvalOptions {
         throw new Error(`Unknown option '${arg}'.`);
     }
   }
-  return { seeds, scenarioId, out, learning };
+  return { seeds, scenarioId, out, learning, learningDirectory };
 }
 
 function formatTable(report: EvaluationReport): string {
@@ -84,10 +94,27 @@ async function main(): Promise<void> {
   if (scenarios.length === 0) throw new Error(`Unknown scenario '${options.scenarioId}'.`);
 
   const started = Date.now();
-  const report = await runEvaluationSuite(scenarios, evaluationSeeds(options.seeds), undefined, {
+  const seeds = evaluationSeeds(options.seeds);
+  const baselineReport = await runEvaluationSuite(scenarios, seeds, undefined, {
     learningScenarioIds: options.learning ? learningEvaluationScenarioIds() : [],
     learningRepetitions: 2,
   });
+  const learner = ExperienceLearner.forDirectory(path.resolve(options.learningDirectory));
+  await learner.load();
+  const candidateWeights = learner.candidateWeights;
+  const policyComparison = candidateWeights.source === "experience" && Object.keys(candidateWeights.entries).length > 0
+    ? {
+        ...(await comparePolicyAgainstBaseline(
+          scenarios,
+          seeds,
+          candidateWeights,
+          {},
+          baselinePolicyMetricsFromReport(baselineReport),
+        )),
+        candidatePolicyId: candidateWeights.id,
+      }
+    : null;
+  const report = { ...baselineReport, policyComparison };
   const elapsedMs = Date.now() - started;
 
   await mkdir(path.dirname(options.out), { recursive: true });
@@ -97,6 +124,12 @@ async function main(): Promise<void> {
     "GameMind offline evaluation — simulated worlds, control logic only. Not a live Minecraft server result.",
   );
   console.log(formatTable(report));
+  if (policyComparison) {
+    console.log(`\nLearned ranking policy ${candidateWeights.id}: ${policyComparison.decision.promote ? "eligible for promotion" : "promotion held"}.`);
+    for (const reason of policyComparison.decision.reasons) console.log(`  ${reason}`);
+  } else {
+    console.log(`\nNo weighted candidate found in ${path.resolve(options.learningDirectory)}; policy-ranking evaluation was not run.`);
+  }
   console.log(
     `\n${report.totals.runs} runs over ${report.seedCount} seeds per scenario in ${(elapsedMs / 1000).toFixed(1)} s; ` +
       `unsafe actions ${report.totals.unsafeActions}, unverified confirmations ${report.totals.unverifiedConfirmations}, deaths ${report.totals.deaths}.`,

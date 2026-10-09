@@ -132,6 +132,14 @@ test("repeated or older sequence numbers are ignored so retries cannot double co
   assert.equal(memory.observations, 1);
 });
 
+test("a truncated scan without loaded-chunk metadata does not mark coverage as explored", () => {
+  const memory = new WorldMemory();
+  memory.observe(observationAt(origin, {
+    resourceScan: { radius: 24, limit: 64, center: { x: 0, y: 64, z: 0 }, truncated: true },
+  }), 0);
+  assert.equal(memory.exploredCellCount, 0);
+});
+
 test("coverage marks cells whose centers lie inside the wide scan disk, not beyond it", () => {
   const explored = new Set<string>();
   markCoverage(explored, { x: 0, z: 0 }, 24);

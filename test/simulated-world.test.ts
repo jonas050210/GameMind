@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
-import { SimulatedMinecraftAdapter } from "../src/testing/simulated-minecraft/adapter.js";
+import { SimulatedMinecraftAdapter, type SimulatedAdapterOptions } from "../src/testing/simulated-minecraft/adapter.js";
 import {
   berryBushAt,
   dropAt,
@@ -12,8 +12,11 @@ import {
 } from "../src/testing/simulated-minecraft/scenarios.js";
 import { SimulatedMinecraftWorld } from "../src/testing/simulated-minecraft/world.js";
 
-async function connected(options: Parameters<typeof simulatedWorld>[0]) {
-  const adapter = new SimulatedMinecraftAdapter({ definition: simulatedWorld(options) });
+async function connected(
+  options: Parameters<typeof simulatedWorld>[0],
+  perception: Pick<SimulatedAdapterOptions, "maxObservedBlocks" | "resourceScanLimit"> = {},
+) {
+  const adapter = new SimulatedMinecraftAdapter({ definition: simulatedWorld(options), ...perception });
   await adapter.connect();
   return adapter;
 }
@@ -127,8 +130,8 @@ test("rest is interrupted by a hostile inside its danger radius", async () => {
   await adapter.disconnect("test");
 });
 
-test("the local cube keeps resource blocks even when the 64-block cap truncates terrain", async () => {
-  const adapter = await connected({ seed: 11, placements: [logAt(3, 3)] });
+test("the local cube keeps resource blocks even when a constrained block cap truncates terrain", async () => {
+  const adapter = await connected({ seed: 11, placements: [logAt(3, 3)] }, { maxObservedBlocks: 64 });
   const observation = await adapter.observe();
   assert.equal(observation.state.sampledRegion.truncated, true, "stone and grass exceed the cap");
   assert.ok(
@@ -141,7 +144,7 @@ test("the local cube keeps resource blocks even when the 64-block cap truncates 
 test("resource sightings cover the wide radius, report truncation, and omit far resources", async () => {
   const near = Array.from({ length: 70 }, (_, index) => logAt(10 + (index % 10), 10 + Math.floor(index / 10)));
   const far = logAt(40, 0);
-  const adapter = await connected({ seed: 12, placements: [...near, far] });
+  const adapter = await connected({ seed: 12, placements: [...near, far] }, { resourceScanLimit: 64 });
   const observation = await adapter.observe();
   assert.equal(observation.state.resourceScan.truncated, true);
   assert.equal(observation.state.resourceSightings.length, 64);

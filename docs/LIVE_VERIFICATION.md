@@ -20,7 +20,7 @@ view-distance=8
 simulation-distance=6
 ```
 
-`online-mode=false` is only for a local private test; never expose such a server publicly. `view-distance=8` keeps chunks loaded for the 24-block resource scan.
+`online-mode=false` is only for a local private test; never expose such a server publicly. `view-distance=8` should load enough nearby columns for the default 32-block client scan. The adapter can only inspect chunks the server/client actually loaded; unloaded terrain remains unknown.
 
 Join once as `GameMind` (through the agent or a client), then run these commands as an operator in the server console or chat, substituting your own coordinates:
 
@@ -29,7 +29,7 @@ Join once as `GameMind` (through the agent or a client), then run these commands
 /gamerule naturalRegeneration true
 /gamerule doMobSpawning false          # first pass; enable for the threat checks in §7
 /tp GameMind 0 80 0
-/setblock 24 80 0 minecraft:oak_log    # a log outside the 3-block cube, inside the 24-block scan
+/setblock 30 80 0 minecraft:oak_log    # a log outside the local cube, inside the default 32-block scan
 /setblock -10 80 6 minecraft:sweet_berry_bush[age=3]   # ripe berries
 /summon item 4 80 -4 {Item:{id:"minecraft:bread",Count:1b}}   # a dropped food item
 ```
@@ -42,13 +42,13 @@ Adjust `y` values to the ground level of your world (the grass surface is at y 6
 npm run dev -- --host 127.0.0.1 --port 25565 --username GameMind
 ```
 
-**Expected:** a JSON `initial-observation` with `observation.state` containing `resourceScan` (`radius: 24`, `center` at the agent's block, `truncated: false`), `resourceSightings` including the log at `24 80 0` (when the agent is at about 0,0) and the berry bush with `properties.age: 3`, and `itemDrops` listing `bread` near `4,-4`.
+**Expected:** a JSON `initial-observation` with `observation.state` containing `resourceScan` (`radius: 32`, `center` at the agent's block, `truncated: false`), `resourceSightings` including the log at `30 80 0` (when the agent is at about 0,0) and the berry bush with `properties.age: 3`, and `itemDrops` listing `bread` near `4,-4`. This tests perception only; the task's separate 24-block collection limit can require an approach before collection.
 
 **Record:** whether the log beyond the 3-block cube appears in `resourceSightings` (this tests `findBlocks` and chunk loading), whether the bush shows `properties.age`, and whether the bread appears in `itemDrops` (this tests `getDroppedItem`). Any of these being missing is a result to report, not a reason to change the thresholds.
 
 ## 3. Gather with exploration
 
-Remove the nearby test log, leaving only the one at 24 blocks. Then:
+Remove any nearby test log, leaving only the one at 30 blocks. Then:
 
 ```bash
 npm run dev -- --task gather-logs --resource oak_log --count 1 --explore-legs 8 --max-actions 24 \
@@ -61,7 +61,7 @@ npm run dev -- --task gather-logs --resource oak_log --count 1 --explore-legs 8 
 
 ## 4. Craft with exploration
 
-Give the agent no logs (clear its inventory with `/clear GameMind`) and keep the 24-block log:
+Give the agent no logs (clear its inventory with `/clear GameMind`) and keep the 30-block log:
 
 ```bash
 npm run dev -- --task craft-wooden-pickaxe --explore-legs 8 --max-actions 24 \
@@ -187,11 +187,21 @@ For shelter, place the agent somewhere open and check that `build-shelter` only 
 
 **Record:** the dig durations versus Mineflayer's own estimate (a systematic underestimate means the dig timeout slack needs raising), and whether the drop appeared within the settle window.
 
+## 14. Death and respawn recovery
+
+Use only a disposable world. With `MINECRAFT_AUTO_RESPAWN` unset (default `true`), begin a bounded task that takes long enough to remain active, then run `/kill GameMind` from the server console while the task is in progress. Repeat with `MINECRAFT_AUTO_RESPAWN=false` if you want to verify the disabled path; leave the player dead for the wait window, or manually respawn it if your test harness can send the vanilla respawn request.
+
+**Expected with auto-respawn enabled:** the Mineflayer health plugin sends its respawn request, the adapter observes the player alive again, and the task loop re-observes/replans. The trace contains `player.death`, `metrics.deathsObserved` is at least 1, and `metrics.respawnRecoveries` is at least 1 if the player becomes alive before the budget ends. No world-changing action may be issued while the observed player state is dead.
+
+**Expected with auto-respawn disabled:** the adapter does not request a respawn on death. Unless a respawn is sent externally, the runner waits without acting and stops with `RESPAWN_TIMEOUT` after 30 seconds or `TASK_DEADLINE` if the task budget expires first. Disconnect and operator stop should also terminate the wait explicitly.
+
+**Record:** the environment setting, death and respawn trace timestamps, terminal status/failure code, recovery metrics, and confirmation that no action began while dead. This check has not been executed against a live server; simulated death/recovery tests are not live evidence.
+
 ## Open questions this checklist answers
 
 | Question | Check | Current status |
 | --- | --- | --- |
-| Does `findBlocks` return logs 20–24 blocks away in loaded chunks? | §2 | Unverified |
+| Does `findBlocks` return a log 30 blocks away in loaded chunks under the default 32-block scan? | §2 | Unverified |
 | Does `getDroppedItem()` return `bread` for item entities in 1.20.4? | §2, §5 | Unverified |
 | Does `getProperties().age` report berry age on 1.20.4? | §2, §6 | Unverified |
 | Does `activateBlock` on a ripe bush give berries and reset age? | §6 | Unverified |
@@ -205,5 +215,6 @@ For shelter, place the agent somewhere open and check that `build-shelter` only 
 | Does `bot.attack` plus health tracking confirm damage on 1.20.4 mobs? | §12 | Unverified |
 | Does the Control Center see live observations, and do Pause/Trip/Stop reach the running agent? | §10 | Unverified |
 | Does the experience memory change a second live run in the same world? | §11 | Unverified |
+| Does Mineflayer auto-respawn by default, and does the task runner wait action-free until alive? | §14 | Unverified |
 
 Only mark a row verified when the check was run against a server and the evidence is recorded in your notes.
