@@ -73,7 +73,7 @@ npm run sim:demo           # food-remote-berries (seed 101)
 npm run sim:demo:explore   # explore-remote-log: a log outside the scan
 npm run sim:demo:stall     # recovery-single-hidden-obstacle: stall, sidestep, retry
 npm run task:demo:mine     # mine-stone-with-pickaxe in the simulated world
-npm run ui:demo            # simulated run + Control Center on http://127.0.0.1:8787, left open
+npm run ui:demo            # simulated run + Control Center on port 8787 (all interfaces), left open
 npm run ui:demo:offline    # offline fixture gather task + Control Center
 ```
 
@@ -141,7 +141,7 @@ npm run dev -- --task gather-logs --host 127.0.0.1 --control-center
 npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
 ```
 
-`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no external network access: HTML, CSS and JavaScript (including the dependency-free WebGL voxel renderer) are served from this package; there is no CDN or remote font. The observed-world camera can be orbited by dragging or with the arrow keys, zoomed by scrolling or `+`/`-`, and reset with `Home`. Updates use a single non-overlapping `GET /api/snapshot` polling loop (1 s while running, 3 s idle, 15 s in a hidden tab). The retired event-stream endpoint returns `410 STREAM_REMOVED`.
+`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The two offline demos (`ui:demo`, `ui:demo:offline`) pass `--control-host 0.0.0.0` because they drive only the simulator and need to be reachable through a sandbox preview; live runs keep the `127.0.0.1` default, since the dashboard serves the control token and accepts commands that move a real character. If the port is taken the run stops with a message naming `--control-port`. The page needs no external network access: HTML, CSS and JavaScript (including the dependency-free WebGL voxel renderer) are served from this package; there is no CDN or remote font. The observed-world camera can be orbited by dragging or with the arrow keys, zoomed by scrolling or `+`/`-`, and reset with `Home`. Updates use a single non-overlapping `GET /api/snapshot` polling loop (1 s while running, 3 s idle, 15 s in a hidden tab). The retired event-stream endpoint returns `410 STREAM_REMOVED`.
 
 Controls that exist because the runtime actually implements them:
 
@@ -283,4 +283,4 @@ When the Control Center is enabled, its companion chat accepts `#follow`, `#come
 - `data/traces/<session-id>.jsonl` stores ordered session, observation, decision (with plan, band, alternatives, rejections, memory knowledge and the safety verdict), skill, action, verification, and task events. Sensitive-looking fields are redacted and long strings truncated.
 - `data/learning/episodes.jsonl` plus `state.json` are the experience memory and promoted policy; `data/world-memory/<world-hash>.json` stores validated resource/minable sightings and explored coverage. These data directories are gitignored and may be deleted to reset memory.
 - Tests use offline fixtures, deterministic simulated worlds, and an injected Mineflayer double. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, or plugin behaviour in a live world.
-- `npm test` runs 178 tests, including loaded-chunk/truncation memory, persistent world snapshot validation/round-trips, death/respawn recovery and deadline bounds, adapter regressions, decision/safety contracts, offline evaluation gates, policy-promotion refusal cases, and the Control Center HTTP/runtime surface. The latest `npm audit --audit-level=low` check found 0 vulnerabilities.
+- `npm test` runs 252 tests, including loaded-chunk/truncation memory, persistent world snapshot validation/round-trips, death/respawn recovery and deadline bounds, adapter regressions, decision/safety contracts, offline evaluation gates, policy-promotion refusal cases, and the Control Center HTTP/runtime surface (startup errors, boot-data escaping, static containment), and line-of-sight results from Mineflayer (`null` from a missed ray is a measured "not visible"). The latest `npm audit --audit-level=low` check found 0 vulnerabilities.

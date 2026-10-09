@@ -191,13 +191,23 @@ function finiteOrNull(value: number | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** Mineflayer visibility can throw while a chunk is being replaced; that is unknown, not false. */
+/**
+ * Line-of-sight for an observed block, as a strict boolean or `undefined` when the test could not run.
+ *
+ * Mineflayer ends its ray test with `raycastHit && raycastHit.position.equals(block.position)`, so a ray
+ * that hits nothing yields `null` rather than `false`, and a ray stopped by another block yields `false`.
+ * Both are completed negative tests: the block was not reached. Only a thrown error (a chunk being
+ * replaced) leaves the answer unknown. Passing the raw `null` through made every out-of-reach sighting fail
+ * the observation schema as OBSERVATION_SCHEMA_INVALID, which stopped the whole run at connect time.
+ */
 function observedBlockVisibility(bot: Bot, block: Parameters<Bot["canSeeBlock"]>[0]): boolean | undefined {
+  let verdict: unknown;
   try {
-    return bot.canSeeBlock(block);
+    verdict = bot.canSeeBlock(block);
   } catch {
     return undefined;
   }
+  return verdict === true;
 }
 
 function angleDifference(left: number, right: number): number {
@@ -358,13 +368,18 @@ function dimensionGate(
  * that arrived, and the caller's diagnostics are logged alongside it.
  */
 function parseMinecraftObservation(candidate: unknown, diagnostics?: string): MinecraftObservation {
-  const parsed = minecraftObservationSchema.safeParse(candidate);
+  // `reportInput` keeps the offending value on each issue; without it the message could only say
+  // "an unusable value", which is how a `null` visibility was once invisible in the live log.
+  const parsed = minecraftObservationSchema.safeParse(candidate, { reportInput: true });
   if (parsed.success) return parsed.data;
   const issues = parsed.error.issues
     .slice(0, 8)
     .map((issue) => {
-      const received = "value" in issue ? JSON.stringify((issue as { value?: unknown }).value) ?? "undefined" : "an unusable value";
-      return `${issue.path.join(".") || "observation"}: expected ${issue.code}, received ${received}`;
+      const input = "input" in issue ? (issue as { input?: unknown }).input : undefined;
+      const serialized = input === undefined ? "undefined" : (JSON.stringify(input) ?? String(input));
+      const received = serialized.length > 80 ? `${serialized.slice(0, 77)}...` : serialized;
+      const expected = "expected" in issue ? String((issue as { expected?: unknown }).expected) : issue.code;
+      return `${issue.path.join(".") || "observation"}: expected ${expected}, received ${received}`;
     })
     .join("; ");
   throw new MinecraftAdapterError(
