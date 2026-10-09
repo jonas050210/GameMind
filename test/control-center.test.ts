@@ -164,6 +164,10 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.equal(before.world.sessionFacts?.gameMode.evidence, "verified");
     assert.equal(before.world.perception, null, "the simulator does not invent live adapter timing data");
     assert.ok(before.world.blocks.every((block) => Number.isFinite(block.x) && Number.isFinite(block.y) && Number.isFinite(block.z)));
+    assert.ok(before.world.blocks.every((block) => block.identifier === `minecraft:${block.name}`));
+    assert.ok(before.world.blocks.every((block) => block.distance === null || Number.isFinite(block.distance)));
+    assert.ok(before.world.blocks.every((block) => ["visible", "occluded", "unknown"].includes(block.visibility)));
+    assert.ok(before.world.blocks.every((block) => ["local", "strategic", "memory"].includes(block.observationKind)));
 
     const result = await fixture.runTask(taskFromControlCenterRequest({ kind: "gather-logs", count: 1 }));
     assert.equal(result.status, "succeeded", `the gather task should succeed in this world: ${JSON.stringify(result.failure)}`);

@@ -522,6 +522,9 @@ async function openRunHost(
   }
   const host = await attachMinecraftRunHost({
     runtime: parts.runtime,
+    skills: parts.skills,
+    companionMemoryDirectory: resolve(parts.options.memoryDirectory),
+    minecraftCommander: process.env.MINECRAFT_COMMANDER ?? null,
     safety: parts.safety,
     traceSink: parts.ring,
     logger: parts.logger,

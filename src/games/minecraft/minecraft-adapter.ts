@@ -191,6 +191,15 @@ function finiteOrNull(value: number | undefined): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** Mineflayer visibility can throw while a chunk is being replaced; that is unknown, not false. */
+function observedBlockVisibility(bot: Bot, block: Parameters<Bot["canSeeBlock"]>[0]): boolean | undefined {
+  try {
+    return bot.canSeeBlock(block);
+  } catch {
+    return undefined;
+  }
+}
+
 function angleDifference(left: number, right: number): number {
   let difference = (left - right) % (Math.PI * 2);
   if (difference > Math.PI) difference -= Math.PI * 2;
@@ -452,6 +461,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private activeActionId: string | null = null;
   private activeCapability: string | null = null;
   private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
+  private readonly companionChatListeners = new Set<(username: string, message: string) => void>();
   private readonly botFactory: MinecraftBotFactory;
   private readonly installPlugins: (bot: Bot) => void;
   private readonly configureSafeMovements: (bot: Bot) => void;
@@ -664,6 +674,10 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       };
 
       bot.on("spawn", onSpawn);
+      bot.on("chat", (username: string, message: string) => {
+        if (username === bot.username) return;
+        for (const listener of this.companionChatListeners) listener(username, message);
+      });
       bot.on("death", () => {
         this.deathCount += 1;
         this.logger.warn({ sessionId, deathCount: this.deathCount }, this.config.autoRespawn
@@ -709,6 +723,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
             continue;
           }
           if (block.name.endsWith("_air") || block.name === "air") continue;
+          const visible = observedBlockVisibility(bot, block);
           cube.push({
             position: {
               x: Math.floor(block.position.x),
@@ -718,6 +733,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
             name: block.name,
             type: block.type,
             boundingBox: block.boundingBox,
+            distance: block.position.distanceTo(position),
+            ...(visible === undefined ? {} : { visible }),
           });
         }
       }
@@ -751,7 +768,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       .slice(0, 64)
       .map(({ entity, distance }) => ({
         id: String(entity.id),
-        name: entity.name ?? entity.displayName ?? entity.username ?? entity.type,
+        name: entity.type === "player"
+          ? (entity.username ?? entity.displayName ?? entity.name ?? entity.type)
+          : (entity.name ?? entity.displayName ?? entity.username ?? entity.type),
         type: entity.type,
         position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
         distance,
@@ -944,6 +963,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       // This shared scanner must recheck the requested class. A hard-coded resource check used to
       // silently discard every wide-range stone and ore result.
       if (!block || !matches(block.name)) continue;
+      const visible = observedBlockVisibility(bot, block);
       const sighting: MinecraftObservation["resourceSightings"][number] = {
         name: block.name,
         position: {
@@ -952,6 +972,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           z: Math.floor(block.position.z),
         },
         distance: block.position.distanceTo(position),
+        ...(visible === undefined ? {} : { visible }),
       };
       if (withProperties) {
         const properties = blockProperties(block);
@@ -1309,18 +1330,25 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       signal,
       MINECRAFT_COLLECT_BLOCK_CAPABILITY,
     );
-    const inventoryAfter = inventoryCount(bot, itemName);
+    // collect-block may resolve just before the server's inventory packet arrives. Wait briefly, then
+    // require both independent postconditions: the exact target changed and the requested item entered
+    // inventory. A merely issued dig or a nearby pickup can no longer be reported as a gathered log.
     const remainingBlock = this.blockAtCoordinates(bot, parsed.data.x, parsed.data.y, parsed.data.z);
     const blockRemoved = !remainingBlock || remainingBlock.name !== itemName;
-    const confirmed = inventoryAfter > inventoryBefore;
+    const inventoryAfter = blockRemoved
+      ? await this.waitForInventoryGain(bot, itemName, inventoryBefore, 1_500, signal)
+      : inventoryCount(bot, itemName);
+    const inventoryGained = inventoryAfter > inventoryBefore;
+    const confirmed = blockRemoved && inventoryGained;
     return {
       confirmed,
-      confirmation: "collectblock_completed_and_inventory_delta_checked",
+      confirmation: "target_block_removed_and_inventory_delta_checked",
       details: {
         itemName,
         coordinates: { x: parsed.data.x, y: parsed.data.y, z: parsed.data.z },
         inventoryBefore,
         inventoryAfter,
+        inventoryGained,
         blockRemoved,
       },
     };
@@ -2241,6 +2269,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   setCombatAllowed(allowed: boolean): void {
     this.combatAllowedValue = allowed;
     this.logger.info({ combatAllowed: allowed }, allowed ? "Combat armed by operator" : "Combat disarmed by operator");
+  }
+
+  /** Subscribes to player chat. Authorization is intentionally enforced by the run host, not the adapter. */
+  onCompanionChat(listener: (username: string, message: string) => void): () => void {
+    this.companionChatListeners.add(listener);
+    return () => this.companionChatListeners.delete(listener);
+  }
+
+  sendCompanionChat(message: string, recipient: string | null): void {
+    const bot = this.bot;
+    if (!bot || this.statusValue !== "connected") return;
+    const safe = message.replace(/[\r\n]+/g, " ").slice(0, 240);
+    if (recipient) bot.whisper(recipient, safe);
+    else bot.chat(safe);
   }
 
   private blockAtCoordinates(bot: Bot, x: number, y: number, z: number) {

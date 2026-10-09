@@ -14,7 +14,7 @@ import { DEFAULT_GATHER_LOG_TASK, type MinecraftTask } from "../src/games/minecr
 import { MinecraftTaskRunner } from "../src/games/minecraft/task-runner.js";
 import { evaluationScenarios } from "../src/testing/eval/scenarios.js";
 import { SimulatedMinecraftAdapter } from "../src/testing/simulated-minecraft/adapter.js";
-import { simulatedWorld } from "../src/testing/simulated-minecraft/scenarios.js";
+import { logAt, simulatedWorld } from "../src/testing/simulated-minecraft/scenarios.js";
 
 /** Alternates between two navigation targets forever unless the runner requests recovery. */
 class OscillatingModel extends MinecraftTaskDecisionModel {
@@ -89,6 +89,32 @@ test("a single unobservable obstacle stalls the route; the agent sidesteps, retr
   assert.ok(result.metrics.successfulRecoveries >= 1);
   assert.equal(result.actions[0]?.failureCode, "NAVIGATION_STUCK");
   await runtime.shutdown("hidden obstacle test complete");
+});
+
+test("failed route recovery does not end the run before an alternative tree can be tried", async () => {
+  const logger = pino({ level: "silent" });
+  const blockedTree = { x: 8, z: 0 };
+  const ring = [-1, 0, 1]
+    .flatMap((dx) => [-1, 0, 1].map((dz) => ({ x: blockedTree.x + dx, z: blockedTree.z + dz })))
+    .filter((cell) => cell.x !== blockedTree.x || cell.z !== blockedTree.z);
+  const adapter = new SimulatedMinecraftAdapter({
+    definition: simulatedWorld({
+      seed: 404,
+      placements: [logAt(blockedTree.x, blockedTree.z), logAt(0, 16)],
+      stallCells: ring,
+    }),
+  });
+  const { runtime, skills } = createMinecraftAgent(adapter, new TraceRecorder(new MemoryTraceSink(), logger), logger);
+  const runner = new MinecraftTaskRunner(runtime, skills, new MinecraftTaskDecisionModel(), logger, {
+    clock: () => adapter.simulatedNowMs,
+  });
+  const result = await runner.run({ ...DEFAULT_GATHER_LOG_TASK, maxActions: 18, maxConsecutiveFailures: 2, maxExplorationLegs: 0 });
+
+  assert.equal(result.status, "succeeded", result.failure?.message);
+  assert.ok(result.metrics.stuckActions >= 1);
+  assert.ok(result.actions.some((action) => action.failureCode === "NAVIGATION_STUCK"));
+  assert.ok(result.actions.some((action) => action.goalId === "collect:oak_log" && action.status === "succeeded"));
+  await runtime.shutdown("alternative target recovery complete");
 });
 
 test("a route with no way around ends in a bounded, explicit stop rather than a loop", async () => {

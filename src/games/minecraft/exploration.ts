@@ -15,6 +15,10 @@ export interface ExplorationRequest {
   /** Waypoints this close to a recently seen hostile are rejected. */
   readonly hostileAvoidRadius: number;
   readonly excludedKeys: ReadonlySet<string>;
+  /** Current-observation terrain gate. Remembered free space must never make a waypoint look safe. */
+  readonly destinationUnsafe?: (x: number, z: number) => boolean;
+  /** Current direct-corridor risk used only for ranking; pathfinder remains the route authority. */
+  readonly routeRisk?: (x: number, z: number) => number;
 }
 
 export interface ExplorationWaypoint {
@@ -47,6 +51,7 @@ function scoreWaypoints(memory: WorldMemory, request: ExplorationRequest, minLeg
       const distance = Math.hypot(center.x - request.from.x, center.z - request.from.z);
       if (distance < minLeg || distance > request.maxLeg) continue;
       if (Math.hypot(center.x - request.origin.x, center.z - request.origin.z) > request.maxRadius) continue;
+      if (request.destinationUnsafe?.(center.x, center.z)) continue;
       const nearHostile = hostiles.some(
         (hostile) => Math.hypot(center.x - hostile.position.x, center.z - hostile.position.z) <= request.hostileAvoidRadius,
       );
@@ -59,8 +64,10 @@ function scoreWaypoints(memory: WorldMemory, request: ExplorationRequest, minLeg
           if (!memory.isCellExplored(cellX + deltaX, cellZ + deltaZ)) novelty += 1;
         }
       }
-      // Novelty dominates; distance is a tie-breaker so that legs stay short when the frontier is wide.
-      const score = novelty * 2 - distance / 8;
+      // Novelty dominates; current observed hazards/obstacles then distance break ties. Unknown terrain
+      // remains eligible because exploration would be impossible if unknown were treated as blocked.
+      const routeRisk = request.routeRisk?.(center.x, center.z) ?? 0;
+      const score = novelty * 2 - distance / 8 - routeRisk;
       const candidate: ExplorationWaypoint = {
         key,
         x: Math.round(center.x),

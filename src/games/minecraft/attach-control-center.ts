@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import { resolve } from "node:path";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
+import type { SkillRuntime } from "../../core/skill-runtime.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
 import type { RingBufferTraceSink } from "../../core/trace.js";
 import type { SafetyBroker } from "../../core/safety-broker.js";
@@ -26,6 +27,9 @@ import { minecraftLogNames, minecraftCraftTaskItemNames } from "./capabilities.j
 import { minecraftMineableBlockNames } from "./mining.js";
 import type { MinecraftTaskResult, MinecraftTaskRunnerOptions } from "./task-runner.js";
 import { createControlCenterSource, type RunControl } from "./run-control.js";
+import { CompanionMemory } from "./companion-memory.js";
+import { CompanionController } from "./companion-controller.js";
+import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
 
 /** Task kinds the Control Center may start. Each maps onto one validated task schema. */
 export const controlCenterTaskKinds = ["gather-logs", "mine-stone", "craft-wooden-pickaxe", "secure-food", "build-shelter"] as const;
@@ -96,6 +100,11 @@ export function taskFromControlCenterRequest(request: {
 
 export interface MinecraftRunHostOptions {
   readonly runtime: GameMindRuntime<MinecraftObservation>;
+  /** When supplied, enables the persistent companion/chat coordinator over the same gated skills. */
+  readonly skills?: SkillRuntime;
+  readonly companionMemoryDirectory?: string | null;
+  /** Exact Minecraft username allowed to issue companion commands. Chat is ignored when unset. */
+  readonly minecraftCommander?: string | null;
   readonly logger: Logger;
   readonly safety: SafetyBroker | null;
   readonly traceSink: RingBufferTraceSink;
@@ -126,6 +135,7 @@ export interface MinecraftRunHostOptions {
 export interface MinecraftRunHost {
   readonly control: RunControl;
   readonly memory: WorldMemory;
+  readonly companion: CompanionController | null;
   /** Options the caller must spread into its own runner so live state, budgets and cancellation are shared. */
   readonly runnerOptions: MinecraftTaskRunnerOptions;
   readonly handle: ControlCenterHandle | null;
@@ -159,7 +169,41 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   const worldSource = options.worldSource ?? (options.offlineNote ? "simulated" : "live");
   const sessionAdapter = options.runtime.adapter as unknown as {
     readonly sessionChange?: { readonly at: string; readonly kind: string; readonly detail: string } | null;
+    readonly combatAllowed?: boolean;
+    setCombatAllowed?(allowed: boolean): void;
+    onCompanionChat?(listener: (username: string, message: string) => void): () => void;
+    sendCompanionChat?(message: string, recipient: string | null): void;
   };
+  const companionMemory = options.skills
+    ? await CompanionMemory.open(options.companionMemoryDirectory ?? null, options.worldKey ?? "unscoped-world")
+    : null;
+  const companion = options.skills && companionMemory
+    ? new CompanionController({
+        runtime: options.runtime,
+        skills: options.skills,
+        memory,
+        companionMemory,
+        logger: options.logger,
+        runTask: (task) => execute(task, "control-center"),
+        taskRunning: () => control.task !== null,
+        requestTaskStop: (reason) => { if (control.task) control.stopRequested = reason; },
+        setCombatAllowed: (enabled) => {
+          if (typeof sessionAdapter.setCombatAllowed !== "function") return { ok: false, message: "This adapter cannot arm combat at runtime." };
+          sessionAdapter.setCombatAllowed(enabled);
+          options.safety?.configure({ optedInCapabilities: enabled ? [MINECRAFT_ATTACK_HOSTILE_CAPABILITY] : [] });
+          return { ok: true, message: enabled ? "Combat armed through adapter and safety broker." : "Combat disarmed." };
+        },
+        replyMinecraft: (message, recipient) => sessionAdapter.sendCompanionChat?.(message, recipient),
+      })
+    : null;
+  companion?.start();
+  const unsubscribeChat = companion && options.minecraftCommander && sessionAdapter.onCompanionChat
+    ? sessionAdapter.onCompanionChat((username, message) => {
+        if (username !== options.minecraftCommander) return;
+        if (!message.startsWith("#") && !/\b(come|follow|need|help|build|gather)\b/i.test(message)) return;
+        void companion.submit(message, "minecraft", username);
+      })
+    : null;
 
   const source = createControlCenterSource({
     runtime: options.runtime,
@@ -175,6 +219,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     ...(options.worldKey !== undefined ? { worldKey: options.worldKey } : {}),
     ...(options.offlineNote !== undefined ? { offlineNote: options.offlineNote } : {}),
     logger: options.logger,
+    companion,
     taskFor: taskFromControlCenterRequest,
     ...(options.decorate ? { decorate: options.decorate } : {}),
     onStart: async (task) => {
@@ -231,6 +276,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   const host: MinecraftRunHost = {
     control,
     memory,
+    companion,
     handle,
     runnerOptions: {
       memory,
@@ -245,6 +291,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
     async close() {
+      companion?.stop();
+      unsubscribeChat?.();
       await handle.stop("run host closing");
       if (memory instanceof PersistentWorldMemory) {
         try {

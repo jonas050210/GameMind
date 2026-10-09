@@ -33,6 +33,8 @@ export const minecraftResourceSightingSchema = z.object({
   name: z.string(),
   position: blockPositionSchema,
   distance: z.number().finite().nonnegative(),
+  /** Mineflayer line-of-sight result at observation time. Missing means the adapter could not test it. */
+  visible: z.boolean().optional(),
   /** Only included for block classes whose state matters (sweet berry bush `age`). */
   properties: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
 });
@@ -151,6 +153,10 @@ export const minecraftObservationSchema = z.object({
       name: z.string(),
       type: z.number().int(),
       boundingBox: z.string(),
+      /** Distance from the player eye/entity position at this observation. */
+      distance: z.number().finite().nonnegative().optional(),
+      /** A real ray/line-of-sight result. Missing is unknown, never assumed visible. */
+      visible: z.boolean().optional(),
     }),
   ),
   /** Resource-class blocks found in a wider radius; absence is only meaningful when not truncated. */
