@@ -177,6 +177,7 @@ export class ActionExecutor<TState = unknown> {
         const verdict = this.safety.evaluate({
           capability: request.capability,
           risk: this.riskOf(request.capability),
+          ...(request.skillId !== undefined ? { skillId: request.skillId } : {}),
           ...(request.source !== undefined ? { source: request.source } : {}),
         });
         await this.trace.record({

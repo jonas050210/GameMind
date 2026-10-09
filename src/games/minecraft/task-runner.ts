@@ -5,7 +5,6 @@ import type { Logger } from "pino";
 import {
   BAND_SAFETY,
   MinecraftTaskDecisionModel,
-  RejectionLedger,
   type MinecraftDecisionContext,
   type MinecraftDecisionRecord,
 } from "./decision-model.js";
@@ -360,6 +359,7 @@ export class MinecraftTaskRunner {
     let combatActions = 0;
     let hungerRecoveryActions = 0;
     let combatAttempts = 0;
+    let lastSafetyNote: { allowed: boolean; code: string; message: string } | null = null;
     let decisions = 0;
     let successfulActions = 0;
     let failedActions = 0;
@@ -452,7 +452,11 @@ export class MinecraftTaskRunner {
         memory.observe(world.state, world.sequence);
         knownResourceBlocksPeak = Math.max(knownResourceBlocksPeak, memory.blockSightings().length);
 
-        const ledger = new RejectionLedger();
+        const broker = this.runtime.safety;
+        if (broker) {
+          const verdict = broker.snapshot().recentVerdicts[0];
+          if (verdict) lastSafetyNote = { allowed: verdict.allowed, code: verdict.code, message: verdict.message };
+        }
         const context: MinecraftDecisionContext = {
           excludedTargets,
           previousFailureCode: lastFailureCode,
@@ -463,7 +467,7 @@ export class MinecraftTaskRunner {
           restMsUsed,
           previousGoalKey,
           stuck,
-          ledger,
+          safetyNote: lastSafetyNote,
           ...(this.options.allowCombat ? { combatEnabled: true } : {}),
           combatAttempts,
           ...(learner ? { advisor: learner.advisor() } : {}),

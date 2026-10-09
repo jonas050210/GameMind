@@ -105,6 +105,8 @@ export interface MinecraftDecisionContext extends DecisionContext {
   readonly inventoryFull?: boolean;
   /** Rejection sink filled while candidates are filtered, so traces explain what was dropped. */
   readonly ledger?: RejectionLedger;
+  /** The broker's most recent verdict, copied into the record so a trace explains refusals too. */
+  readonly safetyNote?: { readonly allowed: boolean; readonly code: string; readonly message: string } | null;
   /** Set by the runner after a stall or oscillation to request a sidestep recovery. */
   readonly stuck?: {
     readonly reason: string;
@@ -712,10 +714,9 @@ function mineCandidates(
 ): { candidates: DecisionCandidate[]; blockedByTool: number; threatened: number; beyond: number; known: number } {
   const ledger = context.ledger;
   const candidates: DecisionCandidate[] = [];
-  const tier = bestPickaxeTier([
-    ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
-    ...state.inventory.map((item) => ({ name: item.name })),
-  ]);
+  // Feasibility is judged by what is *in hand*: swapping tools mid-dig is not a verified plan step, and
+  // the simulated adapter refuses exactly that. Equipping the right tool is its own goal instead.
+  const tier = bestPickaxeTier(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []);
   const blocks = mineableTargets(state, memory, options.blockNames);
   let blockedByTool = 0;
   let threatened = 0;
@@ -1290,7 +1291,7 @@ function notExcluded(candidate: DecisionCandidate, context: MinecraftDecisionCon
  * moment ago is still a valid target even if the current cube no longer lists it.
  */
 function knownMinedBlocks(state: MinecraftObservation, context: MinecraftDecisionContext): WorldMemory {
-  return context.memory ?? WorldMemory.fromObservation(state, 0);
+  return context.memory ?? WorldMemory.fromObservation(state);
 }
 
 function craftPlan(
@@ -1645,6 +1646,10 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     context: MinecraftDecisionContext = { excludedTargets: new Set<string>(), previousFailureCode: null },
     observationSequence = 0,
   ): MinecraftDecisionRecord {
+    // The ledger belongs to a single decision, so it is created here instead of by the caller: a caller
+    // that forgot to attach one would otherwise silently lose the rejection explanations from the trace.
+    const ledger = context.ledger ?? new RejectionLedger();
+    context = { ...context, ledger };
     const memory = context.memory ?? WorldMemory.fromObservation(state, observationSequence);
     const previousGoalKey = context.previousGoalKey ?? null;
     const decidedAt = new Date().toISOString();
@@ -1664,8 +1669,19 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       plan: planFor(selected, state, task),
       band: selected?.priorityBand ?? null,
       knowledge: memory.summary(),
-      rejected: [...(context.ledger?.all ?? [])],
+      rejected: [...ledger.all],
+      safety: context.safetyNote ?? null,
     });
+
+    // A safety goal that wins hides the progress goal the task actually wants. Recording that the
+    // lower band was *overtaken* (rather than infeasible) keeps the trace honest about why.
+    const noteProgressOvertaken = (detail: string): void => {
+      ledger.note(
+        { goalId: `task:${task.kind}`, targetKey: null, priorityBand: BAND_PROGRESS, score: 0 },
+        "lower_band",
+        detail,
+      );
+    };
 
     // 1. Completion is judged from the observed world, never from the planner's intent.
     if (task.kind === "secure_food") {
@@ -1698,16 +1714,19 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     // 2. Hazards, hostiles and stalled routes outrank everything else, and learning never touches them.
     const hazard = hazardCandidate(state, context);
     if (hazard) {
+      noteProgressOvertaken("escaping the hazard within reach comes before any task goal");
       return record(null, hazard, [], hazard.rationale);
     }
 
     if (threats.nearby.length > 0) {
       const defend = defendCandidate(state, task, threats, context);
       if (defend) {
+        noteProgressOvertaken("defending against the nearby hostile comes before gathering");
         return record(null, defend, [], defend.rationale);
       }
       const flee = fleeCandidates(state, threats.nearby, context);
       if (flee.length > 0) {
+        noteProgressOvertaken("leaving the hostile's threat radius comes before gathering");
         const choice = selectBest(flee, previousGoalKey);
         return record(
           null,
@@ -1726,6 +1745,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
 
     const recovery = recoveryCandidates(state, context, task.dangerRadius).filter((candidate) => available(context, candidate.skillId ?? ""));
     if (recovery.length > 0) {
+      noteProgressOvertaken(`recovering from ${context.stuck?.reason ?? "a stalled route"} comes before pressing on`);
       const choice = selectBest(recovery, previousGoalKey);
       return record(null, choice.selected, choice.alternatives, `Recover from ${context.stuck?.reason ?? "a stall"} with an alternative route before retrying the goal.`);
     }
@@ -1899,12 +1919,13 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     const drop = miningDropFor(task.resourceName) ?? task.resourceName;
     const requirement = minecraftMiningRequirements[task.resourceName];
     const blockNames = new Set<string>([task.resourceName, ...(minedIngredientSources[drop] ?? [])]);
+    const handTier = bestPickaxeTier(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []).tier;
     const tier = bestPickaxeTier([
       ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
       ...state.inventory.map((item) => ({ name: item.name })),
     ]).tier;
 
-    if (requirement.requiresPickaxe && tier < requirement.minPickaxeTier) {
+    if (requirement.requiresPickaxe && handTier < requirement.minPickaxeTier) {
       const equip = equipToolCandidate(state, { needTier: requirement.minPickaxeTier }, context);
       if (equip) return record(null, equip, [], equip.rationale);
       // No usable pickaxe is carried: fall back to the crafting planner for the missing tool.

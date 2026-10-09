@@ -255,7 +255,8 @@ export class SafetyBroker {
     this.worldValue = context;
   }
 
-  private record(verdict: SafetyVerdict): SafetyVerdict {
+  /** `nowMs` is the clock the verdict was evaluated on, so cooldowns stay consistent with the check. */
+  private record(verdict: SafetyVerdict, nowMs = Date.now()): SafetyVerdict {
     this.recentVerdicts.push(verdict);
     if (this.recentVerdicts.length > RECENT_VERDICT_LIMIT) this.recentVerdicts.shift();
     if (verdict.allowed) {
@@ -268,7 +269,7 @@ export class SafetyBroker {
         verdict.capability,
         (this.runCapabilityCount.get(verdict.capability) ?? 0) + 1,
       );
-      this.lastCapabilityRunAt.set(verdict.capability, Date.now());
+      this.lastCapabilityRunAt.set(verdict.capability, nowMs);
     } else {
       this.actionsDenied += 1;
       this.deniedByCode.set(verdict.code, (this.deniedByCode.get(verdict.code) ?? 0) + 1);
@@ -294,7 +295,7 @@ export class SafetyBroker {
         evaluatedAt: new Date(nowMs).toISOString(),
         capability: request.capability,
         risk: request.risk,
-      });
+      }, nowMs);
 
     check("tripped", !this.tripped, this.tripped ? `Tripped: ${this.tripReason}` : "not tripped");
     if (this.tripped) return deny("RUN_TRIPPED", `Safety broker is tripped (${this.tripReason}); an operator must resume it.`);
@@ -450,7 +451,7 @@ export class SafetyBroker {
       evaluatedAt: new Date(nowMs).toISOString(),
       capability: request.capability,
       risk: request.risk,
-    });
+    }, nowMs);
   }
 
   snapshot(): SafetySnapshot {
