@@ -132,6 +132,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     result: null,
     lastTaskKind: null,
     actionsUsed: 0,
+    startedMaxActions: null,
     startedAt: null,
   };
   const memory = options.memory ?? new WorldMemory();
@@ -161,6 +162,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     if (control.task) throw new Error("A task is already running in this agent; stop it before starting another.");
     control.task = task;
     control.result = null;
+    control.startedMaxActions = task.maxActions;
     control.stopRequested = null;
     control.actionsUsed = 0;
     control.startedAt = new Date().toISOString();

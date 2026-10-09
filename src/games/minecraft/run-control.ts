@@ -40,6 +40,8 @@ export interface RunControl {
   /** Kind of the last task that finished, so the UI still describes the run after it ends. */
   lastTaskKind: MinecraftTask["kind"] | null;
   actionsUsed: number;
+  /** The budget the last started task carried, kept after it ends so the UI can still show the ratio. */
+  startedMaxActions: number | null;
   startedAt: string | null;
 }
 
@@ -430,7 +432,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         decisionModel: str((decision?.data as Record<string, unknown> | undefined)?.modelId, "minecraft-task-decision-model"),
         startedAt: control.startedAt,
         actionsUsed: control.actionsUsed,
-        maxActions: control.task?.maxActions ?? null,
+        maxActions: control.task?.maxActions ?? control.startedMaxActions,
         elapsedMs: control.result?.metrics.elapsedMs ?? null,
         status: control.result?.status ?? null,
         failure: control.result?.failure ?? null,

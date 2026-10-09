@@ -400,7 +400,25 @@ function drawMinimap(world) {
   if (!ctx) return;
   const width = canvas.width;
   const height = canvas.height;
-  const scale = 4.6;
+  const blocks = world.blocks ?? [];
+  // Fit the observed window instead of a fixed zoom: a 7x7 scan should fill the panel, while a wide scan
+  // still shows the surroundings. Clamped so a single stray block cannot zoom the map to absurdity.
+  let scale = 18;
+  if (blocks.length > 1) {
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minZ = Infinity;
+    let maxZ = -Infinity;
+    for (const block of blocks) {
+      minX = Math.min(minX, block.x);
+      maxX = Math.max(maxX, block.x);
+      minZ = Math.min(minZ, block.z);
+      maxZ = Math.max(maxZ, block.z);
+    }
+    const spanX = Math.max(1, maxX - minX) + 3;
+    const spanZ = Math.max(1, maxZ - minZ) + 3;
+    scale = Math.max(4, Math.min(28, Math.floor(Math.min(width / spanX, height / spanZ))));
+  }
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "rgba(255,255,255,0.02)";
   ctx.fillRect(0, 0, width, height);
@@ -408,20 +426,21 @@ function drawMinimap(world) {
   const project = (x, z) => [width / 2 + (x - position.x) * scale, height / 2 + (z - position.z) * scale];
   ctx.globalAlpha = 0.25;
   ctx.strokeStyle = "rgba(255,255,255,0.06)";
-  for (let step = -60; step <= 60; step += 10) {
+  const gridStep = scale > 12 ? 2 : 10;
+  for (let step = -Math.ceil(width / 2 / scale); step <= Math.ceil(width / 2 / scale); step += gridStep) {
     const [gx] = project(step, 0);
     ctx.beginPath();
     ctx.moveTo(gx, 0);
     ctx.lineTo(gx, height);
     ctx.stroke();
-    const [, gy] = project(0, step);
+    const gy = height / 2 + step * scale;
     ctx.beginPath();
     ctx.moveTo(0, gy);
     ctx.lineTo(width, gy);
     ctx.stroke();
   }
   ctx.globalAlpha = 1;
-  for (const block of world.blocks ?? []) {
+  for (const block of blocks) {
     const [x, y] = project(block.x, block.z);
     if (x < -scale || y < -scale || x > width || y > height) continue;
     const depth = block.y - position.y;
@@ -432,7 +451,7 @@ function drawMinimap(world) {
     else if (block.name === "water") fill = "rgba(84,150,255,0.7)";
     ctx.fillStyle = fill;
     ctx.globalAlpha = depth === 0 ? 1 : depth > 0 ? 0.45 : 0.65;
-    const size = block.resource || block.hazard ? scale * 0.9 : scale * 0.72;
+    const size = Math.max(3, (block.resource || block.hazard ? scale * 0.92 : scale * 0.78) - 1);
     ctx.fillRect(x - size / 2, y - size / 2, size, size);
   }
   ctx.globalAlpha = 1;
@@ -447,7 +466,7 @@ function drawMinimap(world) {
   ctx.stroke();
   ctx.font = "10px ui-monospace, monospace";
   ctx.fillStyle = "rgba(230,238,255,0.62)";
-  ctx.fillText(`${(world.blocks ?? []).length} observed blocks · y ${num(position.y, 0)}`, 8, height - 8);
+  ctx.fillText(`${blocks.length} observed blocks · ${scale}px/block · y ${num(position.y, 0)}`, 8, height - 8);
 }
 
 function renderSkills(snapshot) {
