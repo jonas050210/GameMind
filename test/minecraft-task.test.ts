@@ -95,6 +95,29 @@ test("bounded gather task collects an observed log, replans, and verifies invent
   await runtime.shutdown("task test complete");
 });
 
+test("gathering two oak logs verifies each removed block and inventory increment before completion", async () => {
+  const fixture = createFakeMinecraftFixture(1337);
+  const first = fixture.nearbyBlocks.find((block) => block.name === "oak_log");
+  assert.ok(first);
+  const second = {
+    ...first,
+    position: { x: first.position.x + 1, y: first.position.y, z: first.position.z },
+  };
+  const { runtime, runner } = makeTaskRunner({
+    ...fixture,
+    nearbyBlocks: [...fixture.nearbyBlocks, second],
+  });
+  const result = await runner.run({ ...DEFAULT_GATHER_LOG_TASK, targetCount: 2, maxActions: 6 });
+
+  assert.equal(result.status, "succeeded", result.failure?.message);
+  assert.equal(result.metrics.resourceCollected, 2);
+  assert.equal(result.metrics.verifiedActions, 2);
+  assert.equal(result.actions.filter((action) => action.skillId === "minecraft.collect-log").length, 2);
+  assert.equal(result.finalObservation?.state.inventory.find((item) => item.name === "oak_log")?.count, 2);
+  assert.equal(result.finalObservation?.state.nearbyBlocks.some((block) => block.name === "oak_log"), false);
+  await runtime.shutdown("two-log gather regression complete");
+});
+
 test("survival-prioritized wood plan crafts and places a table, gathers a missing log, then crafts a wooden pickaxe", async () => {
   const fixture = createFakeMinecraftFixture(2026);
   const initialObservation: MinecraftObservation = {

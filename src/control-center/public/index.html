@@ -99,11 +99,27 @@
           <p class="micro-note">Operator command only. The task still passes planner validation, safety checks, and post-action verification.</p>
         </article>
 
+        <article class="card chat-card">
+          <header class="card-head">
+            <div><span class="section-index">04 / COMPANION</span><h2>Chat &amp; behavior</h2></div>
+            <span class="hint" id="companion-mode">mode unavailable</span>
+          </header>
+          <div id="companion-summary" class="companion-summary"></div>
+          <div id="chat-history" class="chat-history" aria-live="polite"></div>
+          <form id="chat-form" class="chat-form">
+            <label class="sr-only" for="chat-input">Companion command or request</label>
+            <input id="chat-input" maxlength="256" autocomplete="off" placeholder="#follow Player, #gather oak 4, or “we need wood”" />
+            <button class="btn primary" type="submit">Send</button>
+          </form>
+          <p class="micro-note">Commands use the same observed state, safety broker, skills, verification, and task runner as autonomous objectives.</p>
+        </article>
+
         <article class="card decision-card">
           <header class="card-head">
-            <div><span class="section-index">04 / INTENT</span><h2>Current decision</h2></div>
+            <div><span class="section-index">04 / INTENT</span><h2>AI decision</h2></div>
             <span class="hint" id="goal-hint"></span>
           </header>
+          <div class="intent-grid" id="intent-summary" aria-label="Synchronized agent intent"></div>
           <div id="goal" class="goal"></div>
           <details class="trace-details" id="alternatives-details" hidden>
             <summary>Alternatives &amp; rejection reasons</summary><div id="alternatives"></div>
@@ -130,7 +146,7 @@
       <section class="column column-world" aria-label="Minecraft world state">
         <article class="card world-card">
           <header class="card-head world-head">
-            <div><span class="section-index">06 / WORLD STATE</span><h2>Observed world</h2></div>
+            <div><span class="section-index">06 / LIVE GAME VIEW</span><h2>Observed world</h2></div>
             <span class="hint" id="world-hint"></span>
           </header>
           <p class="world-freshness" id="world-freshness" data-state="stale">no live observation</p>
@@ -144,10 +160,19 @@
             <li><span class="sw player"></span>agent</li>
             <li><span class="sw solid"></span>observed block</li>
             <li><span class="sw resource"></span>resource / objective</li>
-            <li><span class="sw hazard"></span>hazard</li>
+            <li><span class="sw hazard"></span>water / hazard</li>
             <li><span class="sw memory"></span>last-seen memory</li>
             <li><span class="sw hostile"></span>visible hostile</li>
           </ul>
+          <div class="observation-panel">
+            <div class="observation-title"><span class="sub">Observation</span><span id="observation-meta" class="hint"></span></div>
+            <div class="table-wrap observation-table-wrap">
+              <table id="observations">
+                <thead><tr><th>Block identifier</th><th>World coordinates</th><th>Distance</th><th>Visibility</th><th>Evidence</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
           <div class="threat-row"><span class="sub">Visible entities</span><div class="items" id="hostiles"></div></div>
           <div class="split inventory-split">
             <div><div class="sub">Inventory</div><div id="inventory" class="items"></div></div>
@@ -168,7 +193,7 @@
       <section class="column column-activity" aria-label="Agent activity and learning">
         <article class="card activity-card">
           <header class="card-head">
-            <div><span class="section-index">08 / EXECUTION</span><h2>Actions &amp; recovery</h2></div>
+            <div><span class="section-index">08 / RECENT LOGS</span><h2>Actions &amp; recovery</h2></div>
             <span class="hint" id="actions-hint"></span>
           </header>
           <ol class="timeline" id="actions"></ol>

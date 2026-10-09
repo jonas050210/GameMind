@@ -842,7 +842,13 @@ export class MinecraftTaskRunner {
         // Other failures exclude the target at once. Either way repeated attempts are bounded.
         const anchor = this.stuckAnchor(after?.state ?? before?.state ?? null);
         const routeStall = !succeeded && failureCode !== null && ROUTE_STALL_CODES.has(failureCode);
-        if (routeStall) stuckActions += 1;
+        if (routeStall) {
+          stuckActions += 1;
+          // Navigation stalls have their own per-target attempt bound and recovery/exclusion path below.
+          // Counting them toward the generic consecutive-failure cutoff used to stop after a failed
+          // sidestep, before the planner could try another tree or frontier.
+          consecutiveFailures = 0;
+        }
         // Safety moves (flee, sidestep) never retry the same destination; they pick another one.
         const retryableRoute = routeStall && selected.priorityBand !== BAND_SAFETY;
         if (selected.targetKey && !succeeded && !retryableRoute) excludedTargets.add(selected.targetKey);

@@ -141,7 +141,7 @@ npm run dev -- --task gather-logs --host 127.0.0.1 --control-center
 npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
 ```
 
-`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no external network access: HTML, CSS and JavaScript (including the dependency-free WebGL voxel renderer) are served from this package; there is no CDN or remote font. The observed-world camera can be orbited by dragging or with the arrow keys, zoomed by scrolling or `+`/`-`, and reset with `Home`. Updates arrive over one server-sent-events stream, with snapshot and trace frames coalesced by the client.
+`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no external network access: HTML, CSS and JavaScript (including the dependency-free WebGL voxel renderer) are served from this package; there is no CDN or remote font. The observed-world camera can be orbited by dragging or with the arrow keys, zoomed by scrolling or `+`/`-`, and reset with `Home`. Updates use a single non-overlapping `GET /api/snapshot` polling loop (1 s while running, 3 s idle, 15 s in a hidden tab). The retired event-stream endpoint returns `410 STREAM_REMOVED`.
 
 Controls that exist because the runtime actually implements them:
 
@@ -259,6 +259,8 @@ Environment variables may set connection defaults:
 - `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the dashboard binds this interface)
 
 For an offline-mode server, keep `MINECRAFT_AUTH=offline`. Use Microsoft authentication only where appropriate. Do not put account credentials in command-line arguments, source control, logs, or traces; Mineflayer manages its own authentication flow and cache.
+
+When the Control Center is enabled, its companion chat accepts `#follow`, `#come`, `#hold`, `#combat`, `#afk`, `#guard`, `#sethome <name>`, `#home [name]`, `#homes`, `#delhome <name>`, `#return`, `#gather`, `#explore`, `#status`, `#unstuck`, and `#stop`, plus bounded requests such as “we need more wood”. The legacy argument-free `#home` saves the `default` homepoint; `#return` navigates to it. Named homepoints are world-scoped, dimension-aware, and never overwritten without an explicit `#delhome`. Follow targets a measured 4-block preference, stops inside 5 blocks, and treats 32 blocks as a normal maximum separation target—not a guarantee under teleportation, disconnection, or obstacles. To accept the same commands from Minecraft chat, set `MINECRAFT_COMMANDER` to the exact authorized player username. With no value, Minecraft chat is read by Mineflayer but cannot control the agent.
 
 ## Known limitations
 

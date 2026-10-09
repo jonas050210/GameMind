@@ -92,6 +92,7 @@ function render() {
   document.title = `${snapshot.agent.taskId ?? "GameMind"} · Control Center`;
   renderHeader(snapshot);
   renderRun(snapshot);
+  renderCompanion(snapshot);
   renderGoal(snapshot);
   renderSafety(snapshot);
   renderLearning(snapshot);
@@ -212,10 +213,57 @@ function renderBlocker(snapshot) {
   el("blocker-note").textContent = blocker.headline ?? "";
 }
 
+function renderCompanion(snapshot) {
+  const companion = snapshot.companion;
+  const summary = el("companion-summary");
+  const history = el("chat-history");
+  if (!summary || !history) return;
+  clear(summary);
+  clear(history);
+  el("companion-mode").textContent = companion ? `${companion.mode}${companion.executing ? " · acting" : ""}` : "not attached";
+  if (!companion) {
+    summary.append(node("p", "reason", "Companion coordination is unavailable in this run."));
+    return;
+  }
+  summary.append(
+    intentCell("Active mode", companion.mode, companion.reason),
+    intentCell("Follow target", companion.targetPlayer ?? "none", `${companion.followState ?? "inactive"} · measured ${companion.measuredSeparation == null ? "unknown" : `${num(companion.measuredSeparation, 1)} blocks`}`),
+    intentCell("Follow distances", `${num(companion.preferredFollowDistance, 0)} block preference`, `${num(companion.normalMaximumSeparation, 0)} block normal maximum target`),
+    intentCell("Homepoints", `${(companion.homepoints ?? []).length} saved`, companion.activeHomepoint ? `active: ${companion.activeHomepoint}` : (companion.homepoints ?? []).map((entry) => `${entry.name} (${entry.availability})`).join(", ") || "none"),
+    intentCell("Anchor & storage", companion.anchor ? `${num(companion.anchor.x, 1)}, ${num(companion.anchor.y, 1)}, ${num(companion.anchor.z, 1)}` : "no active anchor", `${(companion.knownStorage ?? []).length} storage location(s) known`),
+    intentCell("Latest outcome", companion.lastOutcome ?? "none", `transition ${ago(companion.lastTransitionAt)}`),
+  );
+  for (const message of (companion.history ?? []).slice(0, 16).reverse()) {
+    const row = node("div", `chat-message ${message.direction}`);
+    const head = node("span", null, `${message.direction === "in" ? message.speaker ?? message.source : "GameMind"} · ${clock(message.at)}`);
+    row.append(head, node("p", null, message.text));
+    if (message.ok === false) row.dataset.tone = "bad";
+    history.append(row);
+  }
+  if (!history.childElementCount) history.append(node("p", "reason", "No companion messages yet."));
+}
+
+function intentCell(label, value, note) {
+  const cell = node("div", "intent-cell");
+  cell.append(node("span", null, label), node("b", null, value));
+  if (note) cell.append(node("small", null, note));
+  return cell;
+}
+
 function renderGoal(snapshot) {
   const goal = snapshot.goal;
   const host = el("goal");
   clear(host);
+  const intent = el("intent-summary");
+  clear(intent);
+  const lastConfirmed = (snapshot.recentActions ?? []).find((action) => action.verification === "verified");
+  const progress = goal?.progress;
+  intent.append(
+    intentCell("Current goal", goal?.goalId ?? (snapshot.agent?.taskId ? "awaiting decision" : "none"), goal?.targetKey ?? null),
+    intentCell("Last confirmed action", lastConfirmed?.skillId ?? lastConfirmed?.capability ?? "none recorded", lastConfirmed ? `${clock(lastConfirmed.at)} · verified` : "No verified action in the trace window"),
+    intentCell("Next intended action", goal?.skillId ?? "none", goal?.plan?.[0] ?? (goal ? "No executable step selected" : "No active decision")),
+    intentCell("Verified progress", progress ? `${progress.have} / ${progress.of} ${progress.unit}` : "unavailable", progress ? "Read from current game state" : "No measurable task target"),
+  );
   const alternatives = el("alternatives");
   clear(alternatives);
   if (!goal) {
@@ -473,6 +521,39 @@ function renderWorld(snapshot) {
   const slots = Object.entries(gear).filter(([, value]) => value);
   if (!slots.length) equipment.append(node("span", "item empty", "nothing equipped"));
   for (const [slot, name] of slots) equipment.append(node("span", "item", `${slot}: ${name}`));
+  const observationsBody = el("observations")?.tBodies?.[0];
+  if (observationsBody) {
+    observationsBody.replaceChildren();
+    const relevant = (block) => block.resource || block.hazard || /(^|_)(oak|birch)_log$|_leaves$|^(grass_block|dirt|coarse_dirt|rooted_dirt|stone|cobblestone)$/.test(block.name ?? "");
+    const blocks = [...(world.blocks ?? [])]
+      .sort((left, right) => Number(relevant(right)) - Number(relevant(left)) || (left.distance ?? Infinity) - (right.distance ?? Infinity))
+      .slice(0, 18);
+    for (const block of blocks) {
+      const row = document.createElement("tr");
+      if (block.remembered) row.dataset.stale = "true";
+      if (block.hazard) row.dataset.hazard = "true";
+      const identifier = block.identifier ?? (block.name ? `minecraft:${block.name}` : "unknown");
+      const evidence = block.remembered
+        ? "stale memory"
+        : `${block.observationKind ?? "observation"} · obs #${freshness?.sequence ?? "?"}`;
+      row.append(
+        node("td", "mono block-id", identifier),
+        node("td", "num", `${block.x}, ${block.y}, ${block.z}`),
+        node("td", "num", block.distance == null ? "unknown" : `${num(block.distance, 1)} m`),
+        node("td", block.visibility === "visible" ? "ok" : block.visibility === "occluded" ? "warn" : "muted", block.visibility ?? "unknown"),
+        node("td", block.remembered ? "warn" : "ok", evidence),
+      );
+      observationsBody.append(row);
+    }
+    if (!blocks.length) observationsBody.append(emptyRow(5, "No blocks are available from the current observation."));
+    const observationMeta = el("observation-meta");
+    if (observationMeta) {
+      const terrain = world.terrain;
+      observationMeta.textContent = terrain
+        ? `${blocks.length} shown · ${terrain.observedColumns} terrain columns · ${terrain.waterColumns} water · ${terrain.obstacleColumns} obstacles · ${terrain.unknownCells} unknown cells${terrain.truncated ? " · truncated" : ""}`
+        : `${blocks.length} shown · ${world.blocks?.length ?? 0} reported · terrain model unavailable`;
+    }
+  }
   const threats = (world.entities ?? []).filter((entry) => entry.hostile);
   const hostiles = el("hostiles");
   clear(hostiles);
@@ -745,6 +826,14 @@ function wireControls() {
       ...(resource ? { resource } : {}),
       ...(!buildShelter ? { count } : {}),
     });
+  });
+  el("chat-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = el("chat-input");
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+    void sendCommand("chat", message);
   });
   el("budget-form").addEventListener("submit", (event) => {
     event.preventDefault();

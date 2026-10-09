@@ -269,6 +269,20 @@ async function run(adapter: MinecraftAdapter, capability: string, input: unknown
   return adapter.executeAction({ actionId: randomUUID(), sessionId: session.id, capability, input }, new AbortController().signal);
 }
 
+test("authorized run hosts can receive Minecraft chat without coupling chat to action execution", async () => {
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  const received: Array<{ username: string; message: string }> = [];
+  const unsubscribe = adapter.onCompanionChat((username, message) => received.push({ username, message }));
+  (mock.bot as unknown as EventEmitter).emit("chat", "Alex", "#follow");
+  (mock.bot as unknown as EventEmitter).emit("chat", "GameMind", "ignored echo");
+  assert.deepEqual(received, [{ username: "Alex", message: "#follow" }]);
+  unsubscribe();
+  (mock.bot as unknown as EventEmitter).emit("chat", "Alex", "#stop");
+  assert.equal(received.length, 1);
+  await adapter.disconnect("test");
+});
+
 test("observation reports wide resource sightings, berry ages, and dropped items", async () => {
   const mock = createLiveMock();
   mock.blocks.set("12,64,0", { name: "oak_log", type: 1, boundingBox: "block" });
@@ -286,6 +300,27 @@ test("observation reports wide resource sightings, berry ages, and dropped items
   assert.deepEqual(bush?.properties, { age: 3 });
   assert.equal(state.itemDrops[0]?.name, "bread");
   assert.equal(state.itemDrops[0]?.count, 1);
+  await adapter.disconnect("test");
+});
+
+test("observation preserves water, logs, leaves, soil and stone with measured visibility and distance", async () => {
+  const mock = createLiveMock();
+  mock.blocks.set("1,64,0", { name: "water", type: 9, boundingBox: "empty" });
+  mock.blocks.set("2,64,0", { name: "birch_log", type: 17, boundingBox: "block" });
+  mock.blocks.set("0,65,1", { name: "oak_leaves", type: 18, boundingBox: "block" });
+  mock.blocks.set("0,63,0", { name: "grass_block", type: 2, boundingBox: "block" });
+  mock.blocks.set("-1,63,0", { name: "dirt", type: 3, boundingBox: "block" });
+  mock.blocks.set("0,63,-1", { name: "stone", type: 1, boundingBox: "block" });
+  const adapter = await connectAdapter(mock, { observationRadius: 3, maxObservedBlocks: 6 });
+  const state = (await adapter.observe()).state;
+
+  for (const name of ["water", "birch_log", "oak_leaves", "grass_block", "dirt", "stone"]) {
+    const observed = state.nearbyBlocks.find((block) => block.name === name);
+    assert.ok(observed, `${name} must survive the capped local observation`);
+    assert.equal(observed.visible, true, `${name} visibility comes from Mineflayer`);
+    assert.ok(typeof observed.distance === "number" && observed.distance >= 0);
+  }
+  assert.equal(state.nearbyBlocks.find((block) => block.name === "water")?.type, 9);
   await adapter.disconnect("test");
 });
 

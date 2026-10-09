@@ -20,6 +20,17 @@ const hazardBlockNames = new Set<string>([
   "cactus",
 ]);
 
+/** Terrain classes operators and navigation need to understand even when the local scan is capped. */
+export function isRelevantTerrainBlockName(name: string): boolean {
+  return name === "grass_block" ||
+    name === "dirt" ||
+    name === "coarse_dirt" ||
+    name === "rooted_dirt" ||
+    name === "stone" ||
+    name === "cobblestone" ||
+    name.endsWith("_leaves");
+}
+
 /** Sweet berry bushes yield berries only when their `age` reaches this value (Java 1.20). */
 export const MINECRAFT_RIPE_BERRY_AGE = 2;
 
@@ -38,7 +49,7 @@ export function isInterestingBlockName(name: string): boolean {
  */
 export function blockObservationPriority(name: string): 2 | 1 | 0 {
   if (isInterestingBlockName(name)) return 2;
-  if (isMineableBlockName(name)) return 1;
+  if (isMineableBlockName(name) || isRelevantTerrainBlockName(name)) return 1;
   return 0;
 }
 

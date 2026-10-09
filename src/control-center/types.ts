@@ -125,6 +125,16 @@ export interface ControlCenterWorld {
     /** Which live field the night judgement came from, so a fallback is never read as a measurement. */
     readonly source: string | null;
   } | null;
+  /** Current-observation terrain census; never reconstructed from stale memory. */
+  readonly terrain: {
+    readonly observedColumns: number;
+    readonly obstacleColumns: number;
+    readonly hazardColumns: number;
+    readonly waterColumns: number;
+    readonly unknownCells: number;
+    readonly sampledCells: number;
+    readonly truncated: boolean;
+  } | null;
   readonly perception: {
     readonly totalMs: number;
     readonly localScanMs: number;
@@ -156,6 +166,13 @@ export interface ControlCenterWorld {
     readonly y: number;
     readonly z: number;
     readonly name: string;
+    /** Namespaced identifier shown to operators; derived from the observed canonical block name. */
+    readonly identifier: string;
+    readonly type: number | null;
+    readonly boundingBox: string | null;
+    readonly distance: number | null;
+    /** `visible`/`occluded` are Mineflayer line-of-sight results; `unknown` is never upgraded to visible. */
+    readonly visibility: "visible" | "occluded" | "unknown";
     readonly hazard: boolean;
     /** Highlighted on the map: a resource block, or the block the current task is about. */
     readonly resource: boolean;
@@ -163,6 +180,8 @@ export interface ControlCenterWorld {
     readonly remembered?: boolean;
     /** Where this block came from: the current observation or the world model's memory of an older one. */
     readonly source?: "observation" | "memory";
+    readonly observationKind: "local" | "strategic" | "memory";
+    readonly observedAt: string | null;
   }[];
   /**
    * How the world panel's data relates to the live session. `live-observation` means every field below
@@ -339,12 +358,32 @@ export interface ControlCenterRuntimePerformance {
   };
 }
 
+export interface ControlCenterCompanion {
+  readonly mode: string;
+  readonly targetPlayer: string | null;
+  readonly anchor: { readonly x: number; readonly y: number; readonly z: number; readonly dimension: string | null; readonly savedAt: string; readonly observationSequence: number } | null;
+  readonly home: { readonly x: number; readonly y: number; readonly z: number; readonly dimension: string | null; readonly savedAt: string; readonly observationSequence: number } | null;
+  readonly homepoints: readonly { readonly name: string; readonly location: { readonly x: number; readonly y: number; readonly z: number; readonly dimension: string | null; readonly savedAt: string; readonly observationSequence: number }; readonly availability: "available" | "stale" | "different-dimension" | "dimension-unknown" }[];
+  readonly activeHomepoint: string | null;
+  readonly preferredFollowDistance: number;
+  readonly normalMaximumSeparation: number;
+  readonly measuredSeparation: number | null;
+  readonly followState: string;
+  readonly knownStorage: readonly { readonly blockName: string; readonly x: number; readonly y: number; readonly z: number; readonly dimension: string | null; readonly lastSeenAt: string; readonly lastSeenSequence: number }[];
+  readonly lastTransitionAt: string;
+  readonly reason: string;
+  readonly executing: boolean;
+  readonly lastOutcome: string | null;
+  readonly history: readonly { readonly at: string; readonly direction: "in" | "out"; readonly source: string; readonly speaker: string | null; readonly text: string; readonly ok: boolean | null }[];
+}
+
 export interface ControlCenterSnapshot {
   readonly generatedAt: string;
   /** Lightweight process/host sampling; no inspector, profiler, or Minecraft tick hook is enabled. */
   readonly performance: ControlCenterRuntimePerformance;
   readonly connection: ControlCenterConnection;
   readonly agent: ControlCenterAgent;
+  readonly companion?: ControlCenterCompanion | null;
   readonly goal: ControlCenterGoal | null;
   readonly world: ControlCenterWorld;
   readonly safety: ControlCenterSafety | null;
@@ -418,6 +457,7 @@ export interface ControlCenterCommands {
   stopTask?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
   promotePolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   rejectPolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
+  chat?(message: string): ControlCommandResult | Promise<ControlCommandResult>;
 }
 
 export interface ControlCenterHost {

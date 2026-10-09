@@ -30,6 +30,7 @@ import { shelterCardinalSolidCount } from "./skill-contracts.js";
 import { classifyFailure, type FailureKind } from "../../core/failure-taxonomy.js";
 import { MINECRAFT_SAFETY_POLICY } from "./safety-context.js";
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
+import { buildLocalTerrainModel } from "./terrain-model.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
 export interface CombatGateAdapter {
@@ -71,6 +72,10 @@ export interface ControlCenterSource {
   readonly worldKey?: string | null;
   readonly offlineNote?: string | null;
   readonly logger: Logger;
+  readonly companion?: {
+    snapshot(): import("./companion-controller.js").CompanionSnapshot;
+    submit(text: string, source: "control-center", speaker?: string | null): Promise<{ ok: boolean; message: string }>;
+  } | null;
   /** Builds the next task from a UI request; throws with a readable message when the kind is unknown. */
   taskFor?(request: { readonly kind: string; readonly resource?: string; readonly count?: number }): MinecraftTask;
   /** Called when the operator asks the UI to start a task; resolves when the run finishes. */
@@ -323,6 +328,13 @@ export function createControlCenterSource(source: ControlCenterSource): {
   });
 
   const commands: ControlCenterCommands = {
+    async chat(message) {
+      if (!source.companion) return { ok: false, message: "No companion coordinator is attached to this run." };
+      if (typeof message !== "string" || message.trim().length < 1 || message.length > 256) {
+        return { ok: false, message: "Chat messages must contain 1 through 256 characters." };
+      }
+      return source.companion.submit(message, "control-center", null);
+    },
     pause(reason) {
       if (!safety) return noBroker();
       safety.pause(typeof reason === "string" && reason.length > 0 ? reason : "paused from the Control Center");
@@ -474,36 +486,89 @@ export function createControlCenterSource(source: ControlCenterSource): {
             ? (miningDropFor(control.task.resourceName) ?? control.task.resourceName)
             : ""
       : "";
-    const observedBlocks = (state?.nearbyBlocks ?? []).slice(0, 260).map((block) => ({
+    const observedAt = world?.observedAt ?? null;
+    const observedBlocks: ControlCenterSnapshot["world"]["blocks"][number][] = (state?.nearbyBlocks ?? []).slice(0, 260).map((block) => ({
       x: block.position.x,
       y: block.position.y,
       z: block.position.z,
       name: block.name,
+      identifier: block.name.includes(":") ? block.name : `minecraft:${block.name}`,
+      type: block.type,
+      boundingBox: block.boundingBox,
+      distance: block.distance ?? (state ? Math.hypot(
+        block.position.x + 0.5 - state.player.position.x,
+        block.position.y + 0.5 - state.player.position.y,
+        block.position.z + 0.5 - state.player.position.z,
+      ) : null),
+      visibility: block.visible === true ? "visible" : block.visible === false ? "occluded" : "unknown",
       hazard: isHazardBlockName(block.name),
       resource: isResourceBlockName(block.name) || block.name === targetItem,
       remembered: false,
       source: "observation" as const,
+      observationKind: "local" as const,
+      observedAt,
     }));
     const observedBlockKeys = new Set(observedBlocks.map((block) => `${block.x},${block.y},${block.z}`));
-    const rememberedBlocks = [...memory.blockSightings(), ...memory.minableSightings()]
+    // Strategic scans return real blockAt reads from loaded chunks. Keep them distinct from memory: they
+    // are confirmed current blocks, but may be occluded and outside the local voxel cube.
+    const strategicBlocks: ControlCenterSnapshot["world"]["blocks"][number][] = [
+      ...(state?.resourceSightings ?? []),
+      ...(state?.minableSightings ?? []),
+    ].filter((sighting) => {
+      const key = `${sighting.position.x},${sighting.position.y},${sighting.position.z}`;
+      if (observedBlockKeys.has(key)) return false;
+      observedBlockKeys.add(key);
+      return true;
+    }).slice(0, 160).map((sighting) => ({
+      x: sighting.position.x,
+      y: sighting.position.y,
+      z: sighting.position.z,
+      name: sighting.name,
+      identifier: sighting.name.includes(":") ? sighting.name : `minecraft:${sighting.name}`,
+      type: null,
+      boundingBox: null,
+      distance: sighting.distance,
+      visibility: sighting.visible === true ? "visible" : sighting.visible === false ? "occluded" : "unknown",
+      hazard: isHazardBlockName(sighting.name),
+      resource: isResourceBlockName(sighting.name) || sighting.name === targetItem,
+      remembered: false,
+      source: "observation" as const,
+      observationKind: "strategic" as const,
+      observedAt,
+    }));
+    const rememberedBlocks: ControlCenterSnapshot["world"]["blocks"][number][] = [...memory.blockSightings(), ...memory.minableSightings()]
       .filter((sighting, index, all) => {
         const key = `${sighting.position.x},${sighting.position.y},${sighting.position.z}`;
         return !observedBlockKeys.has(key) && all.findIndex((other) => other.key === sighting.key) === index;
       })
       .slice(0, 160)
-      .map((sighting) => ({
-        x: sighting.position.x,
-        y: sighting.position.y,
-        z: sighting.position.z,
-        name: sighting.name,
-        hazard: isHazardBlockName(sighting.name),
-        // A remembered sighting is only "resource" when the block class says so; marking every memory
-        // marker as a resource is what made the map look like it had found logs it had never seen.
-        resource: isResourceBlockName(sighting.name) || sighting.name === targetItem,
-        remembered: sighting.lastSeenSequence !== world?.sequence,
-        source: "memory" as const,
-      }));
-    const worldBlocks = [...observedBlocks, ...rememberedBlocks];
+      .map((sighting) => {
+        const staleMemory = sighting.lastSeenSequence !== world?.sequence;
+        return {
+          x: sighting.position.x,
+          y: sighting.position.y,
+          z: sighting.position.z,
+          name: sighting.name,
+          identifier: sighting.name.includes(":") ? sighting.name : `minecraft:${sighting.name}`,
+          type: null,
+          boundingBox: null,
+          distance: state ? Math.hypot(
+            sighting.position.x + 0.5 - state.player.position.x,
+            sighting.position.y + 0.5 - state.player.position.y,
+            sighting.position.z + 0.5 - state.player.position.z,
+          ) : null,
+          visibility: "unknown" as const,
+          hazard: isHazardBlockName(sighting.name),
+          // A remembered sighting is only "resource" when the block class says so; marking every memory
+          // marker as a resource is what made the map look like it had found logs it had never seen.
+          resource: isResourceBlockName(sighting.name) || sighting.name === targetItem,
+          remembered: staleMemory,
+          source: "memory" as const,
+          observationKind: staleMemory ? "memory" as const : "strategic" as const,
+          observedAt: staleMemory ? null : observedAt,
+        };
+      });
+    const worldBlocks = [...observedBlocks, ...strategicBlocks, ...rememberedBlocks];
     // How the world data below relates to the live session. A viewer must be able to tell "the agent is
     // looking at the world" from "the viewer is looking at the last thing it saw" from "there is nothing
     // to look at", because those three used to render identically.
@@ -565,6 +630,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         statusChangedAt: status.statusChangedAt,
         worldAvailable: status.adapterStatus === "connected" && status.worldLive,
       },
+      companion: source.companion?.snapshot() ?? null,
       agent: {
         // An operator hold is reported even between tasks: pausing while idle still blocks the next run,
         // and the UI must not make that look like an ordinary idle agent.
@@ -611,6 +677,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
             }
           : null,
         vitalsObservedAt: state?.player.session?.vitalsObservedAt ?? null,
+        terrain: state ? buildLocalTerrainModel(state).summary() : null,
         perception: state?.perception
           ? {
               ...state.perception,

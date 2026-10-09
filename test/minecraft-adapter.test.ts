@@ -358,6 +358,9 @@ test("Minecraft inspect, bounded navigation, single-log collection, and equip co
   });
   assert.equal(collected.action.status, "succeeded");
   assert.equal(collected.action.confirmed, true);
+  assert.equal(collected.action.confirmation, "target_block_removed_and_inventory_delta_checked");
+  assert.equal(collected.action.details?.blockRemoved, true);
+  assert.equal(collected.action.details?.inventoryGained, true);
   assert.equal(collected.action.details?.inventoryBefore, 0);
   assert.equal(collected.action.details?.inventoryAfter, 1);
   assert.equal(collected.observationAfter?.state.inventory[0]?.name, "oak_log");

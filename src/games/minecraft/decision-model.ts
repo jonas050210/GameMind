@@ -30,6 +30,7 @@ import { bestWeapon, combatIsAllowed } from "./combat.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
 import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
+import { buildLocalTerrainModel } from "./terrain-model.js";
 import type { MinecraftObservation } from "./observation.js";
 import { craftItemTaskSchema } from "./task.js";
 import type {
@@ -222,6 +223,8 @@ interface KnownBlock {
   readonly position: { readonly x: number; readonly y: number; readonly z: number };
   readonly ripe: boolean | null;
   readonly distance: number;
+  /** True only when this exact block appears in the current observation, not merely world memory. */
+  readonly confirmedCurrent: boolean;
 }
 
 interface Threats {
@@ -334,7 +337,7 @@ function assessThreats(state: MinecraftObservation, memory: WorldMemory, dangerR
 function knownBlocks(state: MinecraftObservation, memory: WorldMemory, names: ReadonlySet<string>): KnownBlock[] {
   const byKey = new Map<string, KnownBlock>();
   const player = state.player.position;
-  const add = (name: string, position: { x: number; y: number; z: number }, ripe: boolean | null): void => {
+  const add = (name: string, position: { x: number; y: number; z: number }, ripe: boolean | null, confirmedCurrent: boolean): void => {
     if (!names.has(name)) return;
     const key = positionKey(position);
     const existing = byKey.get(key);
@@ -344,16 +347,17 @@ function knownBlocks(state: MinecraftObservation, memory: WorldMemory, names: Re
       position: { x: position.x, y: position.y, z: position.z },
       ripe: ripe ?? existing?.ripe ?? null,
       distance: distanceBetween(centerOf(position), player),
+      confirmedCurrent: confirmedCurrent || existing?.confirmedCurrent === true,
     });
   };
-  for (const sighting of memory.blockSightings(names)) add(sighting.name, sighting.position, sighting.ripe);
+  for (const sighting of memory.blockSightings(names)) add(sighting.name, sighting.position, sighting.ripe, false);
   for (const block of state.nearbyBlocks) {
-    if (isResourceBlockName(block.name)) add(block.name, block.position, null);
+    if (isResourceBlockName(block.name)) add(block.name, block.position, null, true);
   }
   for (const sighting of state.resourceSightings) {
     const ripe =
       sighting.properties !== undefined ? isRipeBerryBush(sighting.name, sighting.properties) : null;
-    add(sighting.name, sighting.position, ripe);
+    add(sighting.name, sighting.position, ripe, true);
   }
   return [...byKey.values()].sort((left, right) => left.distance - right.distance || left.key.localeCompare(right.key));
 }
@@ -742,21 +746,22 @@ function mineableTargets(
 ): KnownBlock[] {
   const byKey = new Map<string, KnownBlock>();
   const player = state.player.position;
-  const add = (name: string, position: { x: number; y: number; z: number }): void => {
+  const add = (name: string, position: { x: number; y: number; z: number }, confirmedCurrent: boolean): void => {
     if (!names.has(name) || !isMineableBlockName(name)) return;
     const key = positionKey(position);
-    if (byKey.has(key)) return;
+    const existing = byKey.get(key);
     byKey.set(key, {
       key,
       name,
       position: { x: position.x, y: position.y, z: position.z },
       ripe: null,
       distance: distanceBetween(centerOf(position), player),
+      confirmedCurrent: confirmedCurrent || existing?.confirmedCurrent === true,
     });
   };
-  for (const block of state.nearbyBlocks) add(block.name, block.position);
-  for (const sighting of state.minableSightings ?? []) add(sighting.name, sighting.position);
-  for (const sighting of memory.minableSightings(names)) add(sighting.name, sighting.position);
+  for (const sighting of memory.minableSightings(names)) add(sighting.name, sighting.position, false);
+  for (const block of state.nearbyBlocks) add(block.name, block.position, true);
+  for (const sighting of state.minableSightings ?? []) add(sighting.name, sighting.position, true);
   return [...byKey.values()].sort((left, right) => left.distance - right.distance || left.key.localeCompare(right.key));
 }
 
@@ -1076,6 +1081,7 @@ function explorationCandidate(
   // hostiles are handled by the waypoint scoring, which avoids remembered hostile positions.
   if (threats.visibleHostiles.some((hostile) => distance(hostile.position, player) <= task.dangerRadius * 2)) return null;
   const origin = context.origin ?? { x: player.x, z: player.z };
+  const terrain = buildLocalTerrainModel(state);
   const waypoint = chooseExplorationWaypoint(memory, {
     from: { x: player.x, z: player.z },
     origin,
@@ -1084,6 +1090,12 @@ function explorationCandidate(
     maxLeg: 40,
     hostileAvoidRadius: task.dangerRadius + 4,
     excludedKeys: context.excludedTargets,
+    destinationUnsafe: (x, z) => terrain.destinationUnsafe(x, z),
+    routeRisk: (x, z) => {
+      const route = terrain.assessRoute({ x, z });
+      // Unknown is the point of exploration; only currently observed hazards/obstacles penalise a leg.
+      return route.risk - route.unknownColumns * 0.35;
+    },
   });
   if (!waypoint) return null;
   const legsLeft = task.maxExplorationLegs - legsUsed;
@@ -1136,6 +1148,7 @@ function gatherCandidates(
   let tried = 0;
   const candidates: DecisionCandidate[] = [];
   const currentCount = itemCount(state, task.resourceName);
+  const terrain = buildLocalTerrainModel(state);
   for (const block of blocks) {
     const goalId = `collect:${task.resourceName}`;
     if (context.excludedTargets.has(block.key)) {
@@ -1156,6 +1169,33 @@ function gatherCandidates(
       );
       continue;
     }
+    if (!block.confirmedCurrent) {
+      const refreshKey = `refresh:${block.key}`;
+      if (context.excludedTargets.has(refreshKey)) {
+        tried += 1;
+        context.ledger?.note(
+          { goalId: `refresh:${task.resourceName}`, targetKey: refreshKey, priorityBand: BAND_PROGRESS },
+          "excluded_after_failure",
+          "this remembered block could not be refreshed in the current run",
+        );
+        continue;
+      }
+      const inspect = block.distance <= 6 && available(context, "minecraft.inspect-block");
+      const navigate = available(context, "minecraft.navigate");
+      if (inspect || navigate) {
+        const route = terrain.assessRoute({ x: block.position.x + 0.5, z: block.position.z + 0.5 });
+        candidates.push({
+          goalId: `refresh:${task.resourceName}`,
+          priorityBand: BAND_PROGRESS,
+          score: 525 - block.distance - route.risk,
+          skillId: inspect ? "minecraft.inspect-block" : "minecraft.navigate",
+          input: inspect ? { ...block.position } : { ...block.position, range: 3 },
+          targetKey: refreshKey,
+          rationale: `World memory last saw ${task.resourceName} at ${block.key}, but the current observation does not confirm it. ${inspect ? "Inspect the exact block" : "Approach the remembered position"} before attempting collection. Current direct-corridor evidence: ${route.summary} (${route.confidence}).`,
+        });
+      }
+      continue;
+    }
     if (block.distance > task.maxTargetDistance) {
       beyond += 1;
       const approach = approachCandidate(
@@ -1167,17 +1207,25 @@ function gatherCandidates(
         "approach",
         task.resourceName,
       );
-      if (approach) candidates.push(approach);
+      if (approach) {
+        const route = terrain.assessRoute({ x: block.position.x + 0.5, z: block.position.z + 0.5 });
+        candidates.push({
+          ...approach,
+          score: approach.score - route.risk,
+          rationale: `${approach.rationale} Current direct-corridor evidence: ${route.summary} (${route.confidence}).`,
+        });
+      }
       continue;
     }
+    const route = terrain.assessRoute({ x: block.position.x + 0.5, z: block.position.z + 0.5 });
     candidates.push({
       goalId,
       priorityBand: BAND_PROGRESS,
-      score: 500 - block.distance,
+      score: 500 - block.distance - route.risk,
       skillId: "minecraft.collect-log",
       input: { ...block.position, blockName: task.resourceName, dangerRadius: task.dangerRadius },
       targetKey: block.key,
-      rationale: `Collect the nearest observed ${task.resourceName} (${block.distance.toFixed(1)} blocks away); inventory has ${currentCount}/${task.targetCount}.`,
+      rationale: `Collect observed ${task.resourceName} ${block.distance.toFixed(1)} blocks away; inventory has ${currentCount}/${task.targetCount}. Current direct-corridor evidence: ${route.summary} (${route.confidence}).`,
     });
   }
   candidates.sort((left, right) => right.score - left.score || (left.targetKey ?? "").localeCompare(right.targetKey ?? ""));
