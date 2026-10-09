@@ -50,6 +50,7 @@ import {
   plankNameForLog,
 } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { describeSessionField, isSurvivalLike, type SessionFieldInfo } from "./live-session.js";
 import { blockKey, WorldMemory, type ItemSighting } from "./world-memory.js";
 export { isHostileMinecraftEntity } from "./threats.js";
 
@@ -130,6 +131,8 @@ export class RejectionLedger {
     reason: DecisionRejection["reason"],
     detail: string,
   ): void {
+    // Deduped by target and reason, so a note that is not about a concrete target needs its own key —
+    // two different "not applicable" explanations sharing a null key would otherwise collapse into one.
     if (this.entries.some((entry) => entry.targetKey === candidate.targetKey && entry.reason === reason)) return;
     this.entries.push({
       goalId: candidate.goalId,
@@ -171,11 +174,46 @@ export class RejectionLedger {
   }
 }
 
+/** A session fact as it reached the planner, with the evidence behind it. */
+export type DecisionSessionFact = SessionFieldInfo;
+
 export interface MinecraftDecisionRecord extends DecisionRecord {
   /** Projected remaining steps toward the goal. Descriptive; each step is re-decided from fresh state. */
   readonly plan: readonly string[];
   readonly band: number | null;
   readonly knowledge: ReturnType<WorldMemory["summary"]>;
+  /**
+   * What the live session said about dimension and game mode for this decision. Surfaced so the operator
+   * can see `survival (verified)` versus `unknown (unreported)` even on a run that is not blocked.
+   */
+  readonly session?: { readonly dimension: DecisionSessionFact; readonly gameMode: DecisionSessionFact };
+  /** Skills every route to this task needs that the adapter never advertised; null when they are all present. */
+  readonly capabilityGap?: readonly string[] | null;
+}
+
+/** Rebuilds the evidence for the game mode from the observation the decision was made on. */
+function playerGameModeField(state: MinecraftObservation): DecisionSessionFact {
+  const reported = state.player.session?.gameMode;
+  const value = state.player.gameMode;
+  return {
+    value,
+    evidence: reported?.evidence ?? (value === null ? "unreported" : "single-source"),
+    source: reported?.source ?? "observation.player.gameMode",
+    observed: reported?.observed ?? `gameMode=${JSON.stringify(value) ?? "undefined"}`,
+    note: reported?.note ?? null,
+  };
+}
+
+function playerDimensionField(state: MinecraftObservation): DecisionSessionFact {
+  const reported = state.player.session?.dimension;
+  const value = state.player.dimension;
+  return {
+    value,
+    evidence: reported?.evidence ?? (value === null ? "unreported" : "single-source"),
+    source: reported?.source ?? "observation.player.dimension",
+    observed: reported?.observed ?? `dimension=${JSON.stringify(value) ?? "undefined"}`,
+    note: reported?.note ?? null,
+  };
 }
 
 interface KnownBlock {
@@ -222,6 +260,28 @@ function distance(
 
 function available(context: MinecraftDecisionContext, skillId: string): boolean {
   return context.availableSkills === undefined || context.availableSkills.has(skillId);
+}
+
+/**
+ * The skills that could possibly carry each task kind to completion. A task whose every route is
+ * unregistered can never finish, and saying so is different from saying "no feasible goal right now" —
+ * the first is a missing capability, the second a perception or safety problem.
+ */
+const TASK_SKILL_ROUTES: Record<string, readonly string[]> = {
+  gather_resource: ["minecraft.collect-log", "minecraft.mine-block", "minecraft.pickup-item"],
+  mine_resource: ["minecraft.mine-block", "minecraft.pickup-item"],
+  secure_food: ["minecraft.eat-food", "minecraft.harvest-berries", "minecraft.pickup-item"],
+  build_shelter: ["minecraft.build-shelter", "minecraft.place-block", "minecraft.mine-block"],
+  craft_item: ["minecraft.craft-item", "minecraft.place-crafting-table"],
+};
+
+/** Skills the task needs that this adapter does not advertise, or null when every route is registered. */
+function capabilityGap(task: MinecraftTask, context: MinecraftDecisionContext): readonly string[] | null {
+  if (context.availableSkills === undefined) return null;
+  const routes = TASK_SKILL_ROUTES[task.kind];
+  if (!routes) return null;
+  const missing = routes.filter((skillId) => !context.availableSkills?.has(skillId));
+  return missing.length === routes.length ? missing : null;
 }
 
 function isExcluded(context: MinecraftDecisionContext, key: string | null): boolean {
@@ -589,7 +649,7 @@ function nightPressure(state: MinecraftObservation): "night" | "approaching" | "
   const time = state.time;
   if (!time) return "day";
   if (time.isNight) return "night";
-  return time.dayTicks >= NIGHT_APPROACH_TICKS && time.dayTicks < MINECRAFT_NIGHT_START_TICKS_FALLBACK
+  return time.dayTicks !== null && time.dayTicks >= NIGHT_APPROACH_TICKS && time.dayTicks < MINECRAFT_NIGHT_START_TICKS_FALLBACK
     ? "approaching"
     : "day";
 }
@@ -640,6 +700,8 @@ function shelterCandidate(
     );
     return null;
   }
+  // Unreported health must not become an *urgent* shelter goal, so it scores as the least-healthy-but-not
+  // critical case only for the `hurt` path that already requires a reading; everywhere else it is neutral.
   const health = state.player.health ?? 20;
   return {
     goalId: "build-shelter",
@@ -650,7 +712,7 @@ function shelterCandidate(
     targetKey,
     rationale:
       reason === "hurt"
-        ? `Health is ${health.toFixed(1)}/20 with ${open} open side(s) and ${placeable.total} placeable block(s) carried; close the ring so regeneration is not interrupted.`
+        ? `Health is ${state.player.health === null ? "not reported" : `${health.toFixed(1)}/20`} with ${open} open side(s) and ${placeable.total} placeable block(s) carried; close the ring so regeneration is not interrupted.`
         : reason === "night"
           ? `${pressure === "night" ? "It is night" : "Night is approaching"} and ${open} side(s) are open; close them with carried blocks before wandering.`
           : `The task is to close ${open} open side(s) with ${placeable.total} carried block(s).`,
@@ -1691,6 +1753,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       selected: DecisionCandidate | null,
       alternatives: readonly DecisionCandidate[],
       summary: string,
+      blockingCode: string | null = null,
     ): MinecraftDecisionRecord => ({
       modelId: this.modelId,
       decidedAt,
@@ -1699,6 +1762,9 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       alternatives,
       terminalStatus,
       summary,
+      blockingCode,
+      capabilityGap: capabilityGap(task, context),
+      session: { dimension: playerDimensionField(state), gameMode: playerGameModeField(state) },
       plan: planFor(selected, state, task),
       band: selected?.priorityBand ?? null,
       knowledge: memory.summary(),
@@ -1718,8 +1784,15 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
 
     // 1. Completion is judged from the observed world, never from the planner's intent.
     if (task.kind === "secure_food") {
-      const hunger = state.player.food ?? 0;
-      if (hunger >= task.targetHunger) {
+      const hunger = state.player.food;
+      if (hunger === null) {
+        ledger.note(
+          { goalId: "task:secure_food", targetKey: "task:secure-food-hunger", priorityBand: BAND_SURVIVAL, score: 0 },
+          "not_applicable",
+          "hunger was not reported by the session, so the food target can be neither met nor missed",
+        );
+      }
+      if (hunger !== null && hunger >= task.targetHunger) {
         return record("completed", null, [], `Task condition met: hunger ${hunger}/20 reached the target of ${task.targetHunger}.`);
       }
     } else if (task.kind === "build_shelter") {
@@ -1773,6 +1846,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
         null,
         [],
         "All untried conservative flee destinations were exhausted while a hostile remains nearby; stop rather than approach a resource.",
+        "TASK_BLOCKED_THREAT",
       );
     }
 
@@ -1783,11 +1857,45 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       return record(null, choice.selected, choice.alternatives, `Recover from ${context.stuck?.reason ?? "a stall"} with an alternative route before retrying the goal.`);
     }
 
-    if (state.player.gameMode !== "survival") {
-      return record("blocked", null, [], `Minecraft task skills are limited to survival mode; current mode is '${state.player.gameMode}'.`);
+    // The gates below read the session facts, not a bare string comparison: a mode the server never
+    // reported is reported as unknown and does not stop the run, while a mode the session *did* report as
+    // Creative blocks it with the evidence in the message. This is the difference between a false refusal
+    // and an honest one.
+    const modeField = playerGameModeField(state);
+    const modeValue = state.player.gameMode;
+    if (modeValue !== null && !isSurvivalLike(modeValue)) {
+      return record(
+        "blocked",
+        null,
+        [],
+        `Minecraft task skills are limited to survival mode; ${describeSessionField(modeField)}.`,
+        "TASK_BLOCKED_MODE",
+      );
     }
-    if (task.kind === "gather_resource" && state.player.dimension !== "overworld") {
-      return record("blocked", null, [], `Log collection is currently restricted to the overworld; current dimension is '${state.player.dimension}'.`);
+    const dimensionField = playerDimensionField(state);
+    const dimensionValue = state.player.dimension;
+    if (task.kind === "gather_resource" && dimensionValue !== null && dimensionValue !== "overworld") {
+      return record(
+        "blocked",
+        null,
+        [],
+        `Log collection is currently restricted to the overworld; ${describeSessionField(dimensionField)}.`,
+        "TASK_BLOCKED_DIMENSION",
+      );
+    }
+    if (modeField.evidence === "unreported" || modeField.evidence === "conflicting") {
+      ledger.note(
+        { goalId: "session:game-mode", targetKey: "session:game-mode", priorityBand: BAND_SAFETY, score: 0 },
+        "not_applicable",
+        `the game mode is ${modeField.evidence} (${modeField.observed}); the run continues without claiming a mode`,
+      );
+    }
+    if (dimensionField.evidence === "unreported" || dimensionField.evidence === "conflicting") {
+      ledger.note(
+        { goalId: "session:dimension", targetKey: "session:dimension", priorityBand: BAND_SAFETY, score: 0 },
+        "not_applicable",
+        `the dimension is ${dimensionField.evidence} (${dimensionField.observed}); overworld-only work is reported as unverified rather than assumed`,
+      );
     }
 
     // 3. Survival candidates: eat, food sourcing, and recovering health through rest.
@@ -1807,9 +1915,18 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     if (rest) survival.push(rest);
 
     // Shelter: hurt and exposed, or darkness with open sides. It is a survival goal, not a build project.
-    const healthValue = state.player.health ?? 20;
+    // A missing health reading never becomes "healthy" (which would hide danger) and never becomes
+    // "critically hurt" (which would invent an emergency): the hurt trigger needs the reading.
+    const healthValue = state.player.health;
+    if (healthValue === null) {
+      ledger.note(
+        { goalId: "build-shelter", targetKey: "session:health", priorityBand: BAND_SURVIVAL, score: 0 },
+        "not_applicable",
+        "health was not reported by the session, so no hurt-driven shelter goal could be formed",
+      );
+    }
     const shelterReason: "hurt" | "night" | null =
-      healthValue <= REST_HEALTH_THRESHOLD && threats.visibleHostiles.length === 0
+      healthValue !== null && healthValue <= REST_HEALTH_THRESHOLD && threats.visibleHostiles.length === 0
         ? "hurt"
         : nightPressure(state) !== "day" && threats.visibleHostiles.length > 0
           ? "night"
@@ -1844,7 +1961,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
           : !restBudgetLeft
             ? `Health is critically low (${health}/20) and the task's rest budget of ${task.maxRestMs} ms is spent; stop rather than risk further damage.`
             : `Health is critically low (${health}/20); resting is blocked by a visible hostile, so stop rather than risk further damage.`;
-      return record("blocked", null, [], message);
+      return record("blocked", null, [], message, "TASK_BLOCKED_HEALTH");
     }
     if (criticalFood) {
       return record(
@@ -1852,6 +1969,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
         null,
         [],
         `Hunger is critically low (${hunger}/20), but no supported food is in inventory and no food source is known or reachable; stopping instead of spending the remaining survival budget on task progress.`,
+        "TASK_BLOCKED_HUNGER",
       );
     }
     if (task.kind === "secure_food") {
@@ -1860,6 +1978,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
         null,
         [],
         `Hunger is ${hunger ?? "unknown"}/${task.targetHunger} and no food is in inventory, no dropped food or ripe berry bush is known, and exploration cannot continue.`,
+        "TASK_BLOCKED_HUNGER",
       );
     }
 
@@ -1883,6 +2002,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
         null,
         [],
         `Cannot close the shelter here: ${plan}. Gather placeable blocks or move to ground with solid support.`,
+        "TASK_BLOCKED_SHELTER",
       );
     }
     return this.decideCraft(state, memory, task, threats, context, record);
@@ -1899,6 +2019,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       selected: DecisionCandidate | null,
       alternatives: readonly DecisionCandidate[],
       summary: string,
+      blockingCode?: string | null,
     ) => MinecraftDecisionRecord,
   ): MinecraftDecisionRecord {
     const gather = gatherCandidates(state, memory, task, threats, context).candidates.filter((candidate) =>
@@ -1927,7 +2048,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
           : counts.known > 0
             ? `No ${task.resourceName} target is safe and reachable, and exploration is exhausted or unavailable.`
             : `No ${task.resourceName} block is currently known in the observed or remembered world state, and exploration is exhausted or unavailable.`;
-    return record("blocked", null, [], summary);
+    return record("blocked", null, [], summary, counts.known > 0 ? "TASK_BLOCKED_TARGETS" : "TASK_BLOCKED_TARGETS");
   }
 
   /**
@@ -1947,6 +2068,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       selected: DecisionCandidate | null,
       alternatives: readonly DecisionCandidate[],
       summary: string,
+      blockingCode?: string | null,
     ) => MinecraftDecisionRecord,
   ): MinecraftDecisionRecord {
     const drop = miningDropFor(task.resourceName) ?? task.resourceName;
@@ -1992,6 +2114,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
         null,
         [],
         `Cannot mine ${task.resourceName}: it needs a tier-${requirement.minPickaxeTier} pickaxe, none is carried, and ${plan.reason}`,
+        "TASK_BLOCKED_TOOL",
       );
     }
 
@@ -2029,7 +2152,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       mined.length === 0 && mineableTargets(state, memory, blockNames).length === 0
         ? `no ${[...blockNames].join(" or ")} block is observed or remembered, and exploration is exhausted`
         : `${mineCandidates(state, memory, { blockNames, dropItem: drop, dangerRadius: task.dangerRadius, maxDistance: task.maxTargetDistance, task }, context).threatened} target(s) were refused because a hostile is nearby`;
-    return record("blocked", null, [], `Cannot mine ${task.resourceName} right now: ${reason}.`);
+    return record("blocked", null, [], `Cannot mine ${task.resourceName} right now: ${reason}.`, "TASK_BLOCKED_TARGETS");
   }
 
   private decideCraft(
@@ -2043,6 +2166,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       selected: DecisionCandidate | null,
       alternatives: readonly DecisionCandidate[],
       summary: string,
+      blockingCode?: string | null,
     ) => MinecraftDecisionRecord,
   ): MinecraftDecisionRecord {
     const known = knownBlocks(state, memory, new Set<string>([...minecraftLogNames, "crafting_table", "sweet_berry_bush"]));
@@ -2054,6 +2178,6 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     if (explore) {
       return record(null, explore, [], `${plan.reason} Exploring a bounded unexplored area for the missing prerequisite.`);
     }
-    return record("blocked", null, [], plan.reason);
+    return record("blocked", null, [], plan.reason, "TASK_BLOCKED_TARGETS");
   }
 }

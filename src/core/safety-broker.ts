@@ -114,12 +114,13 @@ export interface SafetyWorldContext {
   readonly observedAtMs: number;
   readonly health: number | null;
   readonly food: number | null;
-  readonly gameMode: string;
+  /** The game mode as the live session reported it; null when it reported nothing usable. */
+  readonly gameMode: string | null;
   readonly visibleHostiles: number;
   readonly nearestHostileDistance: number | null;
   readonly isNight: boolean;
-  /** Dimension id when the adapter reports one, e.g. "minecraft:the_void". */
-  readonly dimension?: string;
+  /** Dimension id when the adapter reports one, e.g. "minecraft:the_void"; null when unreported. */
+  readonly dimension?: string | null;
   /** Feet/eye height in blocks; used only for the void-floor check when the dimension is unknown. */
   readonly positionY?: number | null;
   /** Distance to the closest observed hazard block (lava, fire, magma), null when nothing was seen. */

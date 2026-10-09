@@ -134,16 +134,47 @@ After any run, open `data/traces/<session-id>.jsonl` (the session id is in the `
 npm run dev -- --task gather-logs --host 127.0.0.1 --port 25565 --username GameMind --control-center
 ```
 
-Open the printed URL (`http://127.0.0.1:8787/`) on the same machine. Then check, in order:
+Open the printed URL (`http://127.0.0.1:8787/`) on the same machine. The page has no push channel: it
+re-reads `/api/snapshot` every second while a task runs (3 s idle, 15 s in a hidden tab), so a panel that
+updates is evidence the runtime is producing new state, not evidence of a lost event. Then check, in order:
 
-1. The header shows `minecraft-java · seq N` with N increasing while the run is live, and the world panel shows your real position, health, hunger and inventory — not the values from any previous run.
-2. The Current decision panel shows the goal that is actually running. Open "Alternatives considered": rejections must name a real reason (`combat is not enabled for this run…`, `target excluded after repeated failure`, `danger radius around the target`, …).
-3. Press **Pause** mid-run. The next action must be denied with `RUN_PAUSED` and appear under "Failures and refusals"; the agent must keep observing. **Resume** continues it.
-4. Press **Trip**, then **Stop task**. The run must end as `aborted` / `OPERATOR_STOP` after the action in flight, never in the middle of one.
-5. Start a task from the dashboard (`mine-stone`, count 2). It must go through the same limits as the CLI; `Actions` counts up and the map highlights the target block class when it is observed.
-6. Reload the page: the token comes from the served page, so the controls keep working; `POST /api/command` from a terminal without the header must return `403`, and an unknown command `501`.
+1. The header shows `minecraft-java · seq N` with N increasing while the run is live, and the world panel's
+   first line reads `live — observation #N (Xs old)` with X staying small (an idle connected agent is
+   refreshed by the dashboard poll itself; if the line ever reads `stale — observation #N is …s old` while
+   the CLI is still observing, the refresh is broken).
+2. Health, hunger, saturation, air and the inventory must match the client exactly, including when the
+   server reports nothing. A field the session never sent must appear as `not reported` — never as 20
+   health, 20 food, 5 saturation or a full air bar. Drown the agent to a few air ticks and confirm the
+   value falls with `bot.oxygenLevel × 15`; on death, `alive` must follow the real session.
+3. Dimension and game mode are shown with their evidence: `survival · verified (bot.game.gameMode +
+   bot.player.gamemode)`, `survival · one source (…)`, or `unknown · not reported by the session`. Switch
+   mode mid-run with `/gamemode creative GameMind` and the panel must change **and** the next action must be
+   refused with `GAME_MODE_BLOCKS_*`; switch back to survival and the refusal must clear. `/execute in
+   minecraft:the_nether run tp …` must move the dimension line to `the_nether` and gate overworld-only work
+   with `UNSUPPORTED_DIMENSION`.
+4. The Current decision panel shows the goal that is actually running, and its `session` line repeats the
+   mode/dimension the decision was made from. Open "Alternatives considered": rejections must name a real
+   reason (`combat is not enabled for this run…`, `target excluded after repeated failure`, `danger radius
+   around the target`, …).
+5. Press **Pause** mid-run. The next action must be denied with `RUN_PAUSED`, the blocker card must read
+   `safety · RUN_PAUSED · who: you`, and the agent must keep observing. **Resume** continues it and the card
+   returns to `idle`.
+6. Press **Trip**, then **Stop task**. The run must end as `aborted` / `OPERATOR_STOP` after the action in
+   flight, never in the middle of one.
+7. Start a task from the dashboard (`mine-stone`, count 2). It must go through the same limits as the CLI;
+   `Actions` counts up and the map highlights the target block class when it is observed.
+8. Kill the server process mid-run. The connection state, the `status reason` line and the blocker card must
+   say `connection · … · who: server` within one poll; a disconnect must never be displayed as a task
+   failure or a safety refusal.
+9. Reload the page: the token comes from the served page, so the controls keep working; `POST /api/command`
+   from a terminal without the header must return `403`, an unknown command `501`, and `GET /api/stream`
+   must return `410` with `STREAM_REMOVED` (the live event stream is retired; polling replaced it).
 
-**Record:** any panel that stayed empty while the CLI log showed the event, and every control that reported success without a matching trace line. The dashboard is verified against a live agent by `test/control-center.test.ts`; this section verifies it against Minecraft.
+**Record:** any panel that stayed unchanged while the CLI log showed new state, any number the panel showed
+that the client did not report, and every control that reported success without a matching trace line. The
+dashboard's wiring, its poll model, the blocker taxonomy and the fallback renderer are covered offline by
+`test/control-center.test.ts`, `test/session-gates.test.ts` and `test/world-view.test.ts`; this section is
+the only place that can verify them against Minecraft.
 
 ## 11. Experience memory across two runs
 
@@ -197,6 +228,28 @@ Use only a disposable world. With `MINECRAFT_AUTO_RESPAWN` unset (default `true`
 
 **Record:** the environment setting, death and respawn trace timestamps, terminal status/failure code, recovery metrics, and confirmation that no action began while dead. This check has not been executed against a live server; simulated death/recovery tests are not live evidence.
 
+## 15. Session facts under a real login sequence
+
+**Setup:** join a server that has *not* been touched by the agent before, with the agent in survival, and
+watch the first two observations in the trace plus the dashboard's world panel.
+
+```bash
+npm run dev -- --look-yaw 0 --host 127.0.0.1 --port 25565 --username GameMind --control-center
+```
+
+**Expected:** on the very first observation the `player.session` line may still read
+`not reported` for mode or dimension, because Mineflayer fills `bot.game` only with the login packets — but
+the task must then keep running and the panel must fill in, not block. A `bot.game = {}` server, a server
+that answers `login` with a numeric dimension (`0`, `-1`, `1`) and one that answers with a level name
+(`world`, `World`, `DIM-1`) must all reach a canonical reading (`overworld`, `the_nether`, `the_end`) or an
+honest `unrecognised dimension name` — never `no overworld` for a plain survival world. A custom dimension
+such as `custom:lobby` must appear verbatim as an unknown, non-overworld value.
+
+**Record:** the raw `bot.game` values (the `observed` strings in `player.session` quote them), which of the
+two mode sources answered, how many observations the first decision waited for, and whether any action was
+refused while a fact was only `unreported` — a refusal without a positively reported value is a defect: the
+policy is to block on a verified wrong value and to proceed while stating the uncertainty.
+
 ## Open questions this checklist answers
 
 | Question | Check | Current status |
@@ -214,6 +267,10 @@ Use only a disposable world. With `MINECRAFT_AUTO_RESPAWN` unset (default `true`
 | Do placed blocks survive an observed check on a real server (shelter sides)? | §13 | Unverified |
 | Does `bot.attack` plus health tracking confirm damage on 1.20.4 mobs? | §12 | Unverified |
 | Does the Control Center see live observations, and do Pause/Trip/Stop reach the running agent? | §10 | Unverified |
+| Does the panel report `not reported` instead of a default when the server sends no vitals? | §10, §15 | Unverified |
+| Does a mid-run `/gamemode` change both update the panel and gate/ungate actions? | §10 | Unverified |
+| Does the mode/dimension read survive `bot.game = {}`, numeric dimensions and level names? | §15 | Unverified |
+| Does the world view draw current blocks with a correct horizon (fog, near/far) at 1.20.4 chunk density? | §10 | Unverified |
 | Does the experience memory change a second live run in the same world? | §11 | Unverified |
 | Does Mineflayer auto-respawn by default, and does the task runner wait action-free until alive? | §14 | Unverified |
 

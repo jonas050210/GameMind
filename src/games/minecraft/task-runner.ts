@@ -281,7 +281,8 @@ function delay(ms: number): Promise<void> {
 }
 
 function playerIsAlive(state: MinecraftObservation): boolean {
-  if (state.player.alive !== undefined) return state.player.alive;
+  // Only a *proven* statement of being alive counts as evidence; `null` means the session did not say.
+  if (typeof state.player.alive === "boolean") return state.player.alive;
   // Missing health is not evidence of death for older or partial adapters.
   return state.player.health === null || state.player.health > 0;
 }
@@ -595,7 +596,15 @@ export class MinecraftTaskRunner {
         }
         if (decision.terminalStatus === "blocked" || !decision.selected) {
           status = "blocked";
-          failure = { code: "NO_FEASIBLE_GOAL", message: decision.summary };
+          // The decision model names the reason it stopped; only when it says nothing do we fall back to
+          // "no feasible goal", which used to be reported for every stoppage whatsoever.
+          const gap = (decision as { capabilityGap?: readonly string[] | null }).capabilityGap ?? null;
+          failure = {
+            code: decision.blockingCode ?? "NO_FEASIBLE_GOAL",
+            message: gap && gap.length > 0
+              ? `${decision.summary} No registered skill can carry this task: ${gap.join(", ")} ${gap.length === 1 ? "is" : "are"} not available for this adapter.`
+              : decision.summary,
+          };
           break;
         }
         if (actions.length >= task.maxActions) {

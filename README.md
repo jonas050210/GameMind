@@ -154,8 +154,25 @@ Controls that exist because the runtime actually implements them:
 | Stop task | Cooperative stop checked between actions; the run ends as `aborted` / `OPERATOR_STOP` with the operator's reason. |
 | Start task | Builds a task through the same zod schemas the CLI uses (kind, resource, count), refuses while tripped or paused, and refuses a second task while one runs. |
 | Promote / roll back policy | `ExperienceLearner.promote()` / `rollback()`, refusing when any confirmation was contradicted or the candidate never left the baseline. |
+| Nothing about the world | The dashboard is read-only for game state: it can hold, arm and stop the agent, and it never writes to the world or to `bot.*`. |
 
-The HTTP surface is `GET /api/health`, `GET /api/snapshot`, `GET /api/stream` (SSE) and `POST /api/command`. Writes require the `x-gamemind-token` header, and the token is injected into the served page only — it is not readable from any endpoint. A command the host cannot honour returns `501`, and a host command that reports failure returns `409` with its message, so the UI can never look like it worked when nothing happened.
+Two panels carry their own provenance, because "blocked" and "a flat map of blocks" are not explanations:
+
+- **Blocker** classifies the one thing stopping the loop — safety refusal, missing capability, connection
+  fault, missing perception, planner decline or task failure — with the source's own reason verbatim, who
+  has to act, and whether the agent can clear it by retrying (`src/core/failure-taxonomy.ts` is the single
+  classifier behind the dashboard, the CLI report and the trace).
+- **Observed world** states which observation its numbers came from (`live · observation #43 (2s old)`,
+  `stale`, `session-changed`, or `simulated world`), and shows dimension and game mode as the session
+  reported them — `survival · verified (bot.game.gameMode + bot.player.gamemode)` versus `unknown · not
+  reported by the session` — with the same evidence attached to every decision record.
+
+The HTTP surface is `GET /api/health`, `GET /api/snapshot` and `POST /api/command`. The page reads the
+snapshot on an interval (1 s while a task runs, 3 s while idle, 15 s while the tab is hidden) — there is no
+push stream: every frame it would have sent was a re-send of the same snapshot, and `GET /api/stream`
+answers `410 STREAM_REMOVED` so an old bookmark says so instead of hanging. Writes require the
+`x-gamemind-token` header, and the token is injected into the served page only — it is not readable from
+any endpoint. A command the host cannot honour returns `501`, and a host command that reports failure returns `409` with its message, so the UI can never look like it worked when nothing happened.
 
 **What it deliberately does not do:** it keeps only the recent trace window in memory (400 events; the durable trace is `data/traces/*.jsonl`), it does not persist a full terrain map or moving entities, it exposes no free-form command console or credential handling, and it cannot bypass the safety broker. Persisted world memory stores only last-seen resource/minable locations and explored coverage; the default key (server host + port + dimension) cannot distinguish a reset/replaced world at the same endpoint, so use `--world-key` / `GAMEMIND_WORLD_KEY` to give separate worlds distinct identities. The UI authenticates with a per-process token but no TLS: keep it on loopback or a trusted network. Perception timings are the adapter's last scan sample, not a complete hardware benchmark.
 

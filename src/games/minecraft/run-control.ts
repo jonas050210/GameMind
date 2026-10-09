@@ -27,6 +27,8 @@ import { miningDropFor } from "./mining.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
 import type { EvaluationSummary } from "../../control-center/types.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
+import { classifyFailure, type FailureKind } from "../../core/failure-taxonomy.js";
+import { MINECRAFT_SAFETY_POLICY } from "./safety-context.js";
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
@@ -51,6 +53,13 @@ export interface RunControl {
 
 export interface ControlCenterSource {
   readonly runtime: GameMindRuntime<MinecraftObservation>;
+  /**
+   * What the world data behind this snapshot is made of. `"simulated"` forces the banner and the
+   * provenance line, because a simulated world must never be presented as a live observation.
+   */
+  readonly worldSource?: "live" | "simulated";
+  /** Last dimension/game-mode change the live session reported, when the adapter can say. */
+  readonly sessionChange?: () => { at: string; kind: string; detail: string } | null;
   readonly memory: WorldMemory;
   readonly learner: ExperienceLearner | null;
   /** Null when the host deliberately runs without a broker; every safety control then says so. */
@@ -75,6 +84,9 @@ const BAND_LABELS = ["safety", "survival", "progress"] as const;
 /** Same ceiling the task schemas enforce, so a UI request cannot out-run the validated limits. */
 const TASK_MAX_ACTIONS = 100;
 
+/** How young the world panel's observation must be before the Control Center asks the game for another. */
+const WORLD_VIEW_MAX_AGE_MS = 2_000;
+
 function num(value: unknown, fallback = 0): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
@@ -89,7 +101,13 @@ export function goalProgress(
   task: MinecraftTask | null,
 ): { have: number; of: number; unit: string } | null {
   if (!state || !task) return null;
-  if (task.kind === "secure_food") return { have: state.player.food ?? 0, of: task.targetHunger, unit: "hunger points" };
+  // A hunger the session never reported is not 0/20; showing that would advertise starvation the agent
+  // cannot see, so the panel reports no progress instead of a fabricated one.
+  if (task.kind === "secure_food") {
+    return state.player.food === null
+      ? null
+      : { have: state.player.food, of: task.targetHunger, unit: "hunger points" };
+  }
   if (task.kind === "build_shelter") {
     return { have: shelterCardinalSolidCount(state), of: 4, unit: "closed sides" };
   }
@@ -431,6 +449,12 @@ export function createControlCenterSource(source: ControlCenterSource): {
   };
 
   async function snapshot(): Promise<ControlCenterSnapshot> {
+    // A viewer that opens the page between runs would otherwise show the last observation of the run that
+    // ended — indistinguishable from a live view. Refreshing only while nothing is running keeps the
+    // world-model sequence out of the way of an in-flight action verification.
+    if (source.worldSource !== "simulated" && control.task === null && runtime.status().adapterStatus === "connected") {
+      await runtime.observeIfStale(WORLD_VIEW_MAX_AGE_MS);
+    }
     const status = runtime.status();
     const world = runtime.currentWorldState;
     const state = world?.state ?? null;
@@ -458,6 +482,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
       hazard: isHazardBlockName(block.name),
       resource: isResourceBlockName(block.name) || block.name === targetItem,
       remembered: false,
+      source: "observation" as const,
     }));
     const observedBlockKeys = new Set(observedBlocks.map((block) => `${block.x},${block.y},${block.z}`));
     const rememberedBlocks = [...memory.blockSightings(), ...memory.minableSightings()]
@@ -472,9 +497,58 @@ export function createControlCenterSource(source: ControlCenterSource): {
         z: sighting.position.z,
         name: sighting.name,
         hazard: isHazardBlockName(sighting.name),
-        resource: true,
+        // A remembered sighting is only "resource" when the block class says so; marking every memory
+        // marker as a resource is what made the map look like it had found logs it had never seen.
+        resource: isResourceBlockName(sighting.name) || sighting.name === targetItem,
         remembered: sighting.lastSeenSequence !== world?.sequence,
+        source: "memory" as const,
       }));
+    const worldBlocks = [...observedBlocks, ...rememberedBlocks];
+    // How the world data below relates to the live session. A viewer must be able to tell "the agent is
+    // looking at the world" from "the viewer is looking at the last thing it saw" from "there is nothing
+    // to look at", because those three used to render identically.
+    const ageMs = world ? Math.max(0, Date.now() - (Date.parse(world.observedAt) || Date.now())) : null;
+    const maxAgeMs = MINECRAFT_SAFETY_POLICY.maxObservationAgeMs;
+    const worldFreshness: ControlCenterSnapshot["world"]["freshness"] = world === null
+      ? { sequence: null, observedAt: null, ageMs: null, stale: true, reason: source.worldSource === "simulated" ? "simulated" : "no-observation" }
+      : !status.worldLive
+        ? { sequence: world.sequence, observedAt: world.observedAt, ageMs, stale: true, reason: "session-changed" }
+        : ageMs !== null && ageMs > maxAgeMs
+          ? { sequence: world.sequence, observedAt: world.observedAt, ageMs, stale: true, reason: "stale" }
+          : { sequence: world.sequence, observedAt: world.observedAt, ageMs, stale: false, reason: "fresh" };
+    const worldProvenance: ControlCenterSnapshot["world"]["provenance"] = source.worldSource === "simulated"
+      ? { source: "simulated", note: "This run is against the built-in simulated world; no live Minecraft server is involved." }
+      : world !== null && status.worldLive
+        ? { source: "live-observation", note: `Every value below came from observation #${world.sequence} of the connected session.` }
+        : { source: "world-memory", note: "No live observation is available; the blocks shown are what the world model still remembers from an earlier observation." };
+    const worldSessionFacts: ControlCenterSnapshot["world"]["sessionFacts"] = state === null
+      ? null
+      : {
+          dimension: factView(state.player.session?.dimension, state.player.dimension, "observation.player.dimension"),
+          gameMode: factView(state.player.session?.gameMode, state.player.gameMode, "observation.player.gameMode"),
+          vitalsObservedAt: state.player.session?.vitalsObservedAt ?? null,
+          airEvidence: state.player.session?.airEvidence ?? null,
+          vitalsEvidence: state.player.session?.vitalsObserved ?? null,
+          lastChange: source.sessionChange?.() ?? null,
+        };
+
+    const blocker = describeBlocker({
+      adapterStatus: status.adapterStatus,
+      statusReason: status.statusReason,
+      paused: broker?.paused ?? false,
+      pauseReason: broker?.pauseReason ?? null,
+      tripped: broker?.tripped ?? false,
+      tripReason: broker?.tripReason ?? null,
+      taskStatus: control.result?.status ?? null,
+      failure: control.result?.failure ?? null,
+      blockingCode: strOrNull((decision?.data as Record<string, unknown> | undefined)?.blockingCode),
+      decisionSummary: strOrNull((decision?.data as Record<string, unknown> | undefined)?.summary),
+      running: control.task !== null,
+      worldLive: status.worldLive,
+      sequenceNote: status.sequence === null ? null : String(status.sequence),
+      at: status.statusChangedAt ?? status.lastObservationAt,
+    });
+
     const base: ControlCenterSnapshot = {
       generatedAt: new Date().toISOString(),
       performance: sampleRuntimePerformance(),
@@ -487,6 +561,9 @@ export function createControlCenterSource(source: ControlCenterSource): {
         lastObservationAt: status.lastObservationAt,
         sequence: status.sequence,
         connectedForMs: world ? Math.max(0, Date.now() - Date.parse(world.observedAt)) : null,
+        statusReason: status.statusReason,
+        statusChangedAt: status.statusChangedAt,
+        worldAvailable: status.adapterStatus === "connected" && status.worldLive,
       },
       agent: {
         // An operator hold is reported even between tasks: pausing while idle still blocks the next run,
@@ -511,6 +588,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         elapsedMs: control.result?.metrics.elapsedMs ?? null,
         status: control.result?.status ?? null,
         failure: control.result?.failure ?? null,
+        blocker,
       },
       goal: decision ? goalFromDecision(decision, control.task, state) : null,
       world: {
@@ -524,7 +602,15 @@ export function createControlCenterSource(source: ControlCenterSource): {
         onGround: state?.player.onGround ?? null,
         alive: state?.player.alive ?? null,
         deathCount: state?.player.deathCount ?? null,
-        time: state?.time ? { dayTicks: state.time.dayTicks, isNight: state.time.isNight } : null,
+        time: state?.time
+          ? {
+              dayTicks: state.time.dayTicks,
+              isNight: state.time.isNight,
+              day: state.time.day ?? null,
+              source: state.time.source ?? null,
+            }
+          : null,
+        vitalsObservedAt: state?.player.session?.vitalsObservedAt ?? null,
         perception: state?.perception
           ? {
               ...state.perception,
@@ -542,7 +628,10 @@ export function createControlCenterSource(source: ControlCenterSource): {
           distance: entity.distance,
           hostile: isHostileMinecraftEntity(entity.name, entity.type),
         })),
-        blocks: [...observedBlocks, ...rememberedBlocks],
+        blocks: worldBlocks,
+        provenance: worldProvenance,
+        freshness: worldFreshness,
+        sessionFacts: worldSessionFacts,
         knownResourceBlocks: memorySummary.resourceBlocks,
         minableBlocks: memorySummary.minableBlocks ?? 0,
         exploredCells: memorySummary.exploredCells,
@@ -625,11 +714,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
       })),
       recentActions: folded.actions,
       recentFailures: folded.failures,
-      recentEvents: traceSink.recent
-        .filter((event) => !["observation.received", "session.heartbeat"].includes(event.eventType))
-        .slice(-30)
-        .reverse()
-        .map(traceView),
       recentDecisions: traceSink
         .filter((event) => event.eventType === "decision.made")
         .slice(-10)
@@ -643,6 +727,137 @@ export function createControlCenterSource(source: ControlCenterSource): {
   }
 
   return { snapshot, commands };
+}
+
+/** Rebuilds a session fact for the dashboard from whatever the observation carried. */
+function factView(
+  reported:
+    | {
+        readonly value: string | null;
+        readonly evidence: "verified" | "single-source" | "conflicting" | "unreported";
+        readonly source: string;
+        readonly observed: string;
+        readonly note: string | null;
+      }
+    | undefined,
+  value: string | null,
+  fallbackSource: string,
+): ControlCenterSnapshot["world"]["sessionFacts"] extends infer _T
+  ? import("../../control-center/types.js").ControlCenterSessionFact
+  : never {
+  return {
+    value,
+    evidence: reported?.evidence ?? (value === null ? "unreported" : "single-source"),
+    source: reported?.source ?? fallbackSource,
+    observed:
+      reported?.observed ?? `${fallbackSource.split(".").at(-1)}=${JSON.stringify(value) ?? "undefined"}`,
+    note: reported?.note ?? null,
+  };
+}
+
+function strOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+interface BlockerInput {
+  readonly adapterStatus: string;
+  readonly statusReason: string | null;
+  readonly paused: boolean;
+  readonly pauseReason: string | null;
+  readonly tripped: boolean;
+  readonly tripReason: string | null;
+  readonly taskStatus: string | null;
+  readonly failure: { readonly code: string; readonly message: string } | null;
+  readonly blockingCode: string | null;
+  readonly decisionSummary: string | null;
+  readonly running: boolean;
+  readonly worldLive: boolean;
+  readonly sequenceNote: string | null;
+  readonly at: string | null;
+}
+
+/**
+ * Turns "blocked" into a sentence with a cause and an owner. Exactly one blocker is reported, chosen by
+ * what actually stopped the loop: an operator hold, then the task's own failure, then the planner's
+ * refusal, then the session. Each branch keeps the source's own wording — the classification only adds
+ * the category, it never overwrites the reason.
+ */
+function describeBlocker(input: BlockerInput): ControlCenterSnapshot["agent"]["blocker"] {
+  const clear = (): ControlCenterSnapshot["agent"]["blocker"] => ({
+    kind: "none",
+    code: null,
+    label: input.running ? "running" : "idle",
+    headline: input.running
+      ? "The agent is acting; nothing is blocking it."
+      : "Nothing is blocking the agent.",
+    detail: input.running
+      ? `The agent is between actions; the last observation is #${input.sequenceNote ?? "n/a"}.`
+      : (input.statusReason ?? "no failure reported"),
+    hint: null,
+    owner: "unknown",
+    source: "run control",
+    at: input.at,
+    retryable: false,
+  });
+  const shape = (
+    kind: FailureKind | "connection",
+    code: string | null,
+    detail: string,
+    source: string,
+    owner: "agent" | "operator" | "server" | "unknown",
+    retryable: boolean,
+  ): ControlCenterSnapshot["agent"]["blocker"] => {
+    const classified = classifyFailure(code, detail);
+    return {
+      // A connection-shaped status has no failure code of its own, so the category comes from the caller.
+      kind,
+      code: classified.code ?? code,
+      label: classified.code ? classified.label : kind === "connection" ? "connection error" : classified.label,
+      headline: `${input.taskStatus ?? "blocked"} · ${classified.code ?? "no code"} — ${truncate(detail, 220)}`,
+      detail,
+      hint: classified.hint,
+      owner,
+      source,
+      at: input.at,
+      retryable,
+    };
+  };
+
+  if (input.tripped) {
+    return shape("safety", "SAFETY_TRIPPED", input.tripReason ?? "The safety broker tripped and no reason was recorded.", "safety-broker", "operator", false);
+  }
+  if (input.paused) {
+    return shape("safety", "SAFETY_PAUSED", input.pauseReason ?? "Paused from Run control.", "safety-broker", "operator", false);
+  }
+  if (input.failure) {
+    const classified = classifyFailure(input.failure.code, input.failure.message);
+    const owner = classified.kind === "connection" ? "server" : classified.kind === "capability" ? "operator" : "agent";
+    return shape(classified.kind, input.failure.code, input.failure.message, "task runner", owner, classified.retryable);
+  }
+  if (input.taskStatus && input.taskStatus !== "succeeded") {
+    return shape("task", input.blockingCode, `The task ended as '${input.taskStatus}' without a failure record.`, "task runner", "agent", true);
+  }
+  if (input.blockingCode) {
+    return shape("planner", input.blockingCode, input.decisionSummary ?? "The decision model stopped without giving a reason.", "decision model", "agent", true);
+  }
+  if (input.adapterStatus !== "connected") {
+    return shape(
+      "connection",
+      input.adapterStatus === "disconnected" ? "ADAPTER_DISCONNECTED" : "NOT_CONNECTED",
+      input.statusReason ?? `The adapter reports '${input.adapterStatus}'.`,
+      "adapter",
+      "server",
+      false,
+    );
+  }
+  if (!input.worldLive) {
+    return shape("perception", "NO_ACTIVE_OBSERVATION", "The agent has no observation from the current session yet.", "world model", "agent", true);
+  }
+  return clear();
+}
+
+function truncate(value: string, max: number): string {
+  return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
 function goalFromDecision(
@@ -662,6 +877,7 @@ function goalFromDecision(
     skillId: typeof selected?.skillId === "string" ? selected.skillId : null,
     targetKey: typeof selected?.targetKey === "string" ? selected.targetKey : null,
     rationale: str(data.summary) || str(selected?.rationale),
+    blockingCode: typeof data.blockingCode === "string" ? data.blockingCode : null,
     progress: goalProgress(state, task),
     plan: Array.isArray(data.plan) ? (data.plan as unknown[]).map((step) => String(step)) : [],
     alternatives: alternatives.map((entry) => ({
