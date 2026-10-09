@@ -604,6 +604,8 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
     return {
       reportPath: null,
       generatedAt: null,
+      model: null,
+      seedsPerScenario: null,
       scenarios: 0,
       runs: 0,
       successRate: null,
@@ -615,26 +617,33 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
   try {
     const parsed = JSON.parse(await readFile(file, "utf8")) as {
       generatedAt?: string;
+      model?: string;
+      seedCount?: number;
       scenarios?: unknown[];
+      learning?: unknown[];
       totals?: { runs?: number; successRate?: number; unsafeActions?: number };
       passed?: boolean;
     };
     return {
       reportPath: file,
       generatedAt: parsed.generatedAt ?? null,
+      model: typeof parsed.model === "string" ? parsed.model : null,
+      seedsPerScenario: typeof parsed.seedCount === "number" ? parsed.seedCount : null,
       scenarios: Array.isArray(parsed.scenarios) ? parsed.scenarios.length : 0,
       runs: parsed.totals?.runs ?? 0,
       successRate: typeof parsed.totals?.successRate === "number" ? parsed.totals.successRate : null,
       unsafeActions: typeof parsed.totals?.unsafeActions === "number" ? parsed.totals.unsafeActions : null,
       passed: typeof parsed.passed === "boolean" ? parsed.passed : null,
-      learning: Array.isArray(parsed.scenarios)
-        ? summarizeLearningEvidence(parsed.scenarios as Record<string, unknown>[])
+      learning: Array.isArray(parsed.learning)
+        ? summarizeLearningEvidence(parsed.learning as Record<string, unknown>[])
         : null,
     };
   } catch {
     return {
       reportPath: file,
       generatedAt: null,
+      model: null,
+      seedsPerScenario: null,
       scenarios: 0,
       runs: 0,
       successRate: null,
@@ -646,24 +655,35 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
 }
 
 /**
- * Reads the per-scenario repeat-run numbers the offline evaluation records. Reported as measured facts,
- * never as a general claim: wasted actions can stay non-zero when progress is genuinely impossible.
+ * Folds the repeat-run evidence the offline evaluation writes at the top level of its report. Reported as
+ * measured facts, never as a general claim: wasted actions stay non-zero wherever progress genuinely
+ * requires those actions (crafting a tool, freeing inventory), and the panel says so through the gates.
  */
-function summarizeLearningEvidence(scenarios: readonly Record<string, unknown>[]): EvaluationSummary["learning"] {
+function summarizeLearningEvidence(entries: readonly Record<string, unknown>[]): EvaluationSummary["learning"] {
   let baseline = 0;
   let candidate = 0;
   let improved = 0;
-  for (const scenario of scenarios) {
-    const learning = scenario.learning;
-    if (typeof learning !== "object" || learning === null) continue;
-    const record = learning as Record<string, unknown>;
-    const first = num(record.firstRunWastedActions);
-    const second = num(record.repeatRunWastedActions);
-    baseline += first;
-    candidate += second;
-    if (second < first) improved += 1;
+  let passed = true;
+  let measured = 0;
+  for (const entry of entries) {
+    const cold = entry.cold;
+    const repeated = entry.repeated;
+    if (typeof cold !== "object" || cold === null || typeof repeated !== "object" || repeated === null) continue;
+    const before = num((cold as Record<string, unknown>).wastedActions);
+    const after = num((repeated as Record<string, unknown>).wastedActions);
+    baseline += before;
+    candidate += after;
+    if (after < before) improved += 1;
+    if (entry.passed !== true) passed = false;
+    measured += 1;
   }
-  if (baseline === 0 && candidate === 0 && improved === 0) return null;
-  return { baselineWastedActions: baseline, candidateWastedActions: candidate, scenarios: scenarios.length, improved };
+  if (measured === 0) return null;
+  return {
+    baselineWastedActions: baseline,
+    candidateWastedActions: candidate,
+    scenarios: measured,
+    improved,
+    passed,
+  };
 }
 

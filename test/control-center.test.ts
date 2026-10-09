@@ -504,6 +504,7 @@ test("the evaluation panel reads the offline report and refuses to invent number
     assert.equal(missing.generatedAt, null);
     assert.equal(missing.passed, null);
     assert.equal(missing.learning, null);
+    assert.equal(missing.model, null);
 
     const file = path.join(directory, "offline-report.json");
     await writeFile(
@@ -511,25 +512,41 @@ test("the evaluation panel reads the offline report and refuses to invent number
       JSON.stringify({
         generatedAt: "2026-01-01T00:00:00.000Z",
         passed: true,
+        model: "minecraft-priority-utility.v3",
+        seedCount: 20,
         totals: { runs: 400, successRate: 0.75, unsafeActions: 0 },
-        scenarios: [
-          { id: "a", learning: { firstRunWastedActions: 5, repeatRunWastedActions: 0 } },
-          { id: "b", learning: { firstRunWastedActions: 2, repeatRunWastedActions: 2 } },
+        scenarios: [{ scenarioId: "a" }, { scenarioId: "b" }, { scenarioId: "c" }],
+        learning: [
+          {
+            scenarioId: "a",
+            cold: { actions: 5, wastedActions: 5, successRate: 0 },
+            repeated: { actions: 0, wastedActions: 0, successRate: 0 },
+            passed: true,
+          },
+          {
+            scenarioId: "b",
+            cold: { actions: 2, wastedActions: 1, successRate: 1 },
+            repeated: { actions: 2, wastedActions: 1, successRate: 1 },
+            passed: true,
+          },
         ],
       }),
       "utf8",
     );
     const summary = await readEvaluationSummary(file);
-    assert.equal(summary.scenarios, 2);
     assert.equal(summary.runs, 400);
     assert.equal(summary.successRate, 0.75);
     assert.equal(summary.unsafeActions, 0);
     assert.equal(summary.passed, true);
+    assert.equal(summary.model, "minecraft-priority-utility.v3");
+    assert.equal(summary.seedsPerScenario, 20);
+    assert.equal(summary.scenarios, 3, "the scenario count comes from the report body");
     assert.deepEqual(summary.learning, {
-      baselineWastedActions: 7,
-      candidateWastedActions: 2,
+      baselineWastedActions: 6,
+      candidateWastedActions: 1,
       scenarios: 2,
       improved: 1,
+      passed: true,
     });
   } finally {
     await rm(directory, { recursive: true, force: true });

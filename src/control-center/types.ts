@@ -222,12 +222,19 @@ export interface EvaluationSummary {
   readonly unsafeActions: number | null;
   /** Whether the report met its own acceptance thresholds. */
   readonly passed: boolean | null;
+  /** Decision model the report was produced with, so the panel cannot be mistaken for another build. */
+  readonly model: string | null;
+  /** Seeds per scenario in the report. */
+  readonly seedsPerScenario: number | null;
   /** Repeat-run effect of the learning memory, measured on the same seeded worlds; null when unmeasured. */
   readonly learning: {
     readonly baselineWastedActions: number;
     readonly candidateWastedActions: number;
     readonly scenarios: number;
+    /** Scenarios where the repeat run wasted strictly fewer actions than the cold run. */
     readonly improved: number;
+    /** Whether every repeat-run gate in the report passed. */
+    readonly passed: boolean;
   } | null;
 }
 

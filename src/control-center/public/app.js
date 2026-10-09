@@ -283,7 +283,9 @@ function renderLearning(snapshot) {
     }),
     metric("Eval success", evaluation ? pct(evaluation.successRate) : "—", {
       tone: evaluation?.passed ? "good" : evaluation ? "bad" : null,
-      note: evaluation?.reportPath ? `${evaluation.scenarios} scenarios · ${evaluation.runs} runs${evaluation.generatedAt ? ` · ${ago(evaluation.generatedAt)}` : ""}` : "run npm run eval:offline to measure",
+      note: evaluation?.reportPath
+        ? `${evaluation.scenarios} scenarios · ${evaluation.runs} runs · ${evaluation.model ?? "unknown model"} · ${evaluation.seedsPerScenario ?? "?"} seeds${evaluation.generatedAt ? ` · ${ago(evaluation.generatedAt)}` : ""}`
+        : "run npm run eval:offline to measure",
     }),
   );
   const unsafe = evaluation?.unsafeActions;
@@ -294,8 +296,8 @@ function renderLearning(snapshot) {
     const evidence = evaluation.learning;
     metrics.append(
       metric("Wasted actions", `${evidence.baselineWastedActions} → ${evidence.candidateWastedActions}`, {
-        tone: evidence.candidateWastedActions < evidence.baselineWastedActions ? "good" : null,
-        note: `cold vs repeat run, ${evidence.improved}/${evidence.scenarios} scenario(s) improved`,
+        tone: evidence.passed ? "good" : "warn",
+        note: `cold vs repeat run over the same seeds; ${evidence.improved}/${evidence.scenarios} scenario(s) improved. Residual waste can be the only path to progress, so this is measured, not minimised.`,
       }),
     );
   }

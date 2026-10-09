@@ -500,30 +500,37 @@ function createLearner(options: CliOptions, logger: ReturnType<typeof createLogg
 async function runPolicyCommand(options: CliOptions, logger: ReturnType<typeof createLogger>): Promise<void> {
   const learner = ExperienceLearner.forDirectory(resolve(options.learningDirectory), { logger });
   await learner.load();
-  const snapshot = learner.snapshot();
-  const summary = {
-    type: "policy-status",
-    learningDirectory: resolve(options.learningDirectory),
-    enabled: snapshot.enabled,
-    runs: snapshot.runs,
-    episodes: snapshot.episodes,
-    contradictedConfirmations: snapshot.contradictedConfirmations,
-    safetyDenials: snapshot.safetyDenials,
-    activePolicy: snapshot.activePolicy,
-    candidatePolicy: snapshot.candidatePolicy,
-    candidateWeights: learner.candidateWeights,
-    weightedContexts: snapshot.contexts.length,
-    blockedTargets: snapshot.failureMemory.filter((entry) => entry.blocked).length,
-    history: snapshot.history.slice(-8),
+  // Read from the learner every time, so a report printed after a change describes the state after it.
+  const describe = () => {
+    const snapshot = learner.snapshot();
+    return {
+      type: "policy-status",
+      learningDirectory: resolve(options.learningDirectory),
+      enabled: snapshot.enabled,
+      runs: snapshot.runs,
+      episodes: snapshot.episodes,
+      contradictedConfirmations: snapshot.contradictedConfirmations,
+      safetyDenials: snapshot.safetyDenials,
+      activePolicy: snapshot.activePolicy,
+      candidatePolicy: snapshot.candidatePolicy,
+      candidateWeights: learner.candidateWeights,
+      weightedContexts: snapshot.contexts.length,
+      blockedTargets: snapshot.failureMemory.filter((entry) => entry.blocked).length,
+      history: snapshot.history.slice(-8),
+    };
   };
   if (options.policy === "status") {
-    console.log(JSON.stringify(summary, null, 2));
+    console.log(JSON.stringify(describe(), null, 2));
     return;
   }
   if (options.policy === "reject") {
     await learner.rollback("candidate policy rejected from the CLI");
     console.log(
-      JSON.stringify({ ...summary, type: "policy-reject", ok: true, message: "Rolled back to the active policy." }, null, 2),
+      JSON.stringify(
+        { ...describe(), type: "policy-reject", ok: true, message: "Rolled back: no promoted policy is in force, so the hand-tuned weights rank decisions again." },
+        null,
+        2,
+      ),
     );
     return;
   }
@@ -534,6 +541,7 @@ async function runPolicyCommand(options: CliOptions, logger: ReturnType<typeof c
   } else if (report.passed !== true) {
     problems.push(`the last offline evaluation did not pass (unsafe actions: ${report.unsafeActions ?? "unknown"})`);
   }
+  const snapshot = learner.snapshot();
   if (snapshot.episodes === 0) problems.push("no episodes have been recorded, so there is no candidate to promote");
   if (snapshot.candidatePolicy.contexts === 0) {
     problems.push("the derived candidate is still the baseline: no context reached the sample threshold, so promotion would change nothing");
@@ -544,13 +552,15 @@ async function runPolicyCommand(options: CliOptions, logger: ReturnType<typeof c
   if (problems.length > 0) {
     throw new Error(`Refusing to promote the learned policy: ${problems.join("; ")}.`);
   }
+  const promotedId = learner.candidateWeights.id;
   await learner.promote(learner.candidateWeights, `promoted from the CLI; evaluation report ${report.generatedAt}`);
   console.log(
     JSON.stringify(
       {
+        ...describe(),
         type: "policy-promote",
         ok: true,
-        message: `Promoted ${learner.candidateWeights.id}. The next run uses these weights; the state file lives in the learning directory.`,
+        message: `Promoted ${promotedId}. The next run uses these weights; the state file lives in the learning directory.`,
         evaluation: report,
       },
       null,
@@ -706,7 +716,9 @@ async function runSimulatedScenario(
         2,
       ),
     );
-    if (result.status !== "succeeded" && scenario.expectation === "success") {
+    // The scenario's own expectation gates the run the CLI started. A task an operator starts from the
+    // dashboard afterwards is not part of the scenario, so it reports without turning the demo red.
+    if (source === "cli" && result.status !== "succeeded" && scenario.expectation === "success") {
       throw new Error(`Simulated scenario '${scenarioId}' ended with status '${result.status}'.`);
     }
   };
