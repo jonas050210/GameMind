@@ -14,7 +14,10 @@ import {
   MINECRAFT_COLLECT_BLOCK_CAPABILITY,
   MINECRAFT_CRAFT_CAPABILITY,
   MINECRAFT_EAT_CAPABILITY,
+  MINECRAFT_HARVEST_BERRIES_CAPABILITY,
+  MINECRAFT_PICKUP_ITEM_CAPABILITY,
   MINECRAFT_PLACE_TABLE_CAPABILITY,
+  MINECRAFT_REST_CAPABILITY,
   MINECRAFT_EQUIP_CAPABILITY,
   MINECRAFT_INSPECT_BLOCK_CAPABILITY,
   MINECRAFT_LOOK_CAPABILITY,
@@ -22,12 +25,22 @@ import {
   minecraftCollectBlockInputSchema,
   minecraftCraftItemInputSchema,
   minecraftEatFoodInputSchema,
+  minecraftHarvestBerriesInputSchema,
+  minecraftPickupItemInputSchema,
   minecraftPlaceTableInputSchema,
+  minecraftRestInputSchema,
   minecraftEquipInputSchema,
   minecraftInspectBlockInputSchema,
   minecraftLookInputSchema,
   minecraftNavigateInputSchema,
 } from "./capabilities.js";
+import {
+  blockProperties,
+  distanceBetween,
+  isInterestingBlockName,
+  isResourceBlockName,
+  isRipeBerryBush,
+} from "./block-classes.js";
 import type { MinecraftObservation } from "./observation.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 import { minecraftObservationSchema } from "./observation.js";
@@ -51,6 +64,7 @@ const unsafePlacementSupportNames = new Set([
   "magma_block",
   "cactus",
 ]);
+type BotPosition = Bot["entity"]["position"];
 const pathfinderApi = require("mineflayer-pathfinder") as typeof import("mineflayer-pathfinder");
 const toolApi = require("mineflayer-tool") as typeof import("mineflayer-tool");
 
@@ -70,6 +84,8 @@ export interface MinecraftAdapterConfig {
   readonly maxResourceGatherDistance: number;
   readonly maxCraftingTableDistance: number;
   readonly navigationStuckTimeoutMs: number;
+  readonly resourceScanRadius: number;
+  readonly resourceScanLimit: number;
 }
 
 export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
@@ -88,6 +104,8 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   maxResourceGatherDistance: 24,
   maxCraftingTableDistance: 4.5,
   navigationStuckTimeoutMs: 10_000,
+  resourceScanRadius: 24,
+  resourceScanLimit: 64,
 };
 
 export type MinecraftBotFactory = (options: BotOptions) => Bot;
@@ -156,6 +174,50 @@ function hasVisibleHostileNear(bot: Bot, position: { x: number; y: number; z: nu
   });
 }
 
+const pathfinderErrorCodes: Readonly<Record<string, string>> = {
+  NoPath: "PATH_NOT_FOUND",
+  Timeout: "PATH_PLANNING_TIMEOUT",
+  PathStopped: "PATH_STOPPED",
+  GoalChanged: "PATH_GOAL_CHANGED",
+};
+
+/** Mineflayer pathfinder errors carry their class in `name`; expose them as stable action codes. */
+function classifyMovementError(error: unknown): unknown {
+  if (error instanceof MinecraftAdapterError) return error;
+  if (error instanceof Error && Object.prototype.hasOwnProperty.call(pathfinderErrorCodes, error.name)) {
+    return new MinecraftAdapterError(error.message, pathfinderErrorCodes[error.name] ?? "PATH_FAILED");
+  }
+  return error;
+}
+
+function delayWithAbort(ms: number, signal: AbortSignal): Promise<void> {
+  return raceWithAbort(new Promise<void>((resolve) => setTimeout(resolve, ms)), signal);
+}
+
+/** Reads a dropped item's stack, or null when the entity is not an item or its metadata is unreadable. */
+function readDroppedItem(entity: { getDroppedItem?: () => { name: string; count: number } | null }) {
+  if (typeof entity.getDroppedItem !== "function") return null;
+  try {
+    return entity.getDroppedItem() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function findDroppedItemNear(
+  bot: Bot,
+  point: { x: number; y: number; z: number },
+  itemName: string,
+  radius: number,
+): { id: number } | null {
+  for (const entity of Object.values(bot.entities)) {
+    if (entity.id === bot.entity.id) continue;
+    if (readDroppedItem(entity)?.name !== itemName) continue;
+    if (distanceBetween(entity.position, point) <= radius) return { id: entity.id };
+  }
+  return null;
+}
+
 function safeInstallPlugins(bot: Bot): void {
   bot.loadPlugin(pathfinderApi.pathfinder);
   bot.loadPlugin(toolApi.plugin);
@@ -206,7 +268,7 @@ function configureConservativeMovements(bot: Bot): void {
   ]) {
     movements.entitiesToAvoid.add(name);
   }
-  for (const name of ["lava", "fire", "soul_fire", "magma_block", "cactus"] as const) {
+  for (const name of ["lava", "fire", "soul_fire", "magma_block", "cactus", "sweet_berry_bush"] as const) {
     const block = bot.registry.blocksByName[name];
     if (block) movements.blocksToAvoid.add(block.id);
   }
@@ -273,6 +335,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     }
     if (!Number.isInteger(config.navigationStuckTimeoutMs) || config.navigationStuckTimeoutMs < 1_000) {
       throw new Error("Navigation stuck timeout must be an integer of at least 1000 ms.");
+    }
+    if (!Number.isFinite(config.resourceScanRadius) || config.resourceScanRadius < config.observationRadius) {
+      throw new Error("Resource scan radius must be finite and at least the local observation radius.");
+    }
+    if (!Number.isInteger(config.resourceScanLimit) || config.resourceScanLimit < 1 || config.resourceScanLimit > 256) {
+      throw new Error("Resource scan limit must be an integer from 1 through 256.");
     }
   }
 
@@ -416,15 +484,16 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (!session) throw new MinecraftAdapterError("No active session.", "NO_ACTIVE_SESSION");
 
     const position = bot.entity.position;
-    const nearbyBlocks: MinecraftObservation["nearbyBlocks"][number][] = [];
+    const center = { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) };
+    const radius = this.config.observationRadius;
+    const verticalRadius = 2;
+    const cube: MinecraftObservation["nearbyBlocks"][number][] = [];
     let sampledCells = 0;
     let unknownCells = 0;
-    let truncated = false;
-    const radius = this.config.observationRadius;
 
     for (let dx = -radius; dx <= radius; dx += 1) {
       for (let dz = -radius; dz <= radius; dz += 1) {
-        for (let dy = -2; dy <= 2; dy += 1) {
+        for (let dy = -verticalRadius; dy <= verticalRadius; dy += 1) {
           sampledCells += 1;
           const block = bot.blockAt(position.offset(dx, dy, dz));
           if (!block) {
@@ -432,11 +501,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
             continue;
           }
           if (block.name.endsWith("_air") || block.name === "air") continue;
-          if (nearbyBlocks.length >= this.config.maxObservedBlocks) {
-            truncated = true;
-            continue;
-          }
-          nearbyBlocks.push({
+          cube.push({
             position: {
               x: Math.floor(block.position.x),
               y: Math.floor(block.position.y),
@@ -449,6 +514,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         }
       }
     }
+    // Keep the cap predictable: resource and table blocks first, then the nearest blocks. A plain
+    // iteration-order cut used to drop resource blocks on one side of the cube silently.
+    const cubeTruncated = cube.length > this.config.maxObservedBlocks;
+    const nearbyBlocks = cube
+      .map((block) => ({ block, distance: distanceBetween(block.position, center) }))
+      .sort((left, right) => {
+        const interest = Number(isInterestingBlockName(right.block.name)) - Number(isInterestingBlockName(left.block.name));
+        return interest || left.distance - right.distance;
+      })
+      .slice(0, this.config.maxObservedBlocks)
+      .map(({ block }) => block);
+
+    const resourceSightings = this.scanResourceSightings(bot, position);
+    const itemDrops = this.scanItemDrops(bot, position);
 
     const playerEntityId = bot.entity.id;
     const entities = Object.values(bot.entities)
@@ -501,7 +580,22 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       },
       entities,
       nearbyBlocks,
-      sampledRegion: { radius, sampledCells, unknownCells, truncated },
+      resourceSightings: resourceSightings.blocks,
+      resourceScan: {
+        radius: this.config.resourceScanRadius,
+        limit: this.config.resourceScanLimit,
+        center,
+        truncated: resourceSightings.truncated,
+      },
+      itemDrops,
+      sampledRegion: {
+        radius,
+        verticalRadius,
+        center,
+        sampledCells,
+        unknownCells,
+        truncated: cubeTruncated,
+      },
     });
 
     return {
@@ -513,6 +607,64 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       observedAt: new Date().toISOString(),
       state,
     };
+  }
+
+  /** Wide, bounded search for resource-class blocks using Mineflayer's loaded-chunk index. */
+  private scanResourceSightings(
+    bot: Bot,
+    position: BotPosition,
+  ): { blocks: MinecraftObservation["resourceSightings"]; truncated: boolean } {
+    if (typeof bot.findBlocks !== "function") return { blocks: [], truncated: false };
+    const limit = this.config.resourceScanLimit;
+    const found = bot.findBlocks({
+      point: position,
+      matching: (block: { name: string }) => isResourceBlockName(block.name),
+      maxDistance: this.config.resourceScanRadius,
+      count: limit,
+    });
+    const blocks: MinecraftObservation["resourceSightings"] = [];
+    for (const blockPosition of found) {
+      const block = bot.blockAt(blockPosition);
+      if (!block || !isResourceBlockName(block.name)) continue;
+      const sighting: MinecraftObservation["resourceSightings"][number] = {
+        name: block.name,
+        position: {
+          x: Math.floor(block.position.x),
+          y: Math.floor(block.position.y),
+          z: Math.floor(block.position.z),
+        },
+        distance: block.position.distanceTo(position),
+      };
+      const properties = blockProperties(block);
+      if (block.name === "sweet_berry_bush" && properties.age !== undefined) {
+        sighting.properties = { age: properties.age };
+      }
+      blocks.push(sighting);
+    }
+    return { blocks, truncated: found.length >= limit };
+  }
+
+  /** Dropped items are read from the entity metadata; nothing is inferred from names alone. */
+  private scanItemDrops(
+    bot: Bot,
+    position: BotPosition,
+  ): MinecraftObservation["itemDrops"] {
+    const drops: MinecraftObservation["itemDrops"] = [];
+    for (const entity of Object.values(bot.entities)) {
+      if (entity.id === bot.entity.id) continue;
+      const distance = entity.position.distanceTo(position);
+      if (!Number.isFinite(distance) || distance > this.config.entityRadius) continue;
+      const item = readDroppedItem(entity);
+      if (!item || !Number.isInteger(item.count) || item.count < 1) continue;
+      drops.push({
+        id: String(entity.id),
+        name: item.name,
+        count: item.count,
+        position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+        distance,
+      });
+    }
+    return drops.sort((left, right) => left.distance - right.distance).slice(0, 32);
   }
 
   async executeAction(
@@ -548,6 +700,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           return await this.executeEatFood(bot, action.input, signal);
         case MINECRAFT_PLACE_TABLE_CAPABILITY:
           return await this.executePlaceCraftingTable(bot, action.input, signal);
+        case MINECRAFT_PICKUP_ITEM_CAPABILITY:
+          return await this.executePickupItem(bot, action.input, signal);
+        case MINECRAFT_HARVEST_BERRIES_CAPABILITY:
+          return await this.executeHarvestBerries(bot, action.input, signal);
+        case MINECRAFT_REST_CAPABILITY:
+          return await this.executeRest(bot, action.input, signal);
         default:
           throw new MinecraftAdapterError(
             `Unsupported Minecraft capability '${action.capability}'.`,
@@ -766,7 +924,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       if (error instanceof MinecraftAdapterError && error.code === "NAVIGATION_STUCK") {
         await this.cancelCurrentAction(bot, capability);
       }
-      throw error;
+      if (signal.aborted) throw error;
+      throw classifyMovementError(error);
     } finally {
       if (stuckTimer) clearInterval(stuckTimer);
     }
@@ -979,6 +1138,221 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           "Mineflayer consume promise completed; confirmation requires both a server-observed hunger increase and a decrease in the selected inventory stack.",
       },
     };
+  }
+
+  private async executePickupItem(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftPickupItemInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid pickup request.", "INVALID_ACTION_INPUT");
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError(
+        `Item pickup requires survival mode; current mode is '${bot.game.gameMode}'.`,
+        "GAME_MODE_BLOCKS_PICKUP",
+      );
+    }
+    if (!bot.pathfinder) {
+      throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
+    }
+    const { x, y, z, itemName, dangerRadius } = parsed.data;
+    const point = { x: x + 0.5, y: y + 0.5, z: z + 0.5 };
+    if (!findDroppedItemNear(bot, point, itemName, 1.5)) {
+      throw new MinecraftAdapterError(
+        `No dropped '${itemName}' is observed at the requested position.`,
+        "ITEM_DROP_NOT_FOUND",
+      );
+    }
+    const distance = distanceBetween(bot.entity.position, point);
+    if (distance > this.config.maxResourceGatherDistance) {
+      throw new MinecraftAdapterError(
+        `Dropped item is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxResourceGatherDistance}.`,
+        "PICKUP_TARGET_TOO_FAR",
+      );
+    }
+    if (hasVisibleHostileNear(bot, point, dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the dropped item.`,
+        "PICKUP_TARGET_THREATENED",
+      );
+    }
+
+    const before = inventoryCount(bot, itemName);
+    await this.watchMovementProgress(
+      bot,
+      bot.pathfinder.goto(new pathfinderApi.goals.GoalBlock(x, y, z)),
+      signal,
+      MINECRAFT_PICKUP_ITEM_CAPABILITY,
+    );
+    const after = await this.waitForInventoryGain(bot, itemName, before, 1_500, signal);
+    return {
+      confirmed: after > before,
+      confirmation: "dropped_item_entered_inventory_delta_checked",
+      details: {
+        itemName,
+        coordinates: { x, y, z },
+        inventoryBefore: before,
+        inventoryAfter: after,
+        evidence:
+          "Vanilla picks up dropped items on contact; confirmation requires an inventory increase of the requested item.",
+      },
+    };
+  }
+
+  private async executeHarvestBerries(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftHarvestBerriesInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid berry harvest request.", "INVALID_ACTION_INPUT");
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError(
+        `Berry harvesting requires survival mode; current mode is '${bot.game.gameMode}'.`,
+        "GAME_MODE_BLOCKS_HARVEST",
+      );
+    }
+    if (!bot.pathfinder) {
+      throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
+    }
+    const { x, y, z, dangerRadius } = parsed.data;
+    const block = this.blockAtCoordinates(bot, x, y, z);
+    if (!block || block.name !== "sweet_berry_bush") {
+      throw new MinecraftAdapterError(
+        "Expected a sweet berry bush at the requested position, but the block is unknown or different.",
+        "RESOURCE_TARGET_CHANGED",
+      );
+    }
+    const properties = blockProperties(block);
+    if (!isRipeBerryBush(block.name, properties)) {
+      throw new MinecraftAdapterError("The sweet berry bush is not ripe yet.", "BERRY_NOT_RIPE");
+    }
+    const center = { x: x + 0.5, y: y + 0.5, z: z + 0.5 };
+    const distance = distanceBetween(bot.entity.position, center);
+    if (distance > this.config.maxResourceGatherDistance) {
+      throw new MinecraftAdapterError(
+        `Berry bush is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxResourceGatherDistance}.`,
+        "RESOURCE_TARGET_TOO_FAR",
+      );
+    }
+    if (hasVisibleHostileNear(bot, center, dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the berry bush.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
+
+    const before = inventoryCount(bot, "sweet_berries");
+    if (distance > 3) {
+      await this.watchMovementProgress(
+        bot,
+        bot.pathfinder.goto(new pathfinderApi.goals.GoalNear(x, y, z, 2)),
+        signal,
+        MINECRAFT_HARVEST_BERRIES_CAPABILITY,
+      );
+    }
+    const refreshed = this.blockAtCoordinates(bot, x, y, z);
+    if (!refreshed || refreshed.name !== "sweet_berry_bush") {
+      throw new MinecraftAdapterError("The berry bush changed before harvesting.", "RESOURCE_TARGET_CHANGED");
+    }
+    if (!isRipeBerryBush(refreshed.name, blockProperties(refreshed))) {
+      throw new MinecraftAdapterError("The sweet berry bush is not ripe yet.", "BERRY_NOT_RIPE");
+    }
+    if (distanceBetween(bot.entity.position, center) > 4.2) {
+      throw new MinecraftAdapterError("The berry bush is outside reach after navigation.", "BERRY_OUT_OF_REACH");
+    }
+    await raceWithAbort(bot.activateBlock(refreshed), signal);
+    const after = await this.waitForInventoryGain(bot, "sweet_berries", before, 1_000, signal);
+    const ageAfter = blockProperties(this.blockAtCoordinates(bot, x, y, z)).age ?? null;
+    return {
+      confirmed: after > before,
+      confirmation: "sweet_berries_inventory_delta_checked",
+      details: {
+        coordinates: { x, y, z },
+        ageBefore: properties.age ?? null,
+        ageAfter,
+        berriesBefore: before,
+        berriesAfter: after,
+      },
+    };
+  }
+
+  private async executeRest(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftRestInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid rest request.", "INVALID_ACTION_INPUT");
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError(
+        `Resting is only modelled for survival mode; current mode is '${bot.game.gameMode}'.`,
+        "GAME_MODE_BLOCKS_REST",
+      );
+    }
+    const healthBefore = finiteOrNull(bot.health);
+    if (healthBefore === null) {
+      throw new MinecraftAdapterError("Player health is unavailable; resting cannot be verified.", "HEALTH_UNKNOWN");
+    }
+    const { durationMs, targetHealth, dangerRadius } = parsed.data;
+    const startedAt = Date.now();
+    let stopReason: "target" | "duration" | "threat" | "damage" = "duration";
+    for (;;) {
+      if (signal.aborted) throw abortError(signal);
+      if (hasVisibleHostileNear(bot, bot.entity.position, dangerRadius)) {
+        stopReason = "threat";
+        break;
+      }
+      const health = finiteOrNull(bot.health) ?? healthBefore;
+      if (health < healthBefore) {
+        stopReason = "damage";
+        break;
+      }
+      if (health >= targetHealth) {
+        stopReason = "target";
+        break;
+      }
+      if (Date.now() - startedAt >= durationMs) break;
+      await delayWithAbort(250, signal);
+    }
+    if (stopReason === "threat") {
+      throw new MinecraftAdapterError(
+        `A visible hostile entered the ${dangerRadius}-block rest radius; resting was interrupted.`,
+        "REST_INTERRUPTED_BY_THREAT",
+      );
+    }
+    if (stopReason === "damage") {
+      throw new MinecraftAdapterError("The player took damage while resting; resting was interrupted.", "REST_INTERRUPTED_BY_DAMAGE");
+    }
+    const healthAfter = finiteOrNull(bot.health) ?? healthBefore;
+    return {
+      confirmed: healthAfter > healthBefore,
+      confirmation: "health_increase_observed_during_rest",
+      details: {
+        stopReason,
+        healthBefore,
+        healthAfter,
+        food: finiteOrNull(bot.food),
+        elapsedMs: Date.now() - startedAt,
+      },
+    };
+  }
+
+  private async waitForInventoryGain(
+    bot: Bot,
+    itemName: string,
+    before: number,
+    settleMs: number,
+    signal: AbortSignal,
+  ): Promise<number> {
+    const deadline = Date.now() + settleMs;
+    let count = inventoryCount(bot, itemName);
+    while (count <= before && Date.now() < deadline) {
+      await delayWithAbort(100, signal);
+      count = inventoryCount(bot, itemName);
+    }
+    return count;
   }
 
   private async executePlaceCraftingTable(

@@ -121,14 +121,14 @@ test("low hunger is handled before gathering and food/resource costs are measure
   await runtime.shutdown("survival priority test complete");
 });
 
-test("critical hunger without food blocks task progress instead of exhausting resources", async () => {
+test("critical hunger without food blocks task progress when exploration is disabled", async () => {
   const fixture = createFakeMinecraftFixture(1337);
   const initialObservation: MinecraftObservation = {
     ...fixture,
     player: { ...fixture.player, food: 2 },
   };
   const { runtime, runner } = makeTaskRunner(initialObservation);
-  const result = await runner.run(DEFAULT_GATHER_LOG_TASK);
+  const result = await runner.run({ ...DEFAULT_GATHER_LOG_TASK, maxExplorationLegs: 0 });
 
   assert.equal(result.status, "blocked");
   assert.equal(result.actions.length, 0);
@@ -159,7 +159,7 @@ test("craft task reports missing observed prerequisites without attempting unsaf
     nearbyBlocks: fixture.nearbyBlocks.filter((block) => !block.name.endsWith("_log")),
   };
   const { runtime, runner } = makeTaskRunner(initialObservation);
-  const result = await runner.run(DEFAULT_CRAFT_PICKAXE_TASK);
+  const result = await runner.run({ ...DEFAULT_CRAFT_PICKAXE_TASK, maxExplorationLegs: 0 });
 
   assert.equal(result.status, "blocked");
   assert.equal(result.metrics.actions, 0);
@@ -225,7 +225,7 @@ test("a resource beside a visible hostile remains blocked even after the player 
     ],
   };
   const { runtime, runner } = makeTaskRunner(initialObservation);
-  const result = await runner.run(DEFAULT_GATHER_LOG_TASK);
+  const result = await runner.run({ ...DEFAULT_GATHER_LOG_TASK, maxExplorationLegs: 0 });
 
   assert.equal(result.status, "blocked");
   assert.equal(result.actions.length, 1);

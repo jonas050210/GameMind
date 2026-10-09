@@ -292,8 +292,14 @@ test("Minecraft adapter connects, structures observations, executes and confirms
   assert.ok(initial);
   assert.equal(initial.state.player.health, 20);
   assert.equal(initial.state.entities[0]?.name, "cow");
-  assert.equal(initial.state.nearbyBlocks[0]?.name, "grass_block");
+  // Resource and table blocks are listed first so that the capped local sample never drops them.
+  assert.equal(initial.state.nearbyBlocks[0]?.name, "oak_log");
+  assert.ok(initial.state.nearbyBlocks.some((block) => block.name === "grass_block"));
   assert.equal(initial.state.sampledRegion.sampledCells, 245);
+  assert.equal(initial.state.sampledRegion.center.x, 0);
+  assert.equal(initial.state.sampledRegion.verticalRadius, 2);
+  assert.deepEqual(initial.state.resourceSightings, []);
+  assert.deepEqual(initial.state.itemDrops, []);
 
   const result = await skills.run("minecraft.orient", { yaw: Math.PI / 2, pitch: 0.1 });
   assert.equal(result.action.status, "succeeded");
