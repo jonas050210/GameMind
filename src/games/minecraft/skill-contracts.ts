@@ -1,6 +1,30 @@
 import { countItemAndEquipment } from "./recipes.js";
 import type { MinecraftObservation } from "./observation.js";
 
+/** Number of the four cardinal cells around the player that are observed solid at feet level. */
+export function shelterCardinalSolidCount(state: MinecraftObservation): number {
+  const player = state.player.position;
+  const feetX = Math.floor(player.x);
+  const feetY = Math.floor(player.y);
+  const feetZ = Math.floor(player.z);
+  return (
+    [
+      [0, -1],
+      [1, 0],
+      [0, 1],
+      [-1, 0],
+    ] as const
+  ).filter(([dx, dz]) =>
+    state.nearbyBlocks.some(
+      (block) =>
+        block.position.x === feetX + dx &&
+        block.position.y === feetY &&
+        block.position.z === feetZ + dz &&
+        block.boundingBox === "block",
+    ),
+  ).length;
+}
+
 export interface PostconditionResult {
   /** `null` when the observation needed to check the contract is unavailable. */
   readonly verified: boolean | null;
@@ -89,6 +113,75 @@ export function verifySkillPostcondition(
       return {
         verified: healthBefore !== null && healthAfter !== null && healthAfter > healthBefore,
         evidence: `Observed health ${healthBefore ?? "?"} → ${healthAfter ?? "?"} during rest.`,
+      };
+    }
+    case "minecraft.mine-block": {
+      const blockName = String(record.blockName);
+      const drops: Record<string, string> = {
+        stone: "cobblestone",
+        cobblestone: "cobblestone",
+        deepslate: "cobbled_deepslate",
+        cobbled_deepslate: "cobbled_deepslate",
+        coal_ore: "coal",
+        deepslate_coal_ore: "coal",
+        iron_ore: "raw_iron",
+        deepslate_iron_ore: "raw_iron",
+        copper_ore: "raw_copper",
+        deepslate_copper_ore: "raw_copper",
+      };
+      const item = drops[blockName] ?? blockName;
+      const delta = countAfter(item) - countBefore(item);
+      const gone = ![...(after.nearbyBlocks ?? [])].some(
+        (block) => block.position.x === Number(record.x) && block.position.y === Number(record.y) && block.position.z === Number(record.z),
+      );
+      return {
+        verified: delta > 0 || gone,
+        evidence: `Observed ${item} inventory change ${delta >= 0 ? "+" : ""}${delta}; source block ${gone ? "no longer observed" : "still observed"}.`,
+      };
+    }
+    case "minecraft.place-block": {
+      const x = Number(record.x);
+      const y = Number(record.y);
+      const z = Number(record.z);
+      const expected = String(record.blockName);
+      const seen = [...after.nearbyBlocks, ...after.resourceSightings, ...(after.minableSightings ?? [])].some(
+        (block) =>
+          block.position.x === x && block.position.y === y && block.position.z === z &&
+          (block.name === expected || (expected === "cobblestone" && block.name === "cobblestone")),
+      );
+      return {
+        verified: seen,
+        evidence: `Placed ${expected} ${seen ? "observed" : "not observed"} at ${x},${y},${z}.`,
+      };
+    }
+    case "minecraft.build-shelter": {
+      // The contract counts how many cardinal sides are solid before and after: progress must be
+      // visible in the world, not only in the adapter's own report.
+      const solidAfter = shelterCardinalSolidCount(after);
+      const solidBefore = before ? shelterCardinalSolidCount(before) : 0;
+      const verified = solidAfter > solidBefore;
+      return {
+        verified,
+        evidence: `Cardinal sides closed around the player went from ${solidBefore}/4 to ${solidAfter}/4.`,
+      };
+    }
+    case "minecraft.attack-hostile": {
+      const entityId = String(record.entityId);
+      const stillVisible = after.entities.some((entity) => entity.id === entityId);
+      return {
+        verified: !stillVisible,
+        evidence: stillVisible
+          ? `The entity ${entityId} is still visible; the swing did not remove the threat.`
+          : `Entity ${entityId} is no longer in the observed entity list.`,
+      };
+    }
+    case "minecraft.drop-item": {
+      const item = String(record.itemName);
+      const count = Number(record.count ?? 1);
+      const delta = countBefore(item) - countAfter(item);
+      return {
+        verified: delta >= count,
+        evidence: `Observed ${item} inventory decrease of ${delta} for a requested drop of ${count}.`,
       };
     }
     case "minecraft.orient": {

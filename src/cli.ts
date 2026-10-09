@@ -1,33 +1,42 @@
 import { resolve } from "node:path";
 import { createLogger } from "./core/logger.js";
-import { JsonlTraceSink, TraceRecorder } from "./core/trace.js";
+import { FanOutTraceSink, JsonlTraceSink, RingBufferTraceSink, TraceRecorder } from "./core/trace.js";
+import { ExperienceLearner } from "./core/learning/learner.js";
 import { createMinecraftAgent } from "./games/minecraft/create-agent.js";
+import {
+  attachMinecraftRunHost,
+  controlCenterTaskKinds,
+  taskFromControlCenterRequest,
+  type ControlCenterTaskKind,
+  type MinecraftRunHost,
+} from "./games/minecraft/attach-control-center.js";
 import {
   DEFAULT_MINECRAFT_CONFIG,
   MinecraftAdapter,
   minecraftAdapterConfigFromEnv,
 } from "./games/minecraft/minecraft-adapter.js";
 import { MinecraftTaskDecisionModel } from "./games/minecraft/decision-model.js";
+import { secureFoodTaskSchema, type MinecraftTask } from "./games/minecraft/task.js";
 import {
-  DEFAULT_CRAFT_PICKAXE_TASK,
-  DEFAULT_GATHER_LOG_TASK,
-  DEFAULT_SECURE_FOOD_TASK,
-  craftItemTaskSchema,
-  gatherResourceTaskSchema,
-  secureFoodTaskSchema,
-  type MinecraftTask,
-} from "./games/minecraft/task.js";
-import { MinecraftTaskRunner } from "./games/minecraft/task-runner.js";
-import { minecraftLogNames } from "./games/minecraft/capabilities.js";
+  MinecraftTaskRunner,
+  type MinecraftTaskResult,
+  type MinecraftTaskRunnerOptions,
+} from "./games/minecraft/task-runner.js";
+import { readEvaluationSummary } from "./games/minecraft/run-control.js";
+import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./games/minecraft/capabilities.js";
 import { createFakeMinecraftFixture, FakeMinecraftAdapter } from "./testing/fake-minecraft-adapter.js";
 import { evaluationScenarios } from "./testing/eval/scenarios.js";
 import { SimulatedMinecraftAdapter } from "./testing/simulated-minecraft/adapter.js";
 import { loadScenario } from "./testing/scenario.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
 
-type TaskChoice = "gather-logs" | "craft-wooden-pickaxe" | "secure-food";
+type TaskChoice = ControlCenterTaskKind;
 
-const TASK_CHOICES: readonly TaskChoice[] = ["gather-logs", "craft-wooden-pickaxe", "secure-food"];
+type PolicyChoice = "status" | "promote" | "reject";
+
+const POLICY_CHOICES: readonly PolicyChoice[] = ["status", "promote", "reject"];
+
+const TASK_CHOICES: readonly TaskChoice[] = controlCenterTaskKinds;
 
 interface CliOptions {
   readonly demo: boolean;
@@ -52,6 +61,16 @@ interface CliOptions {
   readonly lookPitch: number;
   readonly traceDirectory: string;
   readonly help: boolean;
+  /** Serve the live Control Center for this run. */
+  readonly controlCenter: boolean;
+  readonly controlPort?: number;
+  readonly controlHost: string;
+  /** Experience recording is on by default; --no-learning turns persistence off. */
+  readonly learning: boolean;
+  readonly learningDirectory: string;
+  /** Operator opt-in for the combat capability, at the adapter and the safety policy together. */
+  readonly allowCombat: boolean;
+  readonly policy?: PolicyChoice;
 }
 
 function isTaskChoice(value: string): value is TaskChoice {
@@ -81,6 +100,13 @@ function parseArgs(args: readonly string[]): CliOptions {
   let lookPitch = 0;
   let lookPitchProvided = false;
   let traceDirectory = process.env.GAMEMIND_TRACE_DIR ?? "data/traces";
+  let controlCenter = false;
+  let controlPort: number | undefined;
+  let controlHost = process.env.GAMEMIND_CONTROL_HOST ?? "127.0.0.1";
+  let learning = true;
+  let learningDirectory = process.env.GAMEMIND_LEARNING_DIR ?? "data/learning";
+  let allowCombat = false;
+  let policy: PolicyChoice | undefined;
   let help = false;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -100,7 +126,7 @@ function parseArgs(args: readonly string[]): CliOptions {
         demoTask = true;
         const taskValue = next && !next.startsWith("--") ? next : "gather-logs";
         if (!isTaskChoice(taskValue)) {
-          throw new Error("--demo-task supports 'gather-logs', 'craft-wooden-pickaxe', or 'secure-food'.");
+          throw new Error(`--demo-task supports ${controlCenterTaskKinds.join(", ")}.`);
         }
         if (next && !next.startsWith("--")) index += 1;
         demoTaskKind = taskValue;
@@ -109,7 +135,7 @@ function parseArgs(args: readonly string[]): CliOptions {
       case "--task": {
         const taskValue = value();
         if (!isTaskChoice(taskValue)) {
-          throw new Error("--task supports 'gather-logs', 'craft-wooden-pickaxe', or 'secure-food'.");
+          throw new Error(`--task supports ${controlCenterTaskKinds.join(", ")}.`);
         }
         task = taskValue;
         break;
@@ -197,6 +223,39 @@ function parseArgs(args: readonly string[]): CliOptions {
       case "--trace-dir":
         traceDirectory = value();
         break;
+      case "--control-center":
+        controlCenter = true;
+        break;
+      case "--control-port":
+        controlPort = Number(value());
+        if (!Number.isInteger(controlPort) || controlPort < 0 || controlPort > 65_535) {
+          throw new Error("--control-port must be an integer from 0 through 65535 (0 picks a free port).");
+        }
+        controlCenter = true;
+        break;
+      case "--control-host":
+        controlHost = value();
+        break;
+      case "--learn":
+        learning = true;
+        break;
+      case "--no-learning":
+        learning = false;
+        break;
+      case "--learning-dir":
+        learningDirectory = value();
+        break;
+      case "--allow-combat":
+        allowCombat = true;
+        break;
+      case "--policy": {
+        const policyValue = value();
+        if (!(POLICY_CHOICES as readonly string[]).includes(policyValue)) {
+          throw new Error("--policy supports 'status', 'promote' or 'reject'.");
+        }
+        policy = policyValue as PolicyChoice;
+        break;
+      }
       case "--help":
       case "-h":
         help = true;
@@ -220,12 +279,24 @@ function parseArgs(args: readonly string[]): CliOptions {
   if (lookPitchProvided && lookYaw === undefined) {
     throw new Error("--look-pitch requires --look-yaw.");
   }
+  if (policy !== undefined && (demo || demoTask || task || sim !== undefined)) {
+    throw new Error("--policy inspects or changes the learned policy on its own; do not combine it with a run.");
+  }
+  if (controlPort !== undefined && !controlCenter) {
+    throw new Error("--control-port is only meaningful together with --control-center.");
+  }
+  if (allowCombat && policy !== undefined) {
+    throw new Error("--allow-combat applies to a run, not to --policy.");
+  }
   if ((demo || demoTask) && (lookYaw !== undefined || lookPitchProvided)) {
     throw new Error("Orientation flags cannot be combined with an offline demo.");
   }
   const selectedTask = task ?? demoTaskKind;
-  if (resource !== undefined && (!demoTask && task === undefined || selectedTask !== "gather-logs")) {
-    throw new Error("--resource is supported only by the gather-logs task.");
+  if (resource !== undefined && !demoTask && task === undefined) {
+    throw new Error("--resource requires --demo-task or --task.");
+  }
+  if (resource !== undefined && selectedTask === "secure-food") {
+    throw new Error("--resource is not used by the secure-food task; use --target-hunger.");
   }
   if (count !== undefined && selectedTask === "secure-food") {
     throw new Error("--count is not used by the secure-food task; use --target-hunger.");
@@ -260,6 +331,13 @@ function parseArgs(args: readonly string[]): CliOptions {
     lookPitch,
     traceDirectory,
     help,
+    controlCenter,
+    ...(controlPort !== undefined ? { controlPort } : {}),
+    controlHost,
+    learning,
+    learningDirectory,
+    allowCombat,
+    ...(policy !== undefined ? { policy } : {}),
   };
 }
 
@@ -271,17 +349,19 @@ Usage:
   npm run dev -- --demo-task [gather-logs|craft-wooden-pickaxe|secure-food]
   npm run dev -- --sim food-remote-berries --seed 101
   npm run dev -- --task craft-wooden-pickaxe --host 127.0.0.1
+  npm run dev -- --task mine-stone --resource iron_ore --count 4 --host 127.0.0.1 --control-center
   npm run dev -- --task secure-food --target-hunger 18 --host 127.0.0.1
 
 Offline:
   --demo               Run the seeded look scenario against the offline fake adapter
-  --demo-task [TASK]   Run gather-logs (default), craft-wooden-pickaxe (fixture) or secure-food (simulated world) offline
+  --demo-task [TASK]   Run gather-logs (default) or craft-wooden-pickaxe on the offline fixture, or
+                       secure-food in the simulated world. Mining offline: npm run task:demo:mine
   --sim SCENARIO       Run one offline simulated scenario (see src/testing/eval/scenarios.ts; e.g. explore-remote-log)
   --seed N             Seed for --sim scenarios (default 101)
 
 Live Java server (requires an authorized private/local server):
-  --task TASK          Run gather-logs, craft-wooden-pickaxe, or secure-food on a Java server
-  --resource NAME      Log item to gather (oak_log, birch_log, spruce_log, ...)
+  --task TASK          Run gather-logs, mine-stone, craft-wooden-pickaxe or secure-food on a Java server
+  --resource NAME      Target block or item for the task (oak_log, stone, iron_ore, wooden_pickaxe, ...)
   --count N            Inventory target for gather/craft, from 1 through 64 (default: 1)
   --target-hunger N    Hunger target for secure-food, from 1 through 20 (default: 18)
   --explore-legs N     Exploration legs allowed per task, 0 through 30 (default: 8; 0 disables exploration)
@@ -297,6 +377,20 @@ Live Java server (requires an authorized private/local server):
   --look-yaw RADIANS   After observing, orient to this yaw; pitch defaults to 0
   --look-pitch RADIANS Look pitch in radians (range -pi/2 through pi/2)
   --trace-dir PATH     JSONL trace directory (default: data/traces)
+
+Control Center (real state, real controls; serve it from a run):
+  --control-center     Serve the dashboard for this run and keep the process open until Ctrl-C
+  --control-port PORT  Port for the dashboard (default 8787, 0 picks a free one)
+  --control-host HOST  Interface to bind (default 127.0.0.1; use 0.0.0.0 only on a trusted network)
+
+Learning and policy:
+  --learn              Record episodes and reuse them (on by default)
+  --no-learning        Turn the experience store off for this run
+  --learning-dir PATH  Experience store directory (default: data/learning)
+  --policy STATUS|PROMOTE|REJECT
+                       Inspect, promote or roll back the learned policy; promotion also requires a
+                       passing 'npm run eval:offline' report
+  --allow-combat       Arm the combat capability for this run (adapter and safety policy together)
   --help               Show this help
 
 Task runs have fixed limits for action count, time, target distance, exploration, rest, and consecutive failures. Nearby visible hostile mobs take priority; collection, pickup, berry harvesting, and placement are refused when a visible hostile is within the task's danger radius of the target.
@@ -322,53 +416,179 @@ function taskLimitOverrides(options: CliOptions): Record<string, number> {
   return overrides;
 }
 
-function configuredGatherTask(options: CliOptions, offline = false) {
-  const resourceName = options.resource ?? DEFAULT_GATHER_LOG_TASK.resourceName;
-  if (!minecraftLogNames.includes(resourceName as (typeof minecraftLogNames)[number])) {
-    throw new Error(`Unsupported log resource '${resourceName}'.`);
-  }
-  return gatherResourceTaskSchema.parse({
-    ...DEFAULT_GATHER_LOG_TASK,
-    id: offline ? "offline-gather-log-demo" : `gather-${resourceName}`,
-    resourceName,
-    targetCount: options.count ?? DEFAULT_GATHER_LOG_TASK.targetCount,
-    ...taskLimitOverrides(options),
-  });
-}
-
+/**
+ * One task builder for both entry points: the CLI flags and the Control Center requests are parsed by the
+ * same schemas, so a dashboard-started task carries exactly the same limits as a command-line one.
+ */
 function configuredTask(options: CliOptions, offline = false): MinecraftTask {
   const taskKind = options.task ?? options.demoTaskKind ?? "gather-logs";
-  if (taskKind === "craft-wooden-pickaxe") {
-    return craftItemTaskSchema.parse({
-      ...DEFAULT_CRAFT_PICKAXE_TASK,
-      id: offline ? "offline-craft-wooden-pickaxe-demo" : "craft-wooden-pickaxe",
-      targetCount: options.count ?? DEFAULT_CRAFT_PICKAXE_TASK.targetCount,
-      ...taskLimitOverrides(options),
+  const task = taskFromControlCenterRequest({
+    kind: taskKind,
+    ...(options.resource !== undefined ? { resource: options.resource } : {}),
+    ...(options.count !== undefined ? { count: options.count } : {}),
+    ...(options.targetHunger !== undefined && taskKind === "secure-food" ? { count: options.targetHunger } : {}),
+  });
+  const overrides = taskLimitOverrides(options);
+  const id = offline ? `offline-${taskKind}-demo` : task.id.replace(/^ui-/, "");
+  return Object.keys(overrides).length === 0 && !offline
+    ? task
+    : ({ ...task, id, ...overrides } as MinecraftTask);
+}
+
+interface RunHostParts {
+  readonly options: CliOptions;
+  readonly trace: TraceRecorder;
+  readonly ring: RingBufferTraceSink;
+  readonly logger: ReturnType<typeof createLogger>;
+  readonly runtime: ReturnType<typeof createMinecraftAgent>["runtime"];
+  readonly skills: ReturnType<typeof createMinecraftAgent>["skills"];
+  readonly safety: ReturnType<typeof createMinecraftAgent>["safety"];
+  readonly decisionModel: MinecraftTaskDecisionModel;
+  readonly learner: ExperienceLearner | null;
+  readonly worldKey: string | null;
+  readonly offlineNote: string | null;
+  readonly extraRunnerOptions: MinecraftTaskRunnerOptions;
+  readonly report: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
+}
+
+/**
+ * Builds the runner and, when asked, the Control Center that watches it. The CLI and the dashboard start
+ * tasks through the same host, so a UI-started run is connected, traced, budgeted and verified identically.
+ */
+async function openRunHost(
+  parts: RunHostParts,
+): Promise<{ host: MinecraftRunHost | null; run(task: MinecraftTask): Promise<MinecraftTaskResult> }> {
+  const makeRunner = (extra: MinecraftTaskRunnerOptions) =>
+    new MinecraftTaskRunner(parts.runtime, parts.skills, parts.decisionModel, parts.logger, {
+      ...(parts.learner ? { learner: parts.learner } : {}),
+      worldKey: parts.worldKey,
+      allowCombat: parts.options.allowCombat,
+      ...parts.extraRunnerOptions,
+      ...extra,
     });
+  if (!parts.options.controlCenter) {
+    return { host: null, run: (task) => makeRunner({}).run(task) };
   }
-  if (taskKind === "secure-food") {
-    return secureFoodTaskSchema.parse({
-      ...DEFAULT_SECURE_FOOD_TASK,
-      id: offline ? "offline-secure-food-demo" : "secure-food",
-      targetHunger: options.targetHunger ?? DEFAULT_SECURE_FOOD_TASK.targetHunger,
-      ...taskLimitOverrides(options),
-    });
+  const host = await attachMinecraftRunHost({
+    runtime: parts.runtime,
+    safety: parts.safety,
+    traceSink: parts.ring,
+    logger: parts.logger,
+    ...(parts.learner ? { learner: parts.learner } : {}),
+    worldKey: parts.worldKey,
+    offlineNote: parts.offlineNote,
+    title: parts.offlineNote ? "GameMind (offline world)" : "GameMind",
+    ...(parts.options.controlPort !== undefined ? { port: parts.options.controlPort } : {}),
+    bindHost: parts.options.controlHost,
+    createRunner: makeRunner,
+    onTaskFinished: (result, source) => {
+      if (source === "control-center") parts.report(result, source);
+    },
+  });
+  return { host, run: (task) => host.runTask(task) };
+}
+
+function createLearner(options: CliOptions, logger: ReturnType<typeof createLogger>): ExperienceLearner | null {
+  if (!options.learning) return null;
+  return ExperienceLearner.forDirectory(resolve(options.learningDirectory), { logger });
+}
+
+/**
+ * Operator-facing policy commands. Promotion is deliberately gated: the candidate weights come from
+ * observed failures, but a policy that has not passed the offline evaluation must not go live silently.
+ */
+async function runPolicyCommand(options: CliOptions, logger: ReturnType<typeof createLogger>): Promise<void> {
+  const learner = ExperienceLearner.forDirectory(resolve(options.learningDirectory), { logger });
+  await learner.load();
+  // Read from the learner every time, so a report printed after a change describes the state after it.
+  const describe = () => {
+    const snapshot = learner.snapshot();
+    return {
+      type: "policy-status",
+      learningDirectory: resolve(options.learningDirectory),
+      enabled: snapshot.enabled,
+      runs: snapshot.runs,
+      episodes: snapshot.episodes,
+      contradictedConfirmations: snapshot.contradictedConfirmations,
+      safetyDenials: snapshot.safetyDenials,
+      activePolicy: snapshot.activePolicy,
+      candidatePolicy: snapshot.candidatePolicy,
+      candidateWeights: learner.candidateWeights,
+      weightedContexts: snapshot.contexts.length,
+      blockedTargets: snapshot.failureMemory.filter((entry) => entry.blocked).length,
+      history: snapshot.history.slice(-8),
+    };
+  };
+  if (options.policy === "status") {
+    console.log(JSON.stringify(describe(), null, 2));
+    return;
   }
-  return configuredGatherTask(options, offline);
+  if (options.policy === "reject") {
+    await learner.rollback("candidate policy rejected from the CLI");
+    console.log(
+      JSON.stringify(
+        { ...describe(), type: "policy-reject", ok: true, message: "Rolled back: no promoted policy is in force, so the hand-tuned weights rank decisions again." },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  const report = await readEvaluationSummary(resolve("data/eval/offline-report.json"));
+  const problems: string[] = [];
+  if (!report.generatedAt) {
+    problems.push("there is no offline evaluation report; run 'npm run eval:offline' first");
+  } else if (report.passed !== true) {
+    problems.push(`the last offline evaluation did not pass (unsafe actions: ${report.unsafeActions ?? "unknown"})`);
+  }
+  const snapshot = learner.snapshot();
+  if (snapshot.episodes === 0) problems.push("no episodes have been recorded, so there is no candidate to promote");
+  if (snapshot.candidatePolicy.contexts === 0) {
+    problems.push("the derived candidate is still the baseline: no context reached the sample threshold, so promotion would change nothing");
+  }
+  if (snapshot.contradictedConfirmations > 0) {
+    problems.push(`${snapshot.contradictedConfirmations} confirmation(s) were contradicted by the world`);
+  }
+  if (problems.length > 0) {
+    throw new Error(`Refusing to promote the learned policy: ${problems.join("; ")}.`);
+  }
+  const promotedId = learner.candidateWeights.id;
+  await learner.promote(learner.candidateWeights, `promoted from the CLI; evaluation report ${report.generatedAt}`);
+  console.log(
+    JSON.stringify(
+      {
+        ...describe(),
+        type: "policy-promote",
+        ok: true,
+        message: `Promoted ${promotedId}. The next run uses these weights; the state file lives in the learning directory.`,
+        evaluation: report,
+      },
+      null,
+      2,
+    ),
+  );
 }
 
 async function runDemoTask(
   options: CliOptions,
   trace: TraceRecorder,
+  ring: RingBufferTraceSink,
   logger: ReturnType<typeof createLogger>,
 ): Promise<void> {
   const taskKind = options.demoTaskKind ?? "gather-logs";
+  if (taskKind === "mine-stone") {
+    // The offline fixture has no stone to dig, so mining is demonstrated in the simulated world instead.
+    throw new Error(
+      "--demo-task does not support mine-stone: the offline fixture has no diggable stone. Use 'npm run task:demo:mine' (simulated world) or --task mine-stone against a server.",
+    );
+  }
   if (taskKind === "secure-food") {
     // Berries and drops only exist in the simulated world, so the food demo runs there.
     await runSimulatedScenario(
       "food-remote-berries",
       options.seed ?? 101,
       trace,
+      ring,
       logger,
       { ...options, targetHunger: options.targetHunger ?? 8 },
       true,
@@ -394,19 +614,46 @@ async function runDemoTask(
         }
       : {}),
   });
-  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  const { runtime, skills, safety } = createMinecraftAgent(adapter, trace, logger);
+  const decisionModel = new MinecraftTaskDecisionModel();
+  const learner = createLearner(options, logger);
+  const task = configuredTask(options, true);
+  const signal = new AbortController();
+  const onSignal = (name: NodeJS.Signals): void => {
+    logger.warn({ signal: name }, "Shutdown signal received; ending the offline demo");
+    signal.abort();
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
   try {
-    const result = await new MinecraftTaskRunner(
+    const { host, run } = await openRunHost({
+      options,
+      trace,
+      ring,
+      logger,
       runtime,
       skills,
-      new MinecraftTaskDecisionModel(),
-      logger,
-    ).run(configuredTask(options, true));
+      safety,
+      decisionModel,
+      learner,
+      worldKey: "offline-fixture-1337",
+      offlineNote: "Offline demo: the world is a fixture, not a Minecraft server.",
+      extraRunnerOptions: {},
+      report: (result) => console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result }, null, 2)),
+    });
+    const result = await run(task);
     console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result }, null, 2));
+    if (host) {
+      console.log(`Control Center for this offline run: ${host.handle?.url} (left open until Ctrl-C)`);
+      await host.waitUntil(signal.signal);
+      await host.close();
+    }
     if (result.status !== "succeeded") {
       throw new Error(`Offline ${taskKind} task ended with status '${result.status}'.`);
     }
   } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
     await runtime.shutdown("offline task demo complete");
   }
 }
@@ -419,6 +666,7 @@ async function runSimulatedScenario(
   scenarioId: string,
   seed: number,
   trace: TraceRecorder,
+  ring: RingBufferTraceSink,
   logger: ReturnType<typeof createLogger>,
   options: CliOptions,
   demo: boolean,
@@ -433,21 +681,24 @@ async function runSimulatedScenario(
     baseTask.kind === "secure_food" && options.targetHunger !== undefined
       ? secureFoodTaskSchema.parse({ ...baseTask, targetHunger: options.targetHunger })
       : baseTask;
-  const adapter = new SimulatedMinecraftAdapter({ definition: scenario.world(seed) });
-  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
-  try {
-    const result = await new MinecraftTaskRunner(
-      runtime,
-      skills,
-      new MinecraftTaskDecisionModel(),
-      logger,
-      { clock: () => adapter.simulatedNowMs },
-    ).run(task);
+  const adapter = new SimulatedMinecraftAdapter({ definition: scenario.world(seed), allowCombat: options.allowCombat });
+  const { runtime, skills, safety } = createMinecraftAgent(adapter, trace, logger);
+  const decisionModel = new MinecraftTaskDecisionModel();
+  const learner = createLearner(options, logger);
+  const signal = new AbortController();
+  const onSignal = (name: NodeJS.Signals): void => {
+    logger.warn({ signal: name }, "Shutdown signal received; ending the simulated run");
+    signal.abort();
+  };
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  const report = (result: MinecraftTaskResult, source: "cli" | "control-center"): void => {
     console.log(
       JSON.stringify(
         {
           type: "sim-task-report",
           simulatedWorld: true,
+          startedBy: source,
           scenarioId,
           seed,
           description: scenario.description,
@@ -465,10 +716,38 @@ async function runSimulatedScenario(
         2,
       ),
     );
-    if (result.status !== "succeeded" && scenario.expectation === "success") {
+    // The scenario's own expectation gates the run the CLI started. A task an operator starts from the
+    // dashboard afterwards is not part of the scenario, so it reports without turning the demo red.
+    if (source === "cli" && result.status !== "succeeded" && scenario.expectation === "success") {
       throw new Error(`Simulated scenario '${scenarioId}' ended with status '${result.status}'.`);
     }
+  };
+  try {
+    const { host, run } = await openRunHost({
+      options,
+      trace,
+      ring,
+      logger,
+      runtime,
+      skills,
+      safety,
+      decisionModel,
+      learner,
+      worldKey: `${scenarioId}#${seed}`,
+      offlineNote: "Simulated world: this is the offline evaluation adapter, not a Minecraft server.",
+      extraRunnerOptions: { clock: () => adapter.simulatedNowMs },
+      report,
+    });
+    const result = await run(task);
+    report(result, "cli");
+    if (host) {
+      console.log(`Control Center for this simulated run: ${host.handle?.url} (left open until Ctrl-C)`);
+      await host.waitUntil(signal.signal);
+      await host.close();
+    }
   } finally {
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
     await runtime.shutdown(`simulated scenario ${scenarioId} complete`);
   }
 }
@@ -476,6 +755,7 @@ async function runSimulatedScenario(
 async function runMinecraft(
   options: CliOptions,
   trace: TraceRecorder,
+  ring: RingBufferTraceSink,
   logger: ReturnType<typeof createLogger>,
 ): Promise<void> {
   const task = options.task ? configuredTask(options) : null;
@@ -488,13 +768,21 @@ async function runMinecraft(
     ...(options.username !== undefined ? { username: options.username } : {}),
     ...(options.version !== undefined ? { version: options.version } : {}),
     ...(options.auth !== undefined ? { auth: options.auth } : {}),
+    ...(options.allowCombat ? { allowCombat: true } : {}),
   };
   const adapter = new MinecraftAdapter(logger, config);
-  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  const { runtime, skills, safety } = createMinecraftAgent(adapter, trace, logger, {
+    // Combat is opt-in at three layers; this is the operator's explicit second and third "yes".
+    ...(options.allowCombat ? { optedInCapabilities: [MINECRAFT_ATTACK_HOSTILE_CAPABILITY] } : {}),
+  });
+  const decisionModel = new MinecraftTaskDecisionModel();
+  const learner = createLearner(options, logger);
 
-  const onSignal = (signal: NodeJS.Signals): void => {
-    logger.warn({ signal }, "Shutdown signal received; closing Minecraft session safely");
-    void runtime.shutdown(signal).catch((error: unknown) => {
+  const signal = new AbortController();
+  const onSignal = (name: NodeJS.Signals): void => {
+    logger.warn({ signal: name }, "Shutdown signal received; closing Minecraft session safely");
+    signal.abort();
+    void runtime.shutdown(name).catch((error: unknown) => {
       logger.error({ err: error }, "Safe shutdown after signal failed");
     });
   };
@@ -514,14 +802,42 @@ async function runMinecraft(
       "Minecraft observation loop connected",
     );
 
+    let host: MinecraftRunHost | null = null;
+    if (options.controlCenter) {
+      host = (
+        await openRunHost({
+          options,
+          trace,
+          ring,
+          logger,
+          runtime,
+          skills,
+          safety,
+          decisionModel,
+          learner,
+          worldKey: `${config.host}:${config.port}`,
+          offlineNote: null,
+          extraRunnerOptions: {},
+          report: (result, source) => console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result }, null, 2)),
+        })
+      ).host;
+    }
     if (task) {
-      const result = await new MinecraftTaskRunner(
-        runtime,
-        skills,
-        new MinecraftTaskDecisionModel(),
-        logger,
-      ).run(task);
-      console.log(JSON.stringify({ type: "task-report", ...result }, null, 2));
+      const result = host
+        ? await host.runTask(task)
+        : await new MinecraftTaskRunner(runtime, skills, decisionModel, logger, {
+            ...(learner ? { learner } : {}),
+            worldKey: `${config.host}:${config.port}`,
+            allowCombat: options.allowCombat,
+          }).run(task);
+      console.log(JSON.stringify({ type: "task-report", startedBy: "cli", ...result }, null, 2));
+      if (host) {
+        // The operator keeps the dashboard open after the task so the trace and the learning result stay
+        // readable; a second task can be started from the UI against the same live session.
+        console.log(`Control Center for this live run: ${host.handle?.url} (left open until Ctrl-C)`);
+        await host.waitUntil(signal.signal);
+        await host.close();
+      }
       if (result.status !== "succeeded") {
         throw new Error(
           `Minecraft ${options.task} task ended with status '${result.status}': ${result.failure?.message ?? "unknown task result"}`,
@@ -551,6 +867,12 @@ async function runMinecraft(
           2,
         ),
       );
+      if (host) {
+        // Observation-only mode with a dashboard: the agent acts only when an operator starts a task.
+        console.log(`Control Center for this session: ${host.handle?.url} (left open until Ctrl-C)`);
+        await host.waitUntil(signal.signal);
+        await host.close();
+      }
     }
   } finally {
     process.removeListener("SIGINT", onSignal);
@@ -567,20 +889,27 @@ async function main(): Promise<void> {
   }
 
   const logger = createLogger();
-  const trace = new TraceRecorder(new JsonlTraceSink(options.traceDirectory), logger);
+  if (options.policy) {
+    await runPolicyCommand(options, logger);
+    return;
+  }
+  // The ring keeps recent events for the Control Center; the fan-out guarantees a dead UI client can
+  // never break the durable JSONL log or the action path that awaits the write.
+  const ring = new RingBufferTraceSink(400);
+  const trace = new TraceRecorder(new FanOutTraceSink([new JsonlTraceSink(options.traceDirectory), ring], logger), logger);
   if (options.demo) {
     await runDemo(trace, logger);
     return;
   }
   if (options.sim !== undefined) {
-    await runSimulatedScenario(options.sim, options.seed ?? 101, trace, logger, options, false);
+    await runSimulatedScenario(options.sim, options.seed ?? 101, trace, ring, logger, options, false);
     return;
   }
   if (options.demoTask) {
-    await runDemoTask(options, trace, logger);
+    await runDemoTask(options, trace, ring, logger);
     return;
   }
-  await runMinecraft(options, trace, logger);
+  await runMinecraft(options, trace, ring, logger);
 }
 
 main().catch((error: unknown) => {

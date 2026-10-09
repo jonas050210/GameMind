@@ -106,6 +106,7 @@ export class SkillRuntime<TState = unknown> {
       actionId,
       sessionId: session?.id ?? null,
       capability: definition.capability,
+      skillId,
       input: normalizedInput,
       source,
       ...(options.timeoutMs !== undefined

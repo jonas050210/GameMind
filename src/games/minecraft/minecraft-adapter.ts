@@ -18,6 +18,11 @@ import {
   MINECRAFT_PICKUP_ITEM_CAPABILITY,
   MINECRAFT_PLACE_TABLE_CAPABILITY,
   MINECRAFT_REST_CAPABILITY,
+  MINECRAFT_MINE_BLOCK_CAPABILITY,
+  MINECRAFT_PLACE_BLOCK_CAPABILITY,
+  MINECRAFT_BUILD_SHELTER_CAPABILITY,
+  MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
+  MINECRAFT_DROP_ITEM_CAPABILITY,
   MINECRAFT_EQUIP_CAPABILITY,
   MINECRAFT_INSPECT_BLOCK_CAPABILITY,
   MINECRAFT_LOOK_CAPABILITY,
@@ -29,6 +34,11 @@ import {
   minecraftPickupItemInputSchema,
   minecraftPlaceTableInputSchema,
   minecraftRestInputSchema,
+  minecraftMineBlockInputSchema,
+  minecraftPlaceBlockInputSchema,
+  minecraftBuildShelterInputSchema,
+  minecraftAttackHostileInputSchema,
+  minecraftDropItemInputSchema,
   minecraftEquipInputSchema,
   minecraftInspectBlockInputSchema,
   minecraftLookInputSchema,
@@ -39,10 +49,14 @@ import {
   distanceBetween,
   isInterestingBlockName,
   isResourceBlockName,
+  blockObservationPriority,
   isRipeBerryBush,
 } from "./block-classes.js";
 import type { MinecraftObservation } from "./observation.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { isMineableBlockName, minecraftMiningRequirements, estimatedDigSeconds, bestPickaxeTier, canMineWithTier } from "./mining.js";
+import { bestWeapon, combatIsAllowed, weaponDamageFor } from "./combat.js";
+import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_DIRECTIONS } from "./shelter.js";
 import { minecraftObservationSchema } from "./observation.js";
 import type {
   AdapterAction,
@@ -83,6 +97,17 @@ export interface MinecraftAdapterConfig {
   readonly maxNavigationDistance: number;
   readonly maxResourceGatherDistance: number;
   readonly maxCraftingTableDistance: number;
+  /** Reach used by block placement (shelter and table). */
+  readonly maxPlacementDistance: number;
+  /**
+   * When false the adapter refuses every attack request outright, regardless of what the planner or
+   * the safety broker allows. Combat is opt-in at three independent layers on purpose.
+   */
+  readonly allowCombat: boolean;
+  /** How long a mined drop may take to appear in the inventory after the block breaks. */
+  readonly dropSettleMs: number;
+  /** Extra seconds a dig may take over Mineflayer's own estimate before the action is cancelled. */
+  readonly digTimeoutSlackMs: number;
   readonly navigationStuckTimeoutMs: number;
   readonly resourceScanRadius: number;
   readonly resourceScanLimit: number;
@@ -103,6 +128,10 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   maxNavigationDistance: 48,
   maxResourceGatherDistance: 24,
   maxCraftingTableDistance: 4.5,
+  maxPlacementDistance: 4.5,
+  allowCombat: false,
+  dropSettleMs: 2_000,
+  digTimeoutSlackMs: 5_000,
   navigationStuckTimeoutMs: 10_000,
   resourceScanRadius: 24,
   resourceScanLimit: 64,
@@ -128,6 +157,21 @@ class MinecraftAdapterError extends Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Day-cycle facts from Mineflayer. `timeOfDay` is a 0..1 fraction of the cycle and `isDay` is the
+ * server's own judgement; when the server does not send them the agent reports "day, unknown source"
+ * rather than guessing night, because night is only used to *add* caution.
+ */
+function minecraftTimeInfo(bot: Bot): { dayTicks: number; day: number; isNight: boolean } {
+  const fraction = typeof bot.time?.timeOfDay === "number" ? bot.time.timeOfDay : Number.NaN;
+  const dayTicks = Number.isFinite(fraction)
+    ? Math.min(23_999, Math.max(0, Math.round(fraction * 24_000)))
+    : 0;
+  const day = Number.isFinite(bot.time?.day) ? Math.max(0, Math.trunc(bot.time.day)) : 0;
+  const isNight = typeof bot.time?.isDay === "boolean" ? !bot.time.isDay : dayTicks >= 13_000 && dayTicks < 23_000;
+  return { dayTicks, day, isNight };
 }
 
 function finiteOrNull(value: number | undefined): number | null {
@@ -218,6 +262,53 @@ function findDroppedItemNear(
   return null;
 }
 
+const minecraftPlaceableNames = [
+  "dirt",
+  "cobblestone",
+  "granite",
+  "andesite",
+  "diorite",
+  "cobbled_deepslate",
+  "oak_planks",
+  "birch_planks",
+  "spruce_planks",
+] as const;
+
+function countHostilesNear(
+  bot: Bot,
+  point: { x: number; y: number; z: number },
+  radius: number,
+): number {
+  let count = 0;
+  for (const entity of Object.values(bot.entities)) {
+    if (entity.id === bot.entity.id) continue;
+    const name = String((entity as { name?: string }).name ?? entity.type ?? "");
+    if (!isHostileMinecraftEntity(name, entity.type)) continue;
+    if (entity.position.distanceTo(bot.entity.position.clone().set(point.x, point.y, point.z)) <= radius) count += 1;
+  }
+  return count;
+}
+
+function cardinalShelterCount(bot: Bot, feet: { x: number; y: number; z: number }): number {
+  let solid = 0;
+  for (const [dx, dz] of SHELTER_CARDINAL_DIRECTIONS) {
+    const block = bot.blockAt(bot.entity.position.offset(dx, 0, dz).floor());
+    if (block && block.boundingBox === "block") solid += 1;
+  }
+  return solid;
+}
+
+/** Mineflayer's 0..10 air gauge converted to Minecraft air ticks (300 = full lungs). */
+function oxygenTicksFromLevel(level: number | null | undefined): number {
+  if (typeof level !== "number" || !Number.isFinite(level)) return 300;
+  return Math.max(0, Math.min(300, Math.round(level * 30)));
+}
+
+function clampFinite(value: number | undefined, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
 function safeInstallPlugins(bot: Bot): void {
   bot.loadPlugin(pathfinderApi.pathfinder);
   bot.loadPlugin(toolApi.plugin);
@@ -294,11 +385,19 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private readonly installPlugins: (bot: Bot) => void;
   private readonly configureSafeMovements: (bot: Bot) => void;
 
+  /**
+   * Combat is switched through this field rather than the config object, so an operator can arm or
+   * disarm it while the agent is connected. Both gates have to be open: this one and the safety
+   * policy's capability opt-in. The default always comes from the immutable startup configuration.
+   */
+  private combatAllowedValue = false;
+
   constructor(
     private readonly logger: Logger,
     private readonly config: MinecraftAdapterConfig = DEFAULT_MINECRAFT_CONFIG,
     dependencies: MinecraftAdapterDependencies = {},
   ) {
+    this.combatAllowedValue = config.allowCombat;
     this.botFactory = dependencies.botFactory ?? createBot;
     this.installPlugins = dependencies.installPlugins ?? safeInstallPlugins;
     this.configureSafeMovements = dependencies.configureSafeMovements ?? configureConservativeMovements;
@@ -338,6 +437,15 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     }
     if (!Number.isFinite(config.resourceScanRadius) || config.resourceScanRadius < config.observationRadius) {
       throw new Error("Resource scan radius must be finite and at least the local observation radius.");
+    }
+    if (!Number.isFinite(config.maxPlacementDistance) || config.maxPlacementDistance < 1) {
+      throw new Error("Maximum placement distance must be at least one block.");
+    }
+    if (!Number.isInteger(config.dropSettleMs) || config.dropSettleMs < 0 || config.dropSettleMs > 30_000) {
+      throw new Error("Drop settle window must be an integer between 0 and 30000 ms.");
+    }
+    if (typeof config.allowCombat !== "boolean") {
+      throw new Error("allowCombat must be a boolean.");
     }
     if (!Number.isInteger(config.resourceScanLimit) || config.resourceScanLimit < 1 || config.resourceScanLimit > 256) {
       throw new Error("Resource scan limit must be an integer from 1 through 256.");
@@ -520,13 +628,14 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const nearbyBlocks = cube
       .map((block) => ({ block, distance: distanceBetween(block.position, center) }))
       .sort((left, right) => {
-        const interest = Number(isInterestingBlockName(right.block.name)) - Number(isInterestingBlockName(left.block.name));
+        const interest = blockObservationPriority(right.block.name) - blockObservationPriority(left.block.name);
         return interest || left.distance - right.distance;
       })
       .slice(0, this.config.maxObservedBlocks)
       .map(({ block }) => block);
 
     const resourceSightings = this.scanResourceSightings(bot, position);
+    const minableSightings = this.scanMineableSightings(bot, position);
     const itemDrops = this.scanItemDrops(bot, position);
 
     const playerEntityId = bot.entity.id;
@@ -559,8 +668,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         health: finiteOrNull(bot.health),
         food: finiteOrNull(bot.food),
         foodSaturation: finiteOrNull(bot.foodSaturation),
-        oxygenLevel: finiteOrNull(bot.oxygenLevel),
+        // Mineflayer reports 0..10; the observation contract speaks air ticks like the game logic does.
+        oxygenLevel: oxygenTicksFromLevel(bot.oxygenLevel),
         onGround: bot.entity.onGround,
+        // `items()` covers the 27 main-inventory slots; a full one cannot accept a new stack name.
+        inventoryFull: bot.inventory.items().length >= 27,
       },
       inventory: bot.inventory.items().map((item) => ({
         slot: item.slot,
@@ -596,6 +708,14 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         unknownCells,
         truncated: cubeTruncated,
       },
+      time: minecraftTimeInfo(bot),
+      minableSightings: minableSightings.blocks,
+      minableScan: {
+        radius: this.config.resourceScanRadius,
+        limit: this.config.resourceScanLimit,
+        center,
+        truncated: minableSightings.truncated,
+      },
     });
 
     return {
@@ -614,11 +734,28 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     bot: Bot,
     position: BotPosition,
   ): { blocks: MinecraftObservation["resourceSightings"]; truncated: boolean } {
+    return this.scanBlocks(bot, position, isResourceBlockName, true);
+  }
+
+  /** Second scan for mineable stone and ore blocks, so digging targets survive a full resource list. */
+  private scanMineableSightings(
+    bot: Bot,
+    position: BotPosition,
+  ): { blocks: MinecraftObservation["minableSightings"]; truncated: boolean } {
+    return this.scanBlocks(bot, position, isMineableBlockName, false);
+  }
+
+  private scanBlocks(
+    bot: Bot,
+    position: BotPosition,
+    matches: (name: string) => boolean,
+    withProperties: boolean,
+  ): { blocks: NonNullable<MinecraftObservation["minableSightings"]>; truncated: boolean } {
     if (typeof bot.findBlocks !== "function") return { blocks: [], truncated: false };
     const limit = this.config.resourceScanLimit;
     const found = bot.findBlocks({
       point: position,
-      matching: (block: { name: string }) => isResourceBlockName(block.name),
+      matching: (block: { name: string }) => matches(block.name),
       maxDistance: this.config.resourceScanRadius,
       count: limit,
     });
@@ -635,9 +772,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         },
         distance: block.position.distanceTo(position),
       };
-      const properties = blockProperties(block);
-      if (block.name === "sweet_berry_bush" && properties.age !== undefined) {
-        sighting.properties = { age: properties.age };
+      if (withProperties) {
+        const properties = blockProperties(block);
+        if (block.name === "sweet_berry_bush" && properties.age !== undefined) {
+          sighting.properties = { age: properties.age };
+        }
       }
       blocks.push(sighting);
     }
@@ -706,6 +845,16 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           return await this.executeHarvestBerries(bot, action.input, signal);
         case MINECRAFT_REST_CAPABILITY:
           return await this.executeRest(bot, action.input, signal);
+        case MINECRAFT_MINE_BLOCK_CAPABILITY:
+          return await this.executeMineBlock(bot, action.input, signal);
+        case MINECRAFT_PLACE_BLOCK_CAPABILITY:
+          return await this.executePlaceBlock(bot, action.input, signal);
+        case MINECRAFT_BUILD_SHELTER_CAPABILITY:
+          return await this.executeBuildShelter(bot, action.input, signal);
+        case MINECRAFT_ATTACK_HOSTILE_CAPABILITY:
+          return await this.executeAttackHostile(bot, action.input, signal);
+        case MINECRAFT_DROP_ITEM_CAPABILITY:
+          return await this.executeDropItem(bot, action.input, signal);
         default:
           throw new MinecraftAdapterError(
             `Unsupported Minecraft capability '${action.capability}'.`,
@@ -1432,7 +1581,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       if (capability === MINECRAFT_NAVIGATE_CAPABILITY && bot.pathfinder) {
         bot.pathfinder.setGoal(null);
       }
-      if (capability === MINECRAFT_COLLECT_BLOCK_CAPABILITY) {
+      if (capability === MINECRAFT_COLLECT_BLOCK_CAPABILITY || capability === MINECRAFT_MINE_BLOCK_CAPABILITY) {
         bot.pathfinder?.setGoal(null);
         if (bot.collectBlock) work.push(bot.collectBlock.cancelTask());
       }
@@ -1445,6 +1594,506 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       this.logger.warn({ err: error, capability }, "Minecraft action cancellation command failed");
     }
     return Promise.allSettled(work).then(() => undefined);
+  }
+
+
+  /**
+   * Digs one allowlisted block. The tool check is done here rather than trusted from the planner: the
+   * adapter looks at what is actually held, equips the best carried pickaxe when the hand cannot
+   * harvest the block, and refuses when nothing carried can. Confirmation is the drop entering the
+   * inventory, so a block that broke but whose item was lost never counts as progress.
+   */
+  private async executeMineBlock(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftMineBlockInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid mining target.", "INVALID_ACTION_INPUT");
+    const { x, y, z, blockName, dangerRadius } = parsed.data;
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError(
+        `Mining requires survival mode; current mode is '${bot.game.gameMode}'.`,
+        "GAME_MODE_BLOCKS_MINING",
+      );
+    }
+    const block = this.blockAtCoordinates(bot, x, y, z);
+    if (!block || block.name !== blockName) {
+      throw new MinecraftAdapterError(
+        `Expected ${blockName} at the requested position, but the block is unknown or different.`,
+        "RESOURCE_TARGET_CHANGED",
+      );
+    }
+    if (block.position.distanceTo(bot.entity.position) > this.config.maxResourceGatherDistance) {
+      throw new MinecraftAdapterError("The mining target is out of range.", "RESOURCE_TARGET_TOO_FAR");
+    }
+    if (hasVisibleHostileNear(bot, block.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the mining target.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
+    if (!block.diggable || !bot.canDigBlock(block)) {
+      throw new MinecraftAdapterError("The client reports this block cannot be dug.", "BLOCK_NOT_DIGGABLE");
+    }
+    const drop = minecraftMiningRequirements[blockName]?.drop ?? blockName;
+    if (!this.canAcceptItem(bot, drop)) {
+      throw new MinecraftAdapterError(
+        "The inventory has no room for the mined drop; free a slot before mining.",
+        "INVENTORY_FULL",
+      );
+    }
+
+    const handBefore = bot.heldItem?.name ?? null;
+    if (!block.canHarvest(bot.heldItem?.type ?? null)) {
+      const carried = bot.inventory.items().filter((item) => bestPickaxeTier([item]).tier > 0);
+      const best = carried.sort(
+        (left, right) => bestPickaxeTier([right]).tier - bestPickaxeTier([left]).tier,
+      )[0];
+      if (!best) {
+        const verdict = canMineWithTier(blockName, 0);
+        throw new MinecraftAdapterError(
+          verdict.mineable ? "The client refuses to harvest this block with the current tool." : verdict.reason,
+          "TOOL_TIER_INSUFFICIENT",
+        );
+      }
+      await raceWithAbort(bot.equip(best, "hand"), signal);
+      if (!block.canHarvest(bot.heldItem?.type ?? null)) {
+        throw new MinecraftAdapterError(
+          `Even with ${best.name} equipped the client reports ${blockName} cannot be harvested.`,
+          "TOOL_TIER_INSUFFICIENT",
+        );
+      }
+    }
+
+    const reach = 4;
+    if (block.position.distanceTo(bot.entity.position) > reach) {
+      if (!bot.pathfinder) {
+        throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
+      }
+      await this.navigateWithProgressWatchdog(
+        bot,
+        new pathfinderApi.goals.GoalNear(x, y, z, 1.5),
+        signal,
+      );
+    }
+    if (block.position.distanceTo(bot.entity.position) > reach + 1) {
+      throw new MinecraftAdapterError("The block is still out of reach after navigation.", "BLOCK_OUT_OF_REACH");
+    }
+
+    const inventoryBefore = inventoryCount(bot, drop);
+    const tier = bestPickaxeTier([{ name: bot.heldItem?.name ?? "" }]).tier;
+    const estimateMs =
+      typeof bot.digTime === "function"
+        ? bot.digTime(block)
+        : estimatedDigSeconds(blockName, tier) * 1_000;
+    const digDeadline = Math.max(5_000, Math.min(90_000, Math.round(estimateMs) + this.config.digTimeoutSlackMs));
+    let digTimer: NodeJS.Timeout | undefined;
+    try {
+      await raceWithAbort(
+        Promise.race([
+          bot.dig(block, true),
+          new Promise<never>((_resolve, reject) => {
+            digTimer = setTimeout(() => {
+              try {
+                bot.stopDigging();
+              } catch {
+                // The client may already have finished; the dig result still decides.
+              }
+              reject(
+                new MinecraftAdapterError(
+                  `Digging ${blockName} exceeded ${digDeadline} ms and was aborted.`,
+                  "DIG_TIMEOUT",
+                ),
+              );
+            }, digDeadline);
+          }),
+        ]),
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof MinecraftAdapterError) throw error;
+      if (signal.aborted) throw error;
+      throw new MinecraftAdapterError(
+        `Digging failed: ${error instanceof Error ? error.message : String(error)}`,
+        "DIG_FAILED",
+      );
+    } finally {
+      if (digTimer) clearTimeout(digTimer);
+    }
+
+    const inventoryAfter = await this.waitForInventoryGain(bot, drop, inventoryBefore, this.config.dropSettleMs, signal);
+    const remaining = this.blockAtCoordinates(bot, x, y, z);
+    const blockRemoved = !remaining || remaining.name !== blockName;
+    // Putting the previous hand back is best-effort; a failure there must not hide a successful dig.
+    if (handBefore && bot.heldItem?.name !== handBefore) {
+      const restore = bot.inventory.items().find((item) => item.name === handBefore);
+      if (restore) {
+        await bot.equip(restore, "hand").catch(() => undefined);
+      }
+    }
+    return {
+      confirmed: inventoryAfter > inventoryBefore && blockRemoved,
+      confirmation: "dig_completed_and_drop_inventory_delta_checked",
+      details: {
+        blockName,
+        drop,
+        coordinates: { x, y, z },
+        inventoryBefore,
+        inventoryAfter,
+        blockRemoved,
+        tool: bot.heldItem?.name ?? null,
+        digDeadlineMs: Math.round(digDeadline),
+      },
+    };
+  }
+
+  /** Places one allowlisted block onto an observed support block. Same safety checks as the table skill. */
+  private async executePlaceBlock(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftPlaceBlockInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid block placement target.", "INVALID_ACTION_INPUT");
+    return await this.placeOneBlock(bot, parsed.data.x, parsed.data.y, parsed.data.z, parsed.data.blockName, parsed.data.dangerRadius, signal);
+  }
+
+  private async placeOneBlock(
+    bot: Bot,
+    x: number,
+    y: number,
+    z: number,
+    blockName: string,
+    dangerRadius: number,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError(
+        `Placing ${blockName} requires survival mode; current mode is '${bot.game.gameMode}'.`,
+        "GAME_MODE_BLOCKS_PLACEMENT",
+      );
+    }
+    const item = bot.inventory.items().find((candidate) => candidate.name === blockName);
+    if (!item) {
+      throw new MinecraftAdapterError(`Inventory does not contain ${blockName}.`, "PLACEMENT_BLOCK_NOT_IN_INVENTORY");
+    }
+    const destination = this.blockAtCoordinates(bot, x, y, z);
+    if (!destination || (destination.name !== "air" && !destination.name.endsWith("_air"))) {
+      throw new MinecraftAdapterError("Placement destination is unknown or occupied.", "PLACEMENT_CELL_NOT_EMPTY");
+    }
+    const support = this.blockAtCoordinates(bot, x, y - 1, z);
+    if (
+      !support ||
+      support.boundingBox !== "block" ||
+      unsafePlacementSupportNames.has(support.name) ||
+      !bot.canSeeBlock(support)
+    ) {
+      throw new MinecraftAdapterError("Placement destination has no visible safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
+    }
+    const distance = destination.position.distanceTo(bot.entity.position);
+    if (distance > this.config.maxPlacementDistance) {
+      throw new MinecraftAdapterError(
+        `Placement is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxPlacementDistance}.`,
+        "PLACEMENT_TARGET_TOO_FAR",
+      );
+    }
+    if (hasVisibleHostileNear(bot, destination.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the placement cell.`,
+        "PLACEMENT_TARGET_THREATENED",
+      );
+    }
+    const playerDistance = Math.hypot(bot.entity.position.x - (x + 0.5), bot.entity.position.z - (z + 0.5));
+    if (playerDistance < 0.9 && Math.abs(bot.entity.position.y - y) < 2) {
+      throw new MinecraftAdapterError(`Placing ${blockName} here would intersect the player.`, "PLACEMENT_INTERSECTS_PLAYER");
+    }
+    const countBefore = inventoryCount(bot, blockName);
+    await raceWithAbort(bot.equip(item, "hand"), signal);
+    await raceWithAbort(
+      bot.placeBlock(support, bot.entity.position.offset(0, 1, 0).subtract(bot.entity.position)),
+      signal,
+    );
+    const placed = this.blockAtCoordinates(bot, x, y, z);
+    const countAfter = inventoryCount(bot, blockName);
+    return {
+      confirmed: placed?.name === blockName && countAfter < countBefore,
+      confirmation: "block_read_back_and_inventory_delta_checked",
+      details: {
+        position: { x, y, z },
+        blockName,
+        inventoryBefore: countBefore,
+        inventoryAfter: countAfter,
+        placedBlock: placed?.name ?? null,
+      },
+    };
+  }
+
+  /**
+   * Closes the open sides around the player, one validated placement at a time. A cell is only ever
+   * chosen when it is observed to be air, has an observed safe support block, and is clear of visible
+   * entities, so an unknown region is never treated as "empty and therefore safe to fill".
+   */
+  private async executeBuildShelter(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftBuildShelterInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid shelter request.", "INVALID_ACTION_INPUT");
+    const { mode, maxBlocks, dangerRadius } = parsed.data;
+    const directions = mode === "cardinal" ? SHELTER_CARDINAL_DIRECTIONS : SHELTER_DIRECTIONS;
+    const feet = {
+      x: Math.floor(bot.entity.position.x),
+      y: Math.floor(bot.entity.position.y),
+      z: Math.floor(bot.entity.position.z),
+    };
+    const placed: Array<{ x: number; y: number; z: number; blockName: string }> = [];
+    const skipped: Array<{ x: number; y: number; z: number; reason: string }> = [];
+    for (const [dx, dz] of directions) {
+      if (placed.length >= maxBlocks) break;
+      const x = feet.x + dx;
+      const z = feet.z + dz;
+      const y = feet.y;
+      const cell = this.blockAtCoordinates(bot, x, y, z);
+      if (!cell) {
+        skipped.push({ x, y, z, reason: "unknown-block" });
+        continue;
+      }
+      if (cell.boundingBox !== "empty") {
+        skipped.push({ x, y, z, reason: "occupied" });
+        continue;
+      }
+      if (hasVisibleHostileNear(bot, cell.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+        skipped.push({ x, y, z, reason: "threatened" });
+        continue;
+      }
+      const blockItem = bot.inventory
+        .items()
+        .filter((item) => (minecraftPlaceableNames as readonly string[]).includes(item.name))
+        .sort((left, right) => right.count - left.count || left.name.localeCompare(right.name))[0];
+      if (!blockItem) {
+        skipped.push({ x, y, z, reason: "no-blocks-in-inventory" });
+        break;
+      }
+      try {
+        const outcome = await this.placeOneBlock(bot, x, y, z, blockItem.name, dangerRadius, signal);
+        if (outcome.confirmed) {
+          placed.push({ x, y, z, blockName: blockItem.name });
+        } else {
+          skipped.push({ x, y, z, reason: "placement-not-confirmed" });
+        }
+      } catch (error) {
+        if (signal.aborted) throw error;
+        skipped.push({
+          x,
+          y,
+          z,
+          reason: error instanceof MinecraftAdapterError ? error.code : "placement-failed",
+        });
+      }
+    }
+    const solidCardinal = cardinalShelterCount(bot, feet);
+    if (placed.length === 0) {
+      throw new MinecraftAdapterError(
+        `No shelter cell could be closed: ${skipped.map((entry) => `${entry.reason}@${entry.x},${entry.y},${entry.z}`).join(", ") || "no candidates"}.`,
+        "SHELTER_NO_PLACEMENTS",
+      );
+    }
+    return {
+      confirmed: placed.length > 0,
+      confirmation: "shelter_blocks_read_back_in_postcondition",
+      details: {
+        mode,
+        placedCount: placed.length,
+        placed,
+        skipped,
+        solidCardinalCells: solidCardinal,
+        sheltered: solidCardinal >= SHELTER_CARDINAL_DIRECTIONS.length,
+      },
+    };
+  }
+
+  /**
+   * Bounded engagement with one specific hostile. Refused outright unless the operator enabled
+   * combat on this adapter *and* the safety broker allowed the capability; every swing re-checks
+   * health, distance and how many hostiles are nearby, and the agent withdraws instead of fighting
+   * to the death.
+   */
+  private async executeAttackHostile(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftAttackHostileInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid attack request.", "INVALID_ACTION_INPUT");
+    if (!this.combatAllowedValue) {
+      throw new MinecraftAdapterError(
+        "Combat is not armed on this adapter (start with --allow-combat or arm it from the Control Center).",
+        "COMBAT_DISABLED",
+      );
+    }
+    const { entityId, maxHits, dangerRadius, minHealth, retreatHealth, requiredDamage } = parsed.data;
+    const numericId = Number(entityId);
+    const entity = Number.isFinite(numericId) ? bot.entities[entityId] : undefined;
+    if (!entity) {
+      throw new MinecraftAdapterError("The target entity is no longer in the client's entity list.", "COMBAT_TARGET_GONE");
+    }
+    const name = String((entity as { name?: string }).name ?? entity.type ?? "unknown");
+    if (!isHostileMinecraftEntity(name, entity.type)) {
+      throw new MinecraftAdapterError(`'${name}' is not on the hostile list; attacking is refused.`, "COMBAT_TARGET_INVALID");
+    }
+    const weapon = bestWeapon([
+      ...(bot.heldItem?.name ? [{ name: bot.heldItem.name }] : []),
+      ...bot.inventory.items().map((item) => ({ name: item.name })),
+    ]);
+    const verdict = combatIsAllowed({
+      enabled: true,
+      health: finiteOrNull(bot.health),
+      minHealth,
+      retreatHealth,
+      hostileCountNearby: countHostilesNear(bot, bot.entity.position, dangerRadius * 1.5),
+      maxEngageableHostiles: 1,
+      weapon: weapon ? { name: weapon.name, damage: weapon.damage } : null,
+      requiredDamage,
+      targetDistance: entity.position.distanceTo(bot.entity.position),
+      maxTargetDistance: 4,
+      hitsAlreadyAttempted: 0,
+      maxHits,
+      hostileName: name,
+      hostileType: entity.type,
+      hunger: finiteOrNull(bot.food),
+    });
+    if (!verdict.allowed) {
+      throw new MinecraftAdapterError(verdict.reason, verdict.code);
+    }
+    if (weapon) {
+      const held = bot.inventory.items().find((item) => item.name === weapon.name);
+      if (held && bot.heldItem?.name !== weapon.name) {
+        await raceWithAbort(bot.equip(held, "hand"), signal);
+      }
+    }
+
+    let hits = 0;
+    let killed = false;
+    let lastHealth = finiteOrNull((entity as { health?: number }).health);
+    while (hits < maxHits) {
+      if (signal.aborted) throw abortError(signal);
+      const health = finiteOrNull(bot.health);
+      if (health !== null && health <= retreatHealth) {
+        throw new MinecraftAdapterError(
+          `Health fell to ${health} while fighting; withdrawing instead of swinging again.`,
+          "COMBAT_WITHDRAWN",
+        );
+      }
+      const current = Number.isFinite(numericId) ? bot.entities[entityId] : undefined;
+      if (!current) {
+        killed = true;
+        break;
+      }
+      if (current.position.distanceTo(bot.entity.position) > 4) {
+        throw new MinecraftAdapterError("The hostile left melee range; the fight is broken off.", "COMBAT_TARGET_OUT_OF_RANGE");
+      }
+      // Facing the target is best effort: an interrupted look must not be reported as a failed swing.
+      await raceWithAbort(bot.lookAt(current.position.offset(0, 1, 0), true), signal).catch(() => undefined);
+      try {
+        bot.attack(current);
+      } catch (error) {
+        throw new MinecraftAdapterError(
+          `Attack failed: ${error instanceof Error ? error.message : String(error)}`,
+          "COMBAT_ATTACK_FAILED",
+        );
+      }
+      hits += 1;
+      await delayWithAbort(700, signal);
+      const updated = Number.isFinite(numericId) ? bot.entities[entityId] : undefined;
+      if (!updated) {
+        killed = true;
+        break;
+      }
+      lastHealth = finiteOrNull((updated as { health?: number }).health);
+    }
+    return {
+      confirmed: killed,
+      confirmation: killed
+        ? "target_entity_removed_from_client_entity_list"
+        : "target_still_present_after_hit_budget",
+      details: {
+        entityId,
+        hostileName: name,
+        hits,
+        weapon: weapon?.name ?? null,
+        damagePerHit: weapon ? weaponDamageFor(weapon.name) : 1,
+        targetHealthAfter: lastHealth,
+        killed,
+      },
+    };
+  }
+
+  /** Drops a small amount of allowlisted terrain. Tools, food and resources are refused by the schema. */
+  private async executeDropItem(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftDropItemInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid drop request.", "INVALID_ACTION_INPUT");
+    const { itemName, count } = parsed.data;
+    const before = inventoryCount(bot, itemName);
+    if (before < count) {
+      throw new MinecraftAdapterError(
+        `Inventory holds ${before} ${itemName}, fewer than the ${count} requested.`,
+        "ITEM_NOT_IN_INVENTORY",
+      );
+    }
+    const stacks = bot.inventory.items().filter((item) => item.name === itemName);
+    const stack = stacks.sort((left, right) => left.slot - right.slot)[0];
+    if (!stack) throw new MinecraftAdapterError(`${itemName} is not in the accessible inventory.`, "ITEM_NOT_IN_INVENTORY");
+    await raceWithAbort(bot.toss(stack.type, stack.metadata, count), signal);
+    const after = inventoryCount(bot, itemName);
+    return {
+      confirmed: after <= before - count,
+      confirmation: "inventory_decrease_observed_after_toss",
+      details: { itemName, before, after, requested: count },
+    };
+  }
+
+  /**
+   * Whether the mined or collected item could still enter the inventory: an existing stack with room
+   * counts, otherwise a main-inventory slot has to be empty. Mineflayer exposes `slots` as a sparse
+   * array over the whole player window, so the check is defensive about unknown layouts and reports
+   * "unknown room" as room available.
+   */
+  private canAcceptItem(bot: Bot, itemName: string): boolean {
+    try {
+      const items = bot.inventory.items();
+      if (items.some((item) => item.name === itemName && item.count < 64)) return true;
+      const slots: unknown[] = Array.isArray(bot.inventory.slots) ? bot.inventory.slots : [];
+      if (slots.length === 0) return true;
+      // Player window slots 9..35 are the main inventory; 36..44 are the hotbar.
+      for (let slot = 9; slot <= 44; slot += 1) {
+        const existing = slots[slot];
+        if (existing === undefined || existing === null) return true;
+      }
+      return false;
+    } catch {
+      // Never refuse a dig because the inventory layout could not be read; the drop check still applies.
+      return true;
+    }
+  }
+
+  /** Whether this adapter will execute an attack right now. */
+  get combatAllowed(): boolean {
+    return this.combatAllowedValue;
+  }
+
+  /**
+   * Arming combat from the Control Center also requires the safety policy opt-in, so this alone cannot
+   * enable fighting on an agent that was started without it: both layers must say yes.
+   */
+  setCombatAllowed(allowed: boolean): void {
+    this.combatAllowedValue = allowed;
+    this.logger.info({ combatAllowed: allowed }, allowed ? "Combat armed by operator" : "Combat disarmed by operator");
   }
 
   private blockAtCoordinates(bot: Bot, x: number, y: number, z: number) {

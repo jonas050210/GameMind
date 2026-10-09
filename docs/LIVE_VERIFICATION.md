@@ -126,6 +126,67 @@ After any run, open `data/traces/<session-id>.jsonl` (the session id is in the `
 - `decision.made` events have `plan`, `band`, and `knowledge` fields.
 - No event contains a credential-looking value (the trace redactor should show `[REDACTED]` for any such key).
 
+## 10. Control Center against a live run
+
+**Setup:** start an authorized server and run the agent with the dashboard:
+
+```bash
+npm run dev -- --task gather-logs --host 127.0.0.1 --port 25565 --username GameMind --control-center
+```
+
+Open the printed URL (`http://127.0.0.1:8787/`) on the same machine. Then check, in order:
+
+1. The header shows `minecraft-java · seq N` with N increasing while the run is live, and the world panel shows your real position, health, hunger and inventory — not the values from any previous run.
+2. The Current decision panel shows the goal that is actually running. Open "Alternatives considered": rejections must name a real reason (`combat is not enabled for this run…`, `target excluded after repeated failure`, `danger radius around the target`, …).
+3. Press **Pause** mid-run. The next action must be denied with `RUN_PAUSED` and appear under "Failures and refusals"; the agent must keep observing. **Resume** continues it.
+4. Press **Trip**, then **Stop task**. The run must end as `aborted` / `OPERATOR_STOP` after the action in flight, never in the middle of one.
+5. Start a task from the dashboard (`mine-stone`, count 2). It must go through the same limits as the CLI; `Actions` counts up and the map highlights the target block class when it is observed.
+6. Reload the page: the token comes from the served page, so the controls keep working; `POST /api/command` from a terminal without the header must return `403`, and an unknown command `501`.
+
+**Record:** any panel that stayed empty while the CLI log showed the event, and every control that reported success without a matching trace line. The dashboard is verified against a live agent by `test/control-center.test.ts`; this section verifies it against Minecraft.
+
+## 11. Experience memory across two runs
+
+**Setup:** keep the default learning directory, and run the same task twice against the same world:
+
+```bash
+npm run dev -- --policy status
+npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username GameMind
+npm run dev -- --policy status
+npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username GameMind
+```
+
+**Expected:** after the first run, `episodes` equals the number of attempted actions and a `data/learning/` directory exists. If the first run blocked on a target (unreachable log, no tool, full inventory), the second run must not spend its budget on that same target: `wastedActions` in the second `task-report` is lower, and the dashboard's Learning panel lists the target as blocked. `activePolicy` stays `null` until you promote something.
+
+**Record:** the two `wastedActions` figures and `learning.blockedTargets` from the trace. If the second run repeats the first run's failures verbatim, the world key or the memory read is broken — that is a defect, not a flaky test.
+
+## 12. Combat opt-in (only where fighting is allowed by the server rules)
+
+**Setup:** on a test world with mobs, first run **without** the flag:
+
+```bash
+npm run dev -- --task secure-food --target-hunger 6 --max-actions 20 --host 127.0.0.1 --username GameMind
+```
+
+Summon a zombie next to you. **Expected:** no `attack_hostile` action; the agent flees, and the decision trace records the rejection `combat is not enabled for this run, so the agent flees instead of attacking`.
+
+Then run with `--allow-combat` (this arms the adapter, the safety policy and the planner together), or press the dashboard's Combat switch **before** starting the task. **Expected:** with a weapon in hand and the hostile within range, `attack-hostile` runs, each hit is confirmed by the mob's observed health, and the action stops when the target dies or flees; without a weapon the agent equips one first or keeps fleeing. `metrics.combatActions` counts the attacks; `unsafeActions` must stay 0.
+
+**Record:** the weapon you held, the damage sequence in the trace, and whether any attack happened while the mob was outside the task's danger radius.
+
+## 13. Mining and shelter
+
+```bash
+npm run dev -- --task mine-stone --resource stone --count 4 --max-actions 30 --host 127.0.0.1 --username GameMind --allow-combat
+npm run dev -- --task mine-stone --resource coal_ore --count 2 --host 127.0.0.1 --username GameMind
+```
+
+**Expected for a bare hand:** no dig is attempted on stone; the agent crafts or equips a pickaxe first (`equip:pickaxe` appears in the plan), and only then digs. A dig that would drop nothing is refused by name — `TOOL_REQUIRED` with no pickaxe at all, `TOOL_TIER_INSUFFICIENT` when the best pickaxe is below the block's minimum tier (`iron_ore` and above need stone tier), `BLOCK_NOT_MINEABLE_CLASS` for a block outside the mineable classes.
+
+For shelter, place the agent somewhere open and check that `build-shelter` only uses blocks counted in the inventory, reports `no-support` for an observed non-solid side and `unknown` for an unobserved one, and that the four cardinal sides are closed in the next observation.
+
+**Record:** the dig durations versus Mineflayer's own estimate (a systematic underestimate means the dig timeout slack needs raising), and whether the drop appeared within the settle window.
+
 ## Open questions this checklist answers
 
 | Question | Check | Current status |
@@ -138,5 +199,11 @@ After any run, open `data/traces/<session-id>.jsonl` (the session id is in the `
 | Does natural regeneration work at food ≥ 18 with the default rules? | §7 | Unverified |
 | Do pathfinder errors arrive with `name` = `NoPath` / `Timeout` / `PathStopped`? | §3 (unreachable waypoint) | Unverified |
 | Is `sweet_berry_bush` respected by `blocksToAvoid` in path planning? | §6 | Unverified |
+| Does `bot.dig` on 1.20.4 need more time than the estimated dig for deepslate or ore? | §13 | Unverified |
+| Does the inventory report `inventoryFull` correctly when a stack boundary is hit? | §11, §13 | Unverified |
+| Do placed blocks survive an observed check on a real server (shelter sides)? | §13 | Unverified |
+| Does `bot.attack` plus health tracking confirm damage on 1.20.4 mobs? | §12 | Unverified |
+| Does the Control Center see live observations, and do Pause/Trip/Stop reach the running agent? | §10 | Unverified |
+| Does the experience memory change a second live run in the same world? | §11 | Unverified |
 
 Only mark a row verified when the check was run against a server and the evidence is recorded in your notes.

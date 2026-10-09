@@ -23,6 +23,15 @@ export function observationAt(
   };
 }
 
+/** A full inventory stack; the observation schema needs the numeric type and metadata fields. */
+export function stack(
+  name: string,
+  count: number,
+  slot = 9,
+): { slot: number; name: string; type: number; count: number; metadata: number | null; durabilityUsed: number | null } {
+  return { slot, name, type: 1, count, metadata: null, durabilityUsed: null };
+}
+
 export function block(name: string, x: number, y: number, z: number) {
   return {
     position: { x, y, z },

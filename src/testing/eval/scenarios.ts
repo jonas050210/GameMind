@@ -8,8 +8,10 @@ import {
   treeAt,
 } from "../simulated-minecraft/scenarios.js";
 import {
+  buildShelterTaskSchema,
   craftItemTaskSchema,
   gatherResourceTaskSchema,
+  mineResourceTaskSchema,
   secureFoodTaskSchema,
   type MinecraftTask,
 } from "../../games/minecraft/task.js";
@@ -22,14 +24,35 @@ import {
  */
 export type ScenarioExpectation = "success" | "safe";
 
+export type EvaluationFamily =
+  | "exploration"
+  | "crafting"
+  | "food"
+  | "survival"
+  | "recovery"
+  | "replanning"
+  | "mining"
+  | "shelter"
+  | "combat"
+  | "inventory";
+
 export interface EvaluationScenario {
   readonly id: string;
-  readonly family: "exploration" | "crafting" | "food" | "survival" | "recovery" | "replanning";
+  readonly family: EvaluationFamily;
   readonly description: string;
   readonly expectation: ScenarioExpectation;
   readonly minSuccessRate: number;
   readonly world: (seed: number) => SimWorldDefinition;
   readonly task: () => MinecraftTask;
+  /** Agent-level switches the scenario needs, applied when the run is built. */
+  readonly agent?: { readonly allowCombat?: boolean };
+  /**
+   * Behaviour the executed action list has to show. `requiredGoals` must appear in every seed's run,
+   * `forbiddenGoals` in none — deterministic gates that catch a policy that quietly stopped doing (or
+   * started doing) something, which a success rate alone would hide.
+   */
+  readonly requiredGoals?: readonly string[];
+  readonly forbiddenGoals?: readonly string[];
 }
 
 /** Deterministic polar placement within a ring of the origin; seeds vary the layout. */
@@ -241,5 +264,192 @@ export function evaluationScenarios(): EvaluationScenario[] {
       },
       task: baseGather,
     },
+    // --- mining, shelter, combat and inventory: the autonomous-gameplay workstream ---------------
+    {
+      id: "mine-stone-with-pickaxe",
+      family: "mining",
+      description: "A stone block sits in reach and a wooden pickaxe is carried. The agent must mine it and verify cobblestone entered the inventory.",
+      expectation: "success",
+      minSuccessRate: 0.95,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [{ x: 3, y: 64, z: 0, name: "stone" }],
+          player: { inventory: [{ name: "wooden_pickaxe", count: 1 }] },
+        }),
+      task: () =>
+        mineResourceTaskSchema.parse({
+          id: "eval-mine-stone",
+          resourceName: "stone",
+          targetCount: 1,
+          maxActions: 8,
+          maxExplorationLegs: 0,
+        }),
+    },
+    {
+      id: "mine-stone-needs-pickaxe",
+      family: "mining",
+      description: "Stone is visible but no tool can harvest it. The agent must chain wood -> planks -> sticks -> pickaxe and then mine, instead of punching stone forever.",
+      expectation: "success",
+      minSuccessRate: 0.8,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [
+            { x: 3, y: 64, z: 0, name: "stone" },
+            logAt(2, 3),
+            logAt(-3, 2),
+            logAt(4, -4),
+          ],
+        }),
+      task: () =>
+        mineResourceTaskSchema.parse({
+          id: "eval-mine-stone-tool-gate",
+          resourceName: "stone",
+          targetCount: 1,
+          maxActions: 24,
+          maxExplorationLegs: 2,
+        }),
+    },
+    {
+      id: "shelter-close-cardinal-sides",
+      family: "shelter",
+      description: "The agent carries dirt and must wall in the four cardinal sides around itself. Completion is read back from the observed blocks, not from the placement calls.",
+      expectation: "success",
+      minSuccessRate: 0.9,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          player: { inventory: [{ name: "dirt", count: 12 }] },
+        }),
+      task: () => buildShelterTaskSchema.parse({ id: "eval-shelter-cardinal", mode: "cardinal", maxBlocks: 4, maxActions: 12 }),
+    },
+    {
+      id: "shelter-before-night-when-hurt",
+      family: "shelter",
+      description: "Health is 8 at night with a zombie nearby and dirt in the inventory. Shelter must be treated as a survival goal before gathering.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          dayTicks: 18_000,
+          placements: [logAt(6, 0), ...treeAt(30, 30, 3)],
+          hostiles: [hostileAt("z-1", 9, 0)],
+          player: { health: 8, inventory: [{ name: "dirt", count: 8 }] },
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-shelter-night",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 16,
+          maxExplorationLegs: 2,
+        }),
+      requiredGoals: ["build-shelter"],
+    },
+    {
+      id: "combat-opt-in-defence",
+      family: "combat",
+      description: "A single zombie stands 2 blocks away and the agent carries a stone sword, with combat explicitly enabled by the operator. Defence is planned; the safety policy still vets every swing.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [logAt(8, 0)],
+          hostiles: [hostileAt("z-1", 2, 0)],
+          player: { health: 20, inventory: [{ name: "stone_sword", count: 1 }] },
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-combat-opt-in",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 14,
+          maxExplorationLegs: 1,
+        }),
+      agent: { allowCombat: true },
+      requiredGoals: ["defend"],
+    },
+    {
+      id: "combat-denied-by-default",
+      family: "combat",
+      description: "The same world without the operator's combat opt-in. The agent must never attempt an attack and must not walk into the zombie to gather.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [logAt(8, 0)],
+          hostiles: [hostileAt("z-1", 2, 0)],
+          player: { health: 20, inventory: [{ name: "stone_sword", count: 1 }] },
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-combat-denied",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 14,
+          maxExplorationLegs: 1,
+        }),
+      forbiddenGoals: ["defend"],
+    },
+    {
+      id: "inventory-full-frees-space",
+      family: "inventory",
+      description: "The inventory is full of terrain and the only log needs a slot. The agent must drop the junk first, then collect — and never drop something useful.",
+      expectation: "success",
+      minSuccessRate: 0.9,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          maxInventoryStacks: 3,
+          placements: [logAt(3, 3)],
+          player: {
+            inventory: [
+              { name: "dirt", count: 4 },
+              { name: "sand", count: 2 },
+              { name: "gravel", count: 3 },
+            ],
+          },
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-inventory-full",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 10,
+          maxExplorationLegs: 0,
+        }),
+      requiredGoals: ["free-inventory"],
+    },
+    {
+      id: "hazard-lava-edge",
+      family: "survival",
+      description: "Lava burns two blocks away while a log sits just beyond it. Moving away from the hazard outranks the resource, and digging next to lava is refused.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [{ x: 2, y: 64, z: 0, name: "lava" }, logAt(6, 0)],
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-hazard-lava",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 12,
+          maxExplorationLegs: 1,
+        }),
+      requiredGoals: ["avoid-hazard", "collect:", "explore:"],
+    },
   ];
 }
+
+/** Scenarios whose repeat-run behaviour the learning comparison measures. */
+export function learningEvaluationScenarioIds(): string[] {
+  return ["recovery-persistent-stall", "inventory-full-frees-space", "mine-stone-needs-pickaxe"];
+}
+

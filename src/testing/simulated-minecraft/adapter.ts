@@ -22,6 +22,11 @@ import {
   MINECRAFT_PICKUP_ITEM_CAPABILITY,
   MINECRAFT_PLACE_TABLE_CAPABILITY,
   MINECRAFT_REST_CAPABILITY,
+  MINECRAFT_MINE_BLOCK_CAPABILITY,
+  MINECRAFT_PLACE_BLOCK_CAPABILITY,
+  MINECRAFT_BUILD_SHELTER_CAPABILITY,
+  MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
+  MINECRAFT_DROP_ITEM_CAPABILITY,
   minecraftCollectBlockInputSchema,
   minecraftCraftItemInputSchema,
   minecraftEatFoodInputSchema,
@@ -33,13 +38,27 @@ import {
   minecraftPickupItemInputSchema,
   minecraftPlaceTableInputSchema,
   minecraftRestInputSchema,
+  minecraftMineBlockInputSchema,
+  minecraftPlaceBlockInputSchema,
+  minecraftBuildShelterInputSchema,
+  minecraftAttackHostileInputSchema,
+  minecraftDropItemInputSchema,
 } from "../../games/minecraft/capabilities.js";
 import {
   minecraftFoodNutrition,
   minecraftWoodRecipePlans,
   type CraftableMinecraftItem,
 } from "../../games/minecraft/recipes.js";
-import { isInterestingBlockName } from "../../games/minecraft/block-classes.js";
+import { blockObservationPriority, isInterestingBlockName } from "../../games/minecraft/block-classes.js";
+import {
+  bestPickaxeTier,
+  canMineWithTier,
+  estimatedDigSeconds,
+  isMineableBlockName,
+  minecraftMiningRequirements,
+} from "../../games/minecraft/mining.js";
+import { UNARMED_DAMAGE, weaponDamageFor, combatIsAllowed } from "../../games/minecraft/combat.js";
+import { SHELTER_DIRECTIONS, SHELTER_CARDINAL_DIRECTIONS } from "../../games/minecraft/shelter.js";
 import { minecraftObservationSchema, type MinecraftObservation } from "../../games/minecraft/observation.js";
 import {
   SimulatedActionError,
@@ -47,10 +66,22 @@ import {
   type SimWorldDefinition,
 } from "./world.js";
 
+/** Virtual milliseconds a player-tossed item stays uncollectable (Java uses a short pickup delay). */
+const PLAYER_DROP_PICKUP_DELAY_MS = 1_000;
+
+
 const MAX_OBSERVED_BLOCKS = 64;
 const MAX_NAVIGATION_DISTANCE = 48;
 const MAX_RESOURCE_GATHER_DISTANCE = 24;
 const MAX_CRAFTING_TABLE_DISTANCE = 4.5;
+const MAX_PLACEMENT_DISTANCE = 4.5;
+
+function cardinalSolidCount(world: { playerX: number; playerY: number; playerZ: number; blockAt(x: number, y: number, z: number): { boundingBox: string } | null }): number {
+  const feetX = Math.floor(world.playerX);
+  const feetY = Math.floor(world.playerY);
+  const feetZ = Math.floor(world.playerZ);
+  return SHELTER_CARDINAL_DIRECTIONS.filter(([dx, dz]) => world.blockAt(feetX + dx, feetY, feetZ + dz)?.boundingBox === "block").length;
+}
 const UNSAFE_SUPPORT_NAMES = new Set(["lava", "water", "fire", "soul_fire", "magma_block", "cactus"]);
 
 export interface SimulatedAdapterOptions {
@@ -58,6 +89,8 @@ export interface SimulatedAdapterOptions {
   readonly gameVersion?: string;
   /** Capabilities to hide, to model adapters that lack a skill (e.g. no rest support). */
   readonly omitCapabilities?: readonly string[];
+  /** Mirrors the live adapter's operator switch: attacks are refused unless this is true. */
+  readonly allowCombat?: boolean;
 }
 
 function abortError(signal: AbortSignal): Error {
@@ -76,6 +109,8 @@ function distance3(a: { x: number; y: number; z: number }, b: { x: number; y: nu
 export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservation> {
   readonly gameId = "minecraft-java";
   readonly capabilities: readonly CapabilityDefinition[];
+  /** Combat gate, switchable at runtime for the same reason the live adapter exposes one. */
+  combatEnabled: boolean;
   readonly world: SimulatedMinecraftWorld;
 
   private statusValue: AdapterStatus = "disconnected";
@@ -96,9 +131,18 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
   private activeActionId: string | null = null;
 
   constructor(private readonly options: SimulatedAdapterOptions) {
+    this.combatEnabled = options.allowCombat ?? false;
     const omitted = new Set(options.omitCapabilities ?? []);
     this.capabilities = minecraftCapabilities.filter((capability) => !omitted.has(capability.name));
     this.world = new SimulatedMinecraftWorld(options.definition);
+  }
+
+  get combatAllowed(): boolean {
+    return this.combatEnabled;
+  }
+
+  setCombatAllowed(allowed: boolean): void {
+    this.combatEnabled = allowed;
   }
 
   get status(): AdapterStatus {
@@ -187,6 +231,16 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
           return this.harvest(action.input, check);
         case MINECRAFT_REST_CAPABILITY:
           return this.rest(action.input, check);
+        case MINECRAFT_MINE_BLOCK_CAPABILITY:
+          return this.mine(action.input, check);
+        case MINECRAFT_PLACE_BLOCK_CAPABILITY:
+          return this.placeBlock(action.input, check);
+        case MINECRAFT_BUILD_SHELTER_CAPABILITY:
+          return this.buildShelter(action.input, check);
+        case MINECRAFT_ATTACK_HOSTILE_CAPABILITY:
+          return this.attack(action.input, check);
+        case MINECRAFT_DROP_ITEM_CAPABILITY:
+          return this.dropItem(action.input, check);
         default:
           throw Object.assign(new Error(`Simulated adapter does not support '${action.capability}'.`), {
             code: "UNSUPPORTED_CAPABILITY",
@@ -219,12 +273,13 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     const nearbyBlocks = localCube.blocks
       .map((block) => ({ block, distance: distance3(block.position, center) }))
       .sort((left, right) => {
-        const interest = Number(isInterestingBlockName(right.block.name)) - Number(isInterestingBlockName(left.block.name));
+        const interest = blockObservationPriority(right.block.name) - blockObservationPriority(left.block.name);
         return interest || left.distance - right.distance;
       })
       .slice(0, MAX_OBSERVED_BLOCKS)
       .map(({ block }) => block);
     const resources = world.resourceSightings(MAX_OBSERVED_BLOCKS);
+    const mineable = world.minableSightings(MAX_OBSERVED_BLOCKS);
     const equipmentSnapshot = (key: string) => {
       const stack = this.equipment[key];
       return stack
@@ -243,6 +298,7 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         foodSaturation: 0,
         oxygenLevel: 300,
         onGround: true,
+        inventoryFull: world.inventory.length >= world.maxInventoryStacks,
       },
       inventory: world.inventory.map((stack) => ({ ...stack })),
       equipment: {
@@ -261,6 +317,18 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         limit: MAX_OBSERVED_BLOCKS,
         center,
         truncated: resources.truncated,
+      },
+      minableSightings: mineable.blocks,
+      minableScan: {
+        radius: 24,
+        limit: MAX_OBSERVED_BLOCKS,
+        center,
+        truncated: mineable.truncated,
+      },
+      time: {
+        dayTicks: world.dayTicks,
+        day: world.dayNumber,
+        isNight: world.isNight,
       },
       itemDrops: world.itemDropList(),
       sampledRegion: {
@@ -624,6 +692,321 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
       confirmed: healthAfter > healthBefore,
       confirmation: "simulated_health_increase_observed_during_rest",
       details: { stopReason, healthBefore, healthAfter, elapsedMs: elapsed },
+    };
+  }
+
+  /** Equipped or carried pickaxe tier, so the tool check matches what the live adapter reads. */
+  private heldPickaxeTier(): { tier: 0 | 1 | 2 | 3 | 4; name: string | null } {
+    const items: { name: string }[] = [...this.world.inventory];
+    for (const stack of Object.values(this.equipment)) if (stack) items.push({ name: stack.name });
+    return bestPickaxeTier(items);
+  }
+
+  private mine(input: unknown, check: () => void): AdapterActionOutcome {
+    const parsed = minecraftMineBlockInputSchema.safeParse(input);
+    if (!parsed.success) throw new SimulatedActionError("Invalid mining target.", "INVALID_ACTION_INPUT");
+    const { x, y, z, blockName, dangerRadius } = parsed.data;
+    if (this.world.gameMode !== "survival") {
+      throw new SimulatedActionError("Mining requires survival mode.", "GAME_MODE_BLOCKS_MINING");
+    }
+    const requirement = canMineWithTier(blockName, this.heldPickaxeTier().tier);
+    const observed = this.world.blockAt(x, y, z);
+    if (!observed || observed.name !== blockName) {
+      throw new SimulatedActionError("The requested block is unknown or has changed.", "RESOURCE_TARGET_CHANGED");
+    }
+    if (!requirement.mineable) {
+      throw new SimulatedActionError(requirement.reason, requirement.code);
+    }
+    const player = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
+    const centre = { x: x + 0.5, y: y + 0.5, z: z + 0.5 };
+    if (distance3(player, centre) > MAX_RESOURCE_GATHER_DISTANCE) {
+      throw new SimulatedActionError("The block is out of the mining range.", "RESOURCE_TARGET_TOO_FAR");
+    }
+    if (this.world.hostilesNear(centre.x, centre.y, centre.z, dangerRadius)) {
+      throw new SimulatedActionError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the mining target.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
+    const drop = minecraftMiningRequirements[blockName].drop;
+    if (this.world.isInventoryFull(this.world.countItem(drop) > 0 ? drop : undefined)) {
+      throw new SimulatedActionError("The inventory has no slot for the mined drop.", "INVENTORY_FULL");
+    }
+    if (distance3(player, centre) > 4) {
+      const path = this.pathNear({ x, y, z }, 1.5);
+      if (!path) throw new SimulatedActionError("No path to a cell adjacent to the block.", "PATH_NOT_FOUND");
+      this.walkPath(path, check);
+    }
+    if (distance3({ x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ }, centre) > 5.5) {
+      throw new SimulatedActionError("The block is outside reach after navigation.", "BLOCK_OUT_OF_REACH");
+    }
+    check();
+    const digMs = Math.round(estimatedDigSeconds(blockName, this.heldPickaxeTier().tier) * 1_000);
+    this.world.advance(digMs, check);
+    const before = this.world.countItem(drop);
+    if (this.world.blockAt(x, y, z)?.name === blockName) {
+      this.world.setBlock(x, y, z, null);
+      try {
+        this.world.addToInventory(drop, 1);
+      } catch (error) {
+        if (error instanceof SimulatedActionError && error.code === "INVENTORY_FULL") {
+          this.world.addItem(drop, 1, Math.floor(x), Math.floor(z));
+        } else {
+          throw error;
+        }
+      }
+    }
+    const after = this.world.countItem(drop);
+    return {
+      confirmed: after > before,
+      confirmation: "simulated_mined_drop_inventory_delta_checked",
+      details: { blockName, drop, coordinates: { x, y, z }, inventoryBefore: before, inventoryAfter: after, digMs },
+    };
+  }
+
+  private placeBlock(input: unknown, check: () => void): AdapterActionOutcome {
+    const parsed = minecraftPlaceBlockInputSchema.safeParse(input);
+    if (!parsed.success) throw new SimulatedActionError("Invalid block placement target.", "INVALID_ACTION_INPUT");
+    const { x, y, z, blockName, dangerRadius } = parsed.data;
+    return this.placeOne(x, y, z, blockName, dangerRadius, check);
+  }
+
+  /** Shared placement rules; the crafting-table skill uses the same safety checks. */
+  private placeOne(
+    x: number,
+    y: number,
+    z: number,
+    blockName: string,
+    dangerRadius: number,
+    check: () => void,
+  ): AdapterActionOutcome {
+    if (this.world.gameMode !== "survival") {
+      throw new SimulatedActionError(`Placing ${blockName} requires survival mode.`, "GAME_MODE_BLOCKS_PLACEMENT");
+    }
+    if (this.world.countItem(blockName) < 1) {
+      throw new SimulatedActionError(`Inventory does not contain ${blockName}.`, "PLACEMENT_BLOCK_NOT_IN_INVENTORY");
+    }
+    const destination = this.world.blockAt(x, y, z);
+    if (!destination || destination.name !== "air") {
+      throw new SimulatedActionError("Placement destination is unknown or occupied.", "PLACEMENT_CELL_NOT_EMPTY");
+    }
+    const support = this.world.blockAt(x, y - 1, z);
+    if (!support || support.boundingBox !== "block" || UNSAFE_SUPPORT_NAMES.has(support.name)) {
+      throw new SimulatedActionError("Placement destination has no safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
+    }
+    const player = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
+    if (distance3(player, { x: x + 0.5, y: y + 0.5, z: z + 0.5 }) > MAX_PLACEMENT_DISTANCE) {
+      throw new SimulatedActionError("Placement target is out of reach.", "PLACEMENT_TARGET_TOO_FAR");
+    }
+    if (Math.hypot(player.x - (x + 0.5), player.z - (z + 0.5)) < 0.9 && Math.abs(player.y - y) < 2) {
+      throw new SimulatedActionError(`Placing ${blockName} here would intersect the player.`, "PLACEMENT_INTERSECTS_PLAYER");
+    }
+    if (this.world.hostilesNear(x + 0.5, y + 0.5, z + 0.5, dangerRadius)) {
+      throw new SimulatedActionError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the placement cell.`,
+        "PLACEMENT_TARGET_THREATENED",
+      );
+    }
+    check();
+    this.world.advance(200, check);
+    this.world.removeFromInventory(blockName, 1);
+    this.world.setBlock(x, y, z, blockName);
+    const placed = this.world.blockAt(x, y, z)?.name === blockName;
+    return {
+      confirmed: placed,
+      confirmation: "simulated_block_read_back_after_placement",
+      details: { position: { x, y, z }, blockName },
+    };
+  }
+
+  private buildShelter(input: unknown, check: () => void): AdapterActionOutcome {
+    const parsed = minecraftBuildShelterInputSchema.safeParse(input);
+    if (!parsed.success) throw new SimulatedActionError("Invalid shelter request.", "INVALID_ACTION_INPUT");
+    const { mode, maxBlocks, dangerRadius } = parsed.data;
+    if (this.world.gameMode !== "survival") {
+      throw new SimulatedActionError("Building a shelter requires survival mode.", "GAME_MODE_BLOCKS_PLACEMENT");
+    }
+    const placeable = this.placeableCounts();
+    if (placeable.size === 0) {
+      throw new SimulatedActionError("No placeable blocks are in the inventory.", "SHELTER_NO_BLOCKS");
+    }
+    const directions = mode === "cardinal" ? SHELTER_CARDINAL_DIRECTIONS : SHELTER_DIRECTIONS;
+    const feetX = Math.floor(this.world.playerX);
+    const feetY = Math.floor(this.world.playerY);
+    const feetZ = Math.floor(this.world.playerZ);
+    const placed: Array<{ x: number; y: number; z: number; blockName: string }> = [];
+    const skipped: Array<{ x: number; y: number; z: number; reason: string }> = [];
+    for (const [dx, dz] of directions) {
+      if (placed.length >= maxBlocks) break;
+      const x = feetX + dx;
+      const z = feetZ + dz;
+      const y = feetY;
+      const cell = this.world.blockAt(x, y, z);
+      if (!cell) {
+        skipped.push({ x, y, z, reason: "unknown" });
+        continue;
+      }
+      if (cell.boundingBox === "block") {
+        skipped.push({ x, y, z, reason: "occupied" });
+        continue;
+      }
+      const support = this.world.blockAt(x, y - 1, z);
+      if (!support || support.boundingBox !== "block" || UNSAFE_SUPPORT_NAMES.has(support.name)) {
+        skipped.push({ x, y, z, reason: "no-support" });
+        continue;
+      }
+      if (this.world.hostilesNear(x + 0.5, y + 0.5, z + 0.5, dangerRadius)) {
+        skipped.push({ x, y, z, reason: "threatened" });
+        continue;
+      }
+      const blockName = [...placeable.entries()].find(([, count]) => count > 0)?.[0];
+      if (!blockName) {
+        skipped.push({ x, y, z, reason: "no-blocks-left" });
+        break;
+      }
+      try {
+        this.placeOne(x, y, z, blockName, dangerRadius, check);
+        placeable.set(blockName, (placeable.get(blockName) ?? 1) - 1);
+        placed.push({ x, y, z, blockName });
+      } catch (error) {
+        skipped.push({
+          x,
+          y,
+          z,
+          reason: error instanceof SimulatedActionError ? error.code : "placement-failed",
+        });
+      }
+    }
+    const solidCardinal = cardinalSolidCount(this.world);
+    return {
+      confirmed: placed.length > 0,
+      confirmation: "simulated_shelter_blocks_read_back",
+      details: {
+        mode,
+        placedCount: placed.length,
+        placed,
+        skipped,
+        solidCardinalCells: solidCardinal,
+        sheltered: solidCardinal >= SHELTER_CARDINAL_DIRECTIONS.length,
+      },
+    };
+  }
+
+  private placeableCounts(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const name of ["dirt", "cobblestone", "granite", "andesite", "diorite", "cobbled_deepslate", "oak_planks", "birch_planks", "spruce_planks"]) {
+      const count = this.world.countItem(name);
+      if (count > 0) counts.set(name, count);
+    }
+    return counts;
+  }
+
+  private attack(input: unknown, check: () => void): AdapterActionOutcome {
+    const parsed = minecraftAttackHostileInputSchema.safeParse(input);
+    if (!parsed.success) throw new SimulatedActionError("Invalid attack request.", "INVALID_ACTION_INPUT");
+    const { entityId, maxHits, dangerRadius, minHealth, retreatHealth, requiredDamage } = parsed.data;
+    if (!this.combatEnabled) {
+      throw new SimulatedActionError(
+        "Combat is disabled for this run; the safety broker must opt the capability in explicitly.",
+        "COMBAT_DISABLED",
+      );
+    }
+    const hostile = this.world.hostileById(entityId);
+    if (!hostile) throw new SimulatedActionError("The target entity is no longer observed.", "COMBAT_TARGET_GONE");
+    const player = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
+    const targetDistance = Math.hypot(hostile.x - player.x, player.y - this.world.standingY, hostile.z - player.z);
+    const nearby = this.world.hostileCountNear(player.x, this.world.standingY, player.z, dangerRadius * 1.5);
+    const hand = this.equipment.hand;
+    const weaponName = hand?.name ?? null;
+    const verdict = combatIsAllowed({
+      enabled: true,
+      health: this.world.health,
+      minHealth,
+      retreatHealth,
+      hostileCountNearby: nearby,
+      maxEngageableHostiles: 1,
+      weapon: weaponName === null ? null : { name: weaponName, damage: weaponDamageFor(weaponName) },
+      requiredDamage,
+      targetDistance,
+      maxTargetDistance: 4,
+      hitsAlreadyAttempted: 0,
+      maxHits,
+      hostileName: hostile.name,
+      hostileType: "hostile",
+      hunger: this.world.food,
+    });
+    if (!verdict.allowed) throw new SimulatedActionError(verdict.reason, verdict.code);
+
+    let hits = 0;
+    let health = hostile.health;
+    let killed = false;
+    while (hits < maxHits) {
+      check();
+      if (this.world.health <= retreatHealth) {
+        throw new SimulatedActionError(
+          `Health fell to ${this.world.health.toFixed(1)} while fighting; withdrawing instead of swinging again.`,
+          "COMBAT_WITHDRAWN",
+        );
+      }
+      const current = this.world.hostileById(entityId);
+      if (!current) {
+        killed = true;
+        break;
+      }
+      if (Math.hypot(current.x - this.world.playerX, current.z - this.world.playerZ) > 4) {
+        throw new SimulatedActionError("The hostile left melee range; the fight is broken off.", "COMBAT_TARGET_OUT_OF_RANGE");
+      }
+      this.world.advance(250, check);
+      hits += 1;
+      const result = this.world.damageHostile(entityId, weaponDamageFor(weaponName));
+      if (!result) {
+        killed = true;
+        break;
+      }
+      health = result.health;
+      if (result.died) {
+        killed = true;
+        break;
+      }
+    }
+    return {
+      confirmed: killed,
+      confirmation: killed
+        ? "simulated_hostile_removed_from_entity_list"
+        : "simulated_hostile_still_present",
+      details: { entityId, hits, healthAfter: health, killed },
+    };
+  }
+
+  private dropItem(input: unknown, check: () => void): AdapterActionOutcome {
+    const parsed = minecraftDropItemInputSchema.safeParse(input);
+    if (!parsed.success) throw new SimulatedActionError("Invalid drop request.", "INVALID_ACTION_INPUT");
+    const { itemName, count } = parsed.data;
+    const before = this.world.countItem(itemName);
+    if (before < count) {
+      throw new SimulatedActionError(`Inventory holds ${before} ${itemName}, fewer than the ${count} requested.`, "ITEM_NOT_IN_INVENTORY");
+    }
+    check();
+    this.world.removeFromInventory(itemName, count);
+    // Thrown toward the player's facing, and held out of reach for a moment so the drop is observable
+    // instead of being collected again inside the same tick.
+    const ahead = this.dropTarget();
+    this.world.addItem(itemName, count, ahead.x, ahead.z, PLAYER_DROP_PICKUP_DELAY_MS);
+    this.world.advance(160, check);
+    const after = this.world.countItem(itemName);
+    return {
+      confirmed: after === before - count,
+      confirmation: "simulated_inventory_decrease_and_ground_drop_observed",
+      details: { itemName, before, after, dropped: count },
+    };
+  }
+
+  /** Where a tossed item lands: one block ahead of the player's facing. */
+  private dropTarget(): { x: number; z: number } {
+    const yaw = (this.yaw ?? 0) * (Math.PI / 180);
+    return {
+      x: Math.floor(this.world.playerX + Math.sin(yaw)),
+      z: Math.floor(this.world.playerZ + Math.cos(yaw)),
     };
   }
 

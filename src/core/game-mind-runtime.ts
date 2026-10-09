@@ -1,11 +1,37 @@
 import type { Logger } from "pino";
 import { ActionExecutor } from "./action-executor.js";
+import { SafetyBroker, type SafetyPolicy } from "./safety-broker.js";
 import type { GameAdapter, GameObservation, GameSession, WorldState } from "./types.js";
 import { TraceRecorder } from "./trace.js";
 import { WorldModel } from "./world-model.js";
 
+export type SafetyWorldContextInput = Omit<
+  import("./safety-broker.js").SafetyWorldContext,
+  "sequence"
+>;
+
+export interface SafetyObservationMeta {
+  readonly sequence: number;
+  readonly observedAtMs: number;
+}
+
+export interface GameMindRuntimeOptions<TState = unknown> {
+  /**
+   * Broker or policy gating every action this runtime dispatches. `undefined` (the default) and `null`
+   * both mean "no broker", so an unconfigured runtime behaves exactly as before; `createMinecraftAgent`
+   * always passes the Minecraft policy, which is what makes the gate live in practice.
+   */
+  readonly safety?: SafetyBroker | SafetyPolicy | null;
+  /**
+   * Extracts the safety-relevant fields of a game state so the broker can fail closed on stale or
+   * dangerous observations without knowing anything about Minecraft.
+   */
+  readonly safetyContext?: (state: TState, meta: SafetyObservationMeta) => SafetyWorldContextInput;
+}
+
 export class GameMindRuntime<TState = unknown> {
   readonly worldModel = new WorldModel<TState>();
+  readonly safety: SafetyBroker | null;
   readonly actionExecutor: ActionExecutor<TState>;
   private sessionValue: GameSession | null = null;
   private shuttingDown = false;
@@ -15,8 +41,18 @@ export class GameMindRuntime<TState = unknown> {
     readonly adapter: GameAdapter<TState>,
     readonly trace: TraceRecorder,
     private readonly logger: Logger,
+    private readonly options: GameMindRuntimeOptions<TState> = {},
   ) {
-    this.actionExecutor = new ActionExecutor(adapter, trace, logger);
+    // No broker unless the composition root asks for one: `undefined` and `null` both mean "not gated".
+    this.safety =
+      options.safety === undefined || options.safety === null
+        ? null
+        : options.safety instanceof SafetyBroker
+          ? options.safety
+          : new SafetyBroker(options.safety);
+    this.actionExecutor = new ActionExecutor(adapter, trace, logger, {
+      ...(this.safety ? { safety: this.safety } : {}),
+    });
     this.unsubscribeStatus = adapter.onStatusChange((change) => {
       if (change.status === "disconnected" || change.status === "failed") {
         this.sessionValue = null;
@@ -74,6 +110,7 @@ export class GameMindRuntime<TState = unknown> {
 
     const observation: GameObservation<TState> = await this.adapter.observe();
     const state = this.worldModel.apply(observation);
+    this.publishSafetyContext(state);
     await this.trace.record({
       eventType: "observation.received",
       gameId: state.gameId,
@@ -86,6 +123,42 @@ export class GameMindRuntime<TState = unknown> {
       },
     });
     return state;
+  }
+
+  /** Pushes the current world context into the broker so its checks see live numbers. */
+  private publishSafetyContext(state: WorldState<TState>): void {
+    if (!this.safety) return;
+    const extract = this.options.safetyContext;
+    if (!extract) return;
+    try {
+      this.safety.updateWorld({
+        ...extract(state.state, {
+          sequence: state.sequence,
+          observedAtMs: Date.parse(state.observedAt) || Date.now(),
+        }),
+        sequence: state.sequence,
+      });
+    } catch (error) {
+      this.logger.warn({ err: error }, "Safety context extraction failed; the broker keeps its last context");
+    }
+  }
+
+  /** Read-only view of connection, world-model and safety state; used by the Control Center. */
+  status(): {
+    readonly adapterStatus: string;
+    readonly sessionId: string | null;
+    readonly sequence: number | null;
+    readonly lastObservationAt: string | null;
+    readonly safety: ReturnType<SafetyBroker["snapshot"]> | null;
+  } {
+    const current = this.worldModel.current;
+    return {
+      adapterStatus: this.adapter.status,
+      sessionId: this.sessionValue?.id ?? null,
+      sequence: current?.sequence ?? null,
+      lastObservationAt: current?.observedAt ?? null,
+      safety: this.safety?.snapshot() ?? null,
+    };
   }
 
   async shutdown(reason = "requested shutdown"): Promise<void> {

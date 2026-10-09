@@ -1,4 +1,5 @@
 import { minecraftLogNames } from "./capabilities.js";
+import { isMineableBlockName } from "./mining.js";
 
 /** Block classes that the wide resource scan reports and that planning may target. */
 export const minecraftResourceBlockNames = [
@@ -28,6 +29,36 @@ export function isResourceBlockName(name: string): boolean {
 
 export function isInterestingBlockName(name: string): boolean {
   return resourceNames.has(name) || hazardBlockNames.has(name);
+}
+
+/**
+ * Ordering used when the local cube must be truncated. Planned-resource and hazard blocks outrank
+ * everything (a dropped log must never be truncated away), mineable stone is kept ahead of plain
+ * terrain, and ordinary ground is dropped first.
+ */
+export function blockObservationPriority(name: string): 2 | 1 | 0 {
+  if (isInterestingBlockName(name)) return 2;
+  if (isMineableBlockName(name)) return 1;
+  return 0;
+}
+
+export function isHazardBlockName(name: string): boolean {
+  return hazardBlockNames.has(name);
+}
+
+/** Blocks in the local cube that can hurt the agent, with how close they are. */
+export function observedHazards(
+  blocks: readonly { name: string; position: { x: number; y: number; z: number } }[],
+  player: { x: number; y: number; z: number },
+): { name: string; position: { x: number; y: number; z: number }; distance: number }[] {
+  return blocks
+    .filter((block) => hazardBlockNames.has(block.name))
+    .map((block) => ({
+      name: block.name,
+      position: block.position,
+      distance: distanceBetween({ x: block.position.x + 0.5, y: block.position.y + 0.5, z: block.position.z + 0.5 }, player),
+    }))
+    .sort((left, right) => left.distance - right.distance);
 }
 
 export function isRipeBerryBush(name: string, properties: Readonly<Record<string, unknown>> | undefined): boolean {

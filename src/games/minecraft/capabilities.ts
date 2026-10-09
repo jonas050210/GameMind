@@ -1,5 +1,10 @@
 import { z } from "zod";
 import type { CapabilityDefinition } from "../../core/types.js";
+import {
+  minecraftDroppableJunkNames,
+  minecraftMineableBlockNames,
+  minecraftPlaceableBlockNames,
+} from "./mining.js";
 
 export const MINECRAFT_LOOK_CAPABILITY = "minecraft.look";
 export const MINECRAFT_INSPECT_BLOCK_CAPABILITY = "minecraft.inspect_block";
@@ -12,6 +17,17 @@ export const MINECRAFT_PLACE_TABLE_CAPABILITY = "minecraft.place_crafting_table"
 export const MINECRAFT_PICKUP_ITEM_CAPABILITY = "minecraft.pickup_item";
 export const MINECRAFT_HARVEST_BERRIES_CAPABILITY = "minecraft.harvest_berries";
 export const MINECRAFT_REST_CAPABILITY = "minecraft.rest";
+export const MINECRAFT_MINE_BLOCK_CAPABILITY = "minecraft.mine_block";
+export const MINECRAFT_PLACE_BLOCK_CAPABILITY = "minecraft.place_block";
+export const MINECRAFT_BUILD_SHELTER_CAPABILITY = "minecraft.build_shelter";
+export const MINECRAFT_ATTACK_HOSTILE_CAPABILITY = "minecraft.attack_hostile";
+export const MINECRAFT_DROP_ITEM_CAPABILITY = "minecraft.drop_item";
+
+/**
+ * Capabilities that exist but are denied by the default safety policy until an operator opts in.
+ * Attack is the only high-risk capability in the system.
+ */
+export const MINECRAFT_OPT_IN_CAPABILITIES = [MINECRAFT_ATTACK_HOSTILE_CAPABILITY] as const;
 
 /** Capability names of the original fixture-era surface, kept for legacy fixtures. */
 export const LEGACY_MINECRAFT_CAPABILITY_NAMES = [
@@ -93,6 +109,13 @@ export const minecraftPlankNames = [
   "pale_oak_planks",
 ] as const;
 
+export const minecraftStoneToolNames = [
+  "stone_pickaxe",
+  "stone_axe",
+  "stone_shovel",
+  "stone_sword",
+] as const;
+
 export const minecraftCraftableItemNames = [
   ...minecraftPlankNames,
   "stick",
@@ -101,6 +124,7 @@ export const minecraftCraftableItemNames = [
   "wooden_axe",
   "wooden_shovel",
   "wooden_sword",
+  ...minecraftStoneToolNames,
 ] as const;
 
 export const minecraftCraftTaskItemNames = [
@@ -111,6 +135,17 @@ export const minecraftCraftTaskItemNames = [
   "wooden_axe",
   "wooden_shovel",
   "wooden_sword",
+  ...minecraftStoneToolNames,
+] as const;
+
+/** Items that count as a tool the agent can hold for mining or fighting. */
+export const minecraftToolItemNames = [
+  "wooden_pickaxe",
+  "stone_pickaxe",
+  "wooden_axe",
+  "stone_axe",
+  "wooden_sword",
+  "stone_sword",
 ] as const;
 
 export const minecraftFoodNames = [
@@ -165,6 +200,52 @@ export const minecraftRestInputSchema = z
   })
   .strict();
 
+export const minecraftMineBlockInputSchema = z
+  .object({
+    x: xzCoordinate,
+    y: yCoordinate,
+    z: xzCoordinate,
+    blockName: z.enum(minecraftMineableBlockNames),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
+export const minecraftPlaceBlockInputSchema = z
+  .object({
+    x: xzCoordinate,
+    y: yCoordinate,
+    z: xzCoordinate,
+    blockName: z.enum(minecraftPlaceableBlockNames),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
+export const minecraftBuildShelterInputSchema = z
+  .object({
+    mode: z.enum(["cardinal", "full"]).default("cardinal"),
+    maxBlocks: z.number().int().min(1).max(16).default(4),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
+export const minecraftAttackHostileInputSchema = z
+  .object({
+    entityId: z.string().min(1).max(48),
+    maxHits: z.number().int().min(1).max(6).default(4),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+    minHealth: z.number().finite().min(1).max(20).default(10),
+    retreatHealth: z.number().finite().min(0.5).max(20).default(6),
+    requiredDamage: z.number().finite().min(1).max(20).default(4),
+  })
+  .strict();
+
+export const minecraftDropItemInputSchema = z
+  .object({
+    itemName: z.enum(minecraftDroppableJunkNames),
+    count: z.number().int().min(1).max(64).default(1),
+  })
+  .strict();
+
 export const minecraftCraftItemInputSchema = z
   .object({
     item: z.enum(minecraftCraftableItemNames),
@@ -200,6 +281,11 @@ export type MinecraftEatFoodInput = z.infer<typeof minecraftEatFoodInputSchema>;
 export type MinecraftPickupItemInput = z.infer<typeof minecraftPickupItemInputSchema>;
 export type MinecraftHarvestBerriesInput = z.infer<typeof minecraftHarvestBerriesInputSchema>;
 export type MinecraftRestInput = z.infer<typeof minecraftRestInputSchema>;
+export type MinecraftMineBlockInput = z.infer<typeof minecraftMineBlockInputSchema>;
+export type MinecraftPlaceBlockInput = z.infer<typeof minecraftPlaceBlockInputSchema>;
+export type MinecraftBuildShelterInput = z.infer<typeof minecraftBuildShelterInputSchema>;
+export type MinecraftAttackHostileInput = z.infer<typeof minecraftAttackHostileInputSchema>;
+export type MinecraftDropItemInput = z.infer<typeof minecraftDropItemInputSchema>;
 export type MinecraftFoodName = (typeof minecraftFoodNames)[number];
 export type MinecraftLogName = (typeof minecraftLogNames)[number];
 export type MinecraftPlankName = (typeof minecraftPlankNames)[number];
@@ -297,6 +383,51 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     inputSchema: minecraftRestInputSchema,
     defaultTimeoutMs: 20_000,
     maxTimeoutMs: 40_000,
+    risk: "low",
+  },
+  {
+    name: MINECRAFT_MINE_BLOCK_CAPABILITY,
+    description:
+      "Pathfind to one allowlisted stone-class or ore block, check the pickaxe tier the drop requires, dig it, and confirm the drop entered the inventory. Blocks outside the allowlist are refused.",
+    inputSchema: minecraftMineBlockInputSchema,
+    defaultTimeoutMs: 60_000,
+    maxTimeoutMs: 120_000,
+    risk: "medium",
+  },
+  {
+    name: MINECRAFT_PLACE_BLOCK_CAPABILITY,
+    description:
+      "Place one allowlisted block from inventory onto an observed solid support in an observed air cell, after rechecking reach, player collision and hostile proximity. Confirms by reading the block back.",
+    inputSchema: minecraftPlaceBlockInputSchema,
+    defaultTimeoutMs: 15_000,
+    maxTimeoutMs: 30_000,
+    risk: "medium",
+  },
+  {
+    name: MINECRAFT_BUILD_SHELTER_CAPABILITY,
+    description:
+      "Close the observed open sides around the player with allowlisted blocks from inventory, one placement at a time, stopping on any threat inside the danger radius. Confirms against the blocks observed afterwards.",
+    inputSchema: minecraftBuildShelterInputSchema,
+    defaultTimeoutMs: 90_000,
+    maxTimeoutMs: 150_000,
+    risk: "medium",
+  },
+  {
+    name: MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
+    description:
+      "Attack one specifically identified hostile entity for a bounded number of swings. Refused unless combat was enabled by the operator, health is above the floor, a weapon is held, and only one target is in range. Deny-by-default at the safety broker.",
+    inputSchema: minecraftAttackHostileInputSchema,
+    defaultTimeoutMs: 15_000,
+    maxTimeoutMs: 30_000,
+    risk: "high",
+  },
+  {
+    name: MINECRAFT_DROP_ITEM_CAPABILITY,
+    description:
+      "Drop a small amount of allowlisted terrain (dirt, gravel, stone-family blocks) from inventory to free slots. Tools, resources and food are refused.",
+    inputSchema: minecraftDropItemInputSchema,
+    defaultTimeoutMs: 8_000,
+    maxTimeoutMs: 15_000,
     risk: "low",
   },
 ];

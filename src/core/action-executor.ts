@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { CapabilityRegistry } from "./capability-registry.js";
+import type { SafetyBroker } from "./safety-broker.js";
 import type {
   ActionFailure,
   ActionRequest,
@@ -49,6 +50,16 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export interface ActionExecutorOptions {
+  /**
+   * Optional Safety Broker. When set, every non-read-only action is put through it after input
+   * validation and before the adapter is asked to execute. A denial is recorded as a rejected
+   * action with the broker's own code, so traces always explain who stopped the action.
+   */
+  readonly safety?: SafetyBroker;
+  readonly riskOf?: (capability: string) => "low" | "medium" | "high";
+}
+
 export class ActionExecutor<TState = unknown> {
   private busy = false;
   private stopping = false;
@@ -57,16 +68,27 @@ export class ActionExecutor<TState = unknown> {
   private activeAbortController: AbortController | null = null;
   private readonly capabilities: CapabilityRegistry;
 
+  private readonly safety: SafetyBroker | null;
+  private readonly riskOf: (capability: string) => "low" | "medium" | "high";
+
   constructor(
     private readonly adapter: GameAdapter<TState>,
     private readonly trace: TraceRecorder,
     private readonly logger: Logger,
+    options: ActionExecutorOptions = {},
   ) {
     this.capabilities = new CapabilityRegistry(adapter.capabilities);
+    this.safety = options.safety ?? null;
+    this.riskOf = options.riskOf ?? ((capability) => this.capabilities.get(capability)?.risk ?? "medium");
   }
 
   get registry(): CapabilityRegistry {
     return this.capabilities;
+  }
+
+  /** The broker that gates this executor, when one is attached. */
+  get safetyBroker(): SafetyBroker | null {
+    return this.safety;
   }
 
   async execute(
@@ -149,6 +171,36 @@ export class ActionExecutor<TState = unknown> {
           message: preflightFailure.message,
           status: preflightFailure.status ?? "failed",
         });
+      }
+
+      if (this.safety) {
+        const verdict = this.safety.evaluate({
+          capability: request.capability,
+          risk: this.riskOf(request.capability),
+          ...(request.skillId !== undefined ? { skillId: request.skillId } : {}),
+          ...(request.source !== undefined ? { source: request.source } : {}),
+        });
+        await this.trace.record({
+          eventType: "safety.verdict",
+          gameId: this.adapter.gameId,
+          sessionId: request.sessionId,
+          correlationId: actionId,
+          data: {
+            capability: verdict.capability,
+            risk: verdict.risk,
+            allowed: verdict.allowed,
+            code: verdict.code,
+            message: verdict.message,
+            checks: verdict.checks,
+            source: request.source ?? "unspecified",
+          },
+        });
+        if (!verdict.allowed) {
+          return this.reject(request, actionId, requestedAt, startedClock, {
+            code: `SAFETY_${verdict.code}`,
+            message: verdict.message,
+          });
+        }
       }
 
       const session = this.adapter.session;

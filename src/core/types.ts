@@ -28,13 +28,15 @@ export interface WorldState<TState = unknown> extends GameObservation<TState> {
   readonly receivedAt: string;
 }
 
+export type RiskLevel = "low" | "medium" | "high";
+
 export interface CapabilityDefinition<TInput = unknown> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: ZodType<TInput>;
   readonly defaultTimeoutMs: number;
   readonly maxTimeoutMs: number;
-  readonly risk: "low" | "medium" | "high";
+  readonly risk: RiskLevel;
 }
 
 export interface AdapterAction {
@@ -63,6 +65,12 @@ export interface ActionRequest {
   readonly actionId?: string;
   readonly sessionId: string | null;
   readonly capability: string;
+  /**
+   * Skill that requested the action, when it came through the skill runtime. Safety rules that are
+   * written per skill (recovery skills allowed during a health floor) need this; capability-level
+   * rules ignore it.
+   */
+  readonly skillId?: string;
   readonly input: unknown;
   readonly timeoutMs?: number;
   readonly source?: string;
