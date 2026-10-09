@@ -139,7 +139,7 @@ npm run dev -- --task gather-logs --host 127.0.0.1 --control-center
 npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
 ```
 
-`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no network access of its own: the HTML, CSS, client script and fonts are all served from this package, and the UI updates over one server-sent-events stream instead of polling.
+`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no network access of its own: the HTML, CSS and client script are served from this package (no CDN, no web fonts). Updates arrive over one server-sent-events stream — the server pushes a full snapshot frame on a heartbeat and a trace event for each recorded action, and the client refetches at most once per event burst rather than polling.
 
 Controls that exist because the runtime actually implements them:
 
