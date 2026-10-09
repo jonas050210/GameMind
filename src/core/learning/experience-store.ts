@@ -59,10 +59,17 @@ export class ExperienceStore {
     const parsed = episodes.map((episode) => episodeSchema.parse(episode));
     this.queue = this.queue.then(async () => {
       await mkdir(this.directory, { recursive: true });
+      // The size *before* this batch, because the count is maintained incrementally from here on. It
+      // still has to be seeded from disk once, or a file written by an earlier process never compacts.
+      const knownLines = this.cachedLines ?? (await this.lineCount());
       await appendFile(this.filePath, `${parsed.map((episode) => JSON.stringify(episode)).join("\n")}\n`, "utf8");
-      const lines = await this.lineCount();
-      if (lines > this.maxEpisodes) await this.compact(lines - this.maxEpisodes);
-      this.cachedLines = lines > this.maxEpisodes ? this.maxEpisodes : lines;
+      const lines = knownLines + parsed.length;
+      if (lines > this.maxEpisodes) {
+        await this.compact(lines - this.maxEpisodes);
+        this.cachedLines = this.maxEpisodes;
+      } else {
+        this.cachedLines = lines;
+      }
     });
     await this.queue;
   }
@@ -110,6 +117,8 @@ export class ExperienceStore {
         skippedLines += 1;
       }
     }
+    // Reading the file is the one moment the true size is known for free, so refresh the counter here.
+    this.cachedLines = lines.length;
     return { episodes, skippedLines };
   }
 

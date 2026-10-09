@@ -187,6 +187,8 @@ export class SafetyBroker {
   private paused = false;
   private pauseReason: string | null = null;
   private tripped = false;
+  /** True while the current pause is the one `trip` imposed, so clearing a trip does not hide a pause. */
+  private pausedByTrip = false;
   private tripReason: string | null = null;
   private runId: string | null = null;
   private actionsApproved = 0;
@@ -215,6 +217,17 @@ export class SafetyBroker {
     return this.policyValue;
   }
 
+  /**
+   * Start measuring a run without touching the operator's flags. `beginRun` is a full reset, which is
+   * right for a host that owns the broker's whole lifecycle; a task runner must never be able to
+   * un-pause or un-trip an agent that an operator stopped, so it calls this instead.
+   */
+  startRun(runId: string): void {
+    this.runId = runId;
+    this.runCapabilityCount.clear();
+    this.lastCapabilityRunAt.clear();
+  }
+
   beginRun(runId: string): void {
     this.runId = runId;
     this.runCapabilityCount.clear();
@@ -223,6 +236,7 @@ export class SafetyBroker {
     this.pauseReason = null;
     this.tripped = false;
     this.tripReason = null;
+    this.pausedByTrip = false;
   }
 
   endRun(): void {
@@ -234,19 +248,42 @@ export class SafetyBroker {
   pause(reason = "paused by operator"): void {
     this.paused = true;
     this.pauseReason = reason;
+    // An explicit pause is the operator's own hold, so clearing a later trip must not release it.
+    this.pausedByTrip = false;
   }
 
   resume(): void {
     this.paused = false;
     this.pauseReason = null;
+    this.pausedByTrip = false;
+  }
+
+  /**
+   * Lift a trip without touching an independent pause. Tripping sets both holds, so an operator who
+   * clears the trip usually resumes right after; keeping the two effects separate means a reset can never
+   * silently release a pause that somebody set on purpose.
+   */
+  clearTrip(): void {
+    this.tripped = false;
+    this.tripReason = null;
+    if (this.pausedByTrip) {
+      this.paused = false;
+      this.pauseReason = null;
+      this.pausedByTrip = false;
+    }
   }
 
   /** Hard stop: no approval until an operator explicitly resumes. */
   trip(reason = "safety trip"): void {
     this.tripped = true;
     this.tripReason = reason;
-    this.paused = true;
-    this.pauseReason = reason;
+    // A trip always pauses. If the run was already paused for an operator's own reason, that pause is
+    // left alone, so resetting the trip cannot quietly release a hold somebody set deliberately.
+    if (!this.paused) {
+      this.paused = true;
+      this.pauseReason = reason;
+      this.pausedByTrip = true;
+    }
   }
 
   updateWorld(context: SafetyWorldContext): void {

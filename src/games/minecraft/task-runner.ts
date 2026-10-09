@@ -133,6 +133,18 @@ export interface MinecraftTaskRunnerOptions {
   readonly allowCombat?: boolean;
   /** Unique id for the episode log; derived from the task when omitted. */
   readonly runId?: string;
+  /**
+   * World knowledge to reuse. Without it each run starts from an empty memory; a long-lived host (the
+   * Control Center) passes one so knowledge and forgotten targets survive between tasks.
+   */
+  readonly memory?: WorldMemory;
+  /** Called once per completed action with the same summary the result carries; used for live UI updates. */
+  readonly onAction?: (action: TaskActionSummary) => void;
+  /**
+   * Cooperative cancellation. Checked between actions, never inside one, so a stop request can't leave an
+   * action half-executed: the run ends as `aborted` with the reason after the current action is verified.
+   */
+  readonly shouldStop?: () => string | null;
 }
 
 /** A target that is attempted this many times without observable progress is excluded. */
@@ -344,7 +356,7 @@ export class MinecraftTaskRunner {
     const excludedTargets = new Set<string>();
     const attemptsWithoutProgress = new Map<string, number>();
     const movementHistory: Array<{ x: number; z: number }> = [];
-    const memory = new WorldMemory();
+    const memory = this.options.memory ?? new WorldMemory();
     const target = taskTarget(task);
     const targetCountOf = (state: MinecraftObservation): number =>
       task.kind === "build_shelter" ? shelterCardinalSolidCount(state) : countItem(state, target.item);
@@ -427,6 +439,10 @@ export class MinecraftTaskRunner {
       initialFood = firstState.player.food;
       origin = { x: firstState.player.position.x, z: firstState.player.position.z };
 
+      // Per-run budgets are measured per run, so a long-lived process cannot let action counts leak from
+      // one task into the next. An operator pause or trip deliberately survives across runs.
+      this.runtime.safety?.startRun(runId);
+
       // Learning is strictly additive: a broken store may never break a run, so every call is guarded.
       if (learner) {
         try {
@@ -441,6 +457,12 @@ export class MinecraftTaskRunner {
         if (this.clock() >= deadline) {
           status = "timed_out";
           failure = { code: "TASK_DEADLINE", message: "Task exceeded its overall time budget." };
+          break;
+        }
+        const stopReason = this.options.shouldStop?.() ?? null;
+        if (stopReason) {
+          status = "aborted";
+          failure = { code: "OPERATOR_STOP", message: stopReason };
           break;
         }
         const world = this.runtime.currentWorldState;
@@ -572,6 +594,7 @@ export class MinecraftTaskRunner {
           confirmedButUnverified,
         );
         actions.push(summary);
+        this.options.onAction?.(summary);
         await this.runtime.trace.record({
           eventType: "task.action",
           gameId: this.runtime.adapter.gameId,

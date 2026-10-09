@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <title>GameMind Control Center</title>
+  <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- Bootstrap values are substituted by the Control Center server when this page is served. -->
+    <script id="boot-data" type="application/json">{"token":"__CONTROL_TOKEN__","banner":"__BANNER__","title":"__TITLE__"}</script>
+    <div class="ambient" aria-hidden="true">
+      <span class="orb orb-a"></span>
+      <span class="orb orb-b"></span>
+      <span class="orb orb-c"></span>
+    </div>
+
+    <header class="titlebar glass">
+      <div class="identity">
+        <span class="mark" aria-hidden="true"></span>
+        <div class="names">
+          <h1 id="title">GameMind</h1>
+          <p id="subtitle">Control Center</p>
+        </div>
+      </div>
+      <div class="status-strip">
+        <div class="pill" id="connection-pill" data-state="unknown">
+          <span class="dot"></span>
+          <span id="connection-text">connecting…</span>
+        </div>
+        <div class="pill" id="agent-pill" data-state="idle">
+          <span class="dot"></span>
+          <span id="agent-text">idle</span>
+        </div>
+        <div class="clock" id="updated">—</div>
+        <button class="btn small" id="theme-toggle" type="button" title="Switch between the dark and light glass treatment">Dark</button>
+      </div>
+    </header>
+
+    <p class="banner" id="banner" hidden></p>
+
+    <main>
+      <section class="column">
+        <article class="card glass">
+          <header class="card-head">
+            <h2>Run</h2>
+            <span class="hint" id="run-hint"></span>
+          </header>
+          <div class="metrics" id="run-metrics"></div>
+          <div class="progress" aria-hidden="true"><span id="run-progress"></span></div>
+          <div class="controls">
+            <button data-command="pause" data-payload="paused from the Control Center" class="btn">Pause</button>
+            <button data-command="resume" class="btn">Resume</button>
+            <button data-command="trip" data-payload="manual trip from the Control Center" class="btn danger">Trip</button>
+            <button data-command="resetTrip" class="btn">Reset trip</button>
+            <button data-command="stopTask" data-payload="stopped from the Control Center" class="btn">Stop task</button>
+          </div>
+          <div class="row">
+            <label class="switch">
+              <input type="checkbox" id="combat-toggle" data-command="enableCombat" />
+              <span class="track" aria-hidden="true"></span>
+              <span class="switch-label">Combat allowed</span>
+            </label>
+            <form class="budget" id="budget-form">
+              <label for="budget-input">Action budget</label>
+              <input id="budget-input" type="number" min="1" max="5000" step="1" inputmode="numeric" />
+              <button class="btn small" type="submit">Apply</button>
+            </form>
+          </div>
+        </article>
+
+        <article class="card glass">
+          <header class="card-head">
+            <h2>Current decision</h2>
+            <span class="hint" id="goal-hint"></span>
+          </header>
+          <div id="goal" class="goal"></div>
+          <details class="trace-details" id="alternatives-details" hidden>
+            <summary>Alternatives considered &amp; why they lost</summary>
+            <div id="alternatives"></div>
+          </details>
+          <details class="trace-details" id="decision-history-details" hidden>
+            <summary>Earlier decision traces</summary>
+            <div id="decision-history"></div>
+          </details>
+        </article>
+
+        <article class="card glass">
+          <header class="card-head">
+            <h2>Safety Broker</h2>
+            <span class="hint" id="safety-hint"></span>
+          </header>
+          <div class="metrics" id="safety-metrics"></div>
+          <div class="table-wrap">
+            <table id="verdicts">
+              <thead><tr><th>Capability</th><th>Risk</th><th>Verdict</th><th>Reason</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card glass">
+          <header class="card-head">
+            <h2>Learning &amp; evaluation</h2>
+            <span class="hint" id="learning-hint"></span>
+          </header>
+          <div class="metrics" id="learning-metrics"></div>
+          <div id="blocked"></div>
+          <div class="controls">
+            <button data-command="promotePolicy" class="btn">Promote candidate</button>
+            <button data-command="rejectPolicy" class="btn">Roll back</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="column">
+        <article class="card glass">
+          <header class="card-head">
+            <h2>World</h2>
+            <span class="hint" id="world-hint"></span>
+          </header>
+          <div class="vitals" id="vitals"></div>
+          <div class="map-wrap">
+            <canvas id="minimap" width="520" height="260" role="img" aria-label="Top-down map of observed blocks around the player"></canvas>
+            <ul class="legend">
+              <li><span class="sw player"></span>player</li>
+              <li><span class="sw solid"></span>solid block</li>
+              <li><span class="sw resource"></span>resource block</li>
+              <li><span class="sw hazard"></span>lava / magma</li>
+            </ul>
+            <div class="items" id="hostiles"></div>
+          </div>
+          <div class="split">
+            <div>
+              <h3 class="sub">Inventory</h3>
+              <div id="inventory" class="items"></div>
+            </div>
+            <div>
+              <h3 class="sub">Equipment</h3>
+              <div id="equipment" class="items"></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card glass">
+          <header class="card-head">
+            <h2>Skill execution</h2>
+            <span class="hint">measured from the trace log</span>
+          </header>
+          <div class="table-wrap">
+            <table id="skills">
+              <thead><tr><th>Skill</th><th>Runs</th><th>Confirmed</th><th>Mean</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card glass">
+          <header class="card-head">
+            <h2>Executed skills, failures &amp; recovery</h2>
+            <span class="hint" id="actions-hint"></span>
+          </header>
+          <ol class="timeline" id="actions"></ol>
+          <h3 class="sub failures-head">Failures and refusals</h3>
+          <ol class="timeline" id="failures"></ol>
+        </article>
+      </section>
+    </main>
+
+    <footer class="glass" id="footer">
+      <span id="toast">Ready.</span>
+      <span class="spacer"></span>
+      <span class="hint">Every figure is read from the running agent; nothing here is sample data.</span>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

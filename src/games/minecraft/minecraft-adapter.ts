@@ -385,11 +385,19 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private readonly installPlugins: (bot: Bot) => void;
   private readonly configureSafeMovements: (bot: Bot) => void;
 
+  /**
+   * Combat is switched through this field rather than the config object, so an operator can arm or
+   * disarm it while the agent is connected. Both gates have to be open: this one and the safety
+   * policy's capability opt-in. The default always comes from the immutable startup configuration.
+   */
+  private combatAllowedValue = false;
+
   constructor(
     private readonly logger: Logger,
     private readonly config: MinecraftAdapterConfig = DEFAULT_MINECRAFT_CONFIG,
     dependencies: MinecraftAdapterDependencies = {},
   ) {
+    this.combatAllowedValue = config.allowCombat;
     this.botFactory = dependencies.botFactory ?? createBot;
     this.installPlugins = dependencies.installPlugins ?? safeInstallPlugins;
     this.configureSafeMovements = dependencies.configureSafeMovements ?? configureConservativeMovements;
@@ -1919,9 +1927,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftAttackHostileInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid attack request.", "INVALID_ACTION_INPUT");
-    if (!this.config.allowCombat) {
+    if (!this.combatAllowedValue) {
       throw new MinecraftAdapterError(
-        "Combat is disabled on this adapter (MINECRAFT_ALLOW_COMBAT is not set to true).",
+        "Combat is not armed on this adapter (start with --allow-combat or arm it from the Control Center).",
         "COMBAT_DISABLED",
       );
     }
@@ -2072,6 +2080,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       // Never refuse a dig because the inventory layout could not be read; the drop check still applies.
       return true;
     }
+  }
+
+  /** Whether this adapter will execute an attack right now. */
+  get combatAllowed(): boolean {
+    return this.combatAllowedValue;
+  }
+
+  /**
+   * Arming combat from the Control Center also requires the safety policy opt-in, so this alone cannot
+   * enable fighting on an agent that was started without it: both layers must say yes.
+   */
+  setCombatAllowed(allowed: boolean): void {
+    this.combatAllowedValue = allowed;
+    this.logger.info({ combatAllowed: allowed }, allowed ? "Combat armed by operator" : "Combat disarmed by operator");
   }
 
   private blockAtCoordinates(bot: Bot, x: number, y: number, z: number) {

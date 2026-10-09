@@ -27,6 +27,16 @@
 - **Offline-Simulation und Bewertung:** Eine deterministische, geseedete Welt mit zwölf Szenarien und Gate-Prüfungen (keine unsicheren Aktionen, keine Todesfälle, keine widersprüchlichen Bestätigungen). Die Ergebnisse gelten nur für Steuerungslogik, nicht für einen echten Server.
 - **Live-Status:** Weiterhin **nicht verifiziert**. Die Prüfschritte und Befehle stehen in `docs/LIVE_VERIFICATION.md`.
 
+### Umsetzungsstand der dritten Phase (Safety-Broker, Autonomie, Lernen, Control Center)
+
+- **Action Broker / Safety-Schicht:** `src/core/safety-broker.ts` beantwortet ausschließlich „darf diese Aktion überhaupt laufen?“ und sitzt unterhalb des Entscheidungsmodells: Richtlinienaktivierung, Risikodeckel, Allow-/Denylist, Operator-Opt-Ins, Aktions- und Fähigkeitsbudgets je Lauf, Cooldowns, Gesundheitsschutzschwelle, Gefahrenblock-Nähe, Ertrinken und Beobachtungs-Alter. Jedes Urteil wird mit den geprüften Checks protokolliert. `pause` blockiert Weltänderungen, `trip` blockiert alles bis zum ausdrücklichen Reset; das Aufheben eines Trips hebt ein separat gesetztes Pause nicht auf. Der `ActionExecutor` meldet die Fähigkeit samt `skillId` an den Broker, und das Entscheidungsmodell erhält dasselbe Urteil in den Trace (`DecisionRecord.safety`).
+- **Autonomie über Sammeln hinaus:** `mine-block` (Werkzeug aus dem Block abgeleitet, Abbruch bei `TOOL_REQUIRED` / `TOOL_TIER_INSUFFICIENT`), `place-block` und `build-shelter` (Kardinal- oder Vollumschluss, nur gezählte Inventarblöcke), `equip-item` und `drop-item` bei vollem Inventar. Nahrung/Gesundheit, Bedrohungserkennung, Flucht und — nach dreifachem Opt-In — Verteidigung sind in den Prioritätsbändern verankert; Überleben und Sicherheit schlagen Sammeln und Fortschritt immer.
+- **Strukturierte Entscheidungstraces:** `decision.made` enthält gewähltes Ziel, alle Alternativen mit Nutzen, alle Verwerfungen mit Grundcode und Erklärung, Plan, Bänder, Weltwissensstand und Sicherheitsurteil. `task.action` hängt die Postbedingungs-Verifikation an. Erfolg wird ausschließlich aus einer folgenden Beobachtung abgeleitet, nie aus dem Aussprechen einer Aktion.
+- **Lernsystem (praktisch, kein RL):** Jeder ausgeführte Versuch wird als Episode in `data/learning/episodes.jsonl` abgelegt. Eine Failure-Memory schließt Ziele, an denen wiederholt ohne Fortschritt gescheitert wurde, in späteren Läufen derselben Welt aus, bis genug Beobachtungen widersprechen. Abgeleitete Policy-Gewichte ändern nur die Reihung innerhalb eines Bandes — sie können keine Fähigkeit freigeben, keine Validierung umgehen und kein Band verschieben. Promotion ist gate-geprüft (bestehender `eval:offline`-Report, Episoden vorhanden, Kandidat gewichtet tatsächlich, kein widersprüchliches Confirmieren). Damit ist die Schnittstelle für späteres RL vorbereitet (Episoden als Trainingsdatensatz, Store ist append-only), aber es findet keine Gewichtsaktualisierung statt.
+- **Control Center:** `src/control-center/` liefert Lesezugriff auf echte Laufzeitobjekte (Runtime-Status, Weltmodell, WorldMemory, Safety-Broker, Learner, Trace-Ring) über `GET /api/snapshot`, einen SSE-Stream `GET /api/stream` und `POST /api/command`. Bedienelemente (Pause/Resume, Trip/Reset, Kampf an/aus, Aktionsbudget, Stop, Task starten, Policy fördern/verwerfen) rufen Methoden genau dieser Objekte auf; Befehle ohne Token antworten mit 403, nicht unterstützte mit 501, abgelehnte mit 409. Die Oberfläche ist bewusst netzwerkfrei (eigene HTML/CSS/JS-Assets, keine CDNs), die Kopie liegt nach dem Build unter `dist/src/control-center/public`.
+- **Bewertung und Tests:** `npm run eval:offline` läuft 20 Szenarien × 20 Seeds (400 Läufe), Gate unverändert: null unsichere Aktionen, null Todesfälle, null widersprüchliche Bestätigungen. Zusätzlich vergleicht die Suite dieselben geseedeten Welten mit und ohne Gedächtnis (Wiederholungs-Lauf verschwendet 5 → 0 Aktionen im Stall-Szenario; die anderen Zeilen zeigen die ehrliche Grenze, weil dort verbleibende Aktionen der einzige Weg zum Ziel sind). `npm test` läuft 165 Tests, darunter Safety-Broker (14), Autonomie-Skills (7), Entscheidungstraces (12), Lernsystem (8), Policy-Gate gegen echte Evaluierungsläufe (2) und Control Center über HTTP gegen einen laufenden Agenten (9).
+- **Grenzen:** Kein Lauf gegen einem echten Minecraft-Server wurde durchgeführt — Control Center, Lernsystem und Kampf sind ausschließlich gegen die Simulation und Mineflayer-Doubles geprüft (§10–§13 in `docs/LIVE_VERIFICATION.md`). Das Control Center hält nur die letzten 400 Ereignisse im Speicher, bietet keine freie Kommandozeile und kennt keine Authentifizierung außer dem Token des Prozesses (kein TLS). Das Lernsystem ist Statistik über Episoden, kein Modelltraining.
+
 ## Kurzfassung
 
 GameMind sollte nicht als ein einzelnes neuronales Netz verstanden werden, das direkt Pixel in Tastendrücke übersetzt. Für ein langfristig erweiterbares System ist eine **hierarchische, hybride Agentenarchitektur** sinnvoller:
@@ -432,6 +442,12 @@ Die Hauptansicht priorisiert Live-Status und sichere Kontrolle; tiefere Ursachen
 
 Unnötig für den MVP sind dutzende Echtzeitdiagramme, frei editierbare interne Variablen, ungefilterte Rohpaketlogs, ein Chatbot als Ersatz für Entscheidungsgründe und komplexe 3D-Visualisierung der gesamten Welt. Erst wenn ein konkreter Debugging-/Trainingsnutzen messbar ist, sollten solche Ansichten hinzukommen.
 
+### 12.4 Umgesetzter Stand (dritte Phase)
+
+Das Control Center ist implementiert (`src/control-center/`, Bedienung über `--control-center`) und als eine Seite ohne externe Abhängigkeiten gebaut: „Overview“, „Agent State“, „World/Observation“ (begrenzte Top-down-Karte aus tatsächlich beobachteten Blöcken), „Decision Model“ (aktuelle Auswahl, Plan, verwerk Alternativen mit Begründung, Sicherheitsurteil, vorherige Traces), „Skills“ (gemessene Ausführungen und Bestätigungsquote aus dem Trace), „Safety“ (Zähler, Policy, letzte Urteile), „Learning/Evaluation“ (Episoden, Kontexte, gesperrte Ziele, Policy-Historie, Ergebnisse des letzten `eval:offline`-Reports) und die Bedienelemente Pause/Resume/Trip/Reset/Stop/Task starten/Kampf/Aktionsbudget. Design: Liquid Glass mit zurückhaltender Transparenz, 1px-Hairlines, System-Fonts, CSS-Transitions, Light-/Dark-Umschalter und `prefers-reduced-motion`.
+
+Bewusst **nicht** umgesetzt, weil die Datenquelle es nicht hergibt oder der Nutzen fehlt: ein durchsuchbarer Memory-Browser über alle Episoden (die Episoden liegen als JSONL vor), Filter-/Schweregrad-Oberflächen für Rohlogs, ein Trainings-Dashboard (es findet kein Training statt), freie Editierung interner Variablen und eine 3D-Weltdarstellung. Die Datenansichten bleiben bewusst ein Zeitfenster von 400 Ereignissen; Dauerarchäologie ist Aufgabe der Trace-Dateien.
+
 ## 13. Zusätzliche Vorschläge
 
 Diese Ergänzungen sind bewusst über die Ausgangsidee hinaus gedacht. Sie stärken vor allem Reproduzierbarkeit, Sicherheit und kontrolliertes Lernen.
@@ -528,6 +544,7 @@ Diese Ergänzungen sind bewusst über die Ausgangsidee hinaus gedacht. Sie stär
 - Overview, Live-State, Decision Trace, Skill- und Ereignisansicht sowie Pause/Stop implementieren.
 - Mehrere Seeds, Fehlerfälle und Regressionen automatisieren; Datenspeicherung begrenzen und dokumentieren.
 - **Exit:** Ein Entwickler kann einen Fehllauf aus dem UI/Trace verstehen, wiederholen und sicher stoppen.
+- **Stand:** erfüllt. Control Center (Seite + HTTP/SSE-API gegen den laufenden Runtime), Entscheidungstraces mit Verwerfungen, Skill-Statistiken, Episode-/Failure-Memory und der sichere Stopp zwischen Aktionen sind implementiert und getestet; die Wiederholbarkeit eines Fehllaufs bleibt über Seed und Trace gegeben, nicht über einen Replay-Player.
 
 ### Phase 4 – Kompetenzmessung und erstes kontrolliertes Lernen
 
@@ -536,6 +553,7 @@ Diese Ergänzungen sind bewusst über die Ausgangsidee hinaus gedacht. Sie stär
 - Zuerst einfache Parameteroptimierung/Bandit oder Imitation für ein isoliertes Teilproblem prüfen.
 - Champion/Kandidat-Gates, Checkpoints, Rollback und Reward-Hacking-Tests ergänzen.
 - **Exit:** Eine gelernte Variante verbessert die Baseline auf zurückgehaltenen Bedingungen ohne Safety-Regression.
+- **Stand:** teilweise erfüllt. Benchmark, Metriken und Champion-/Kandidat-Gate mit Rollback existieren und laufen gegen die echte Evaluationssuite; die „gelernte Variante“ sind kontextbasierte Nutzen-Gewichte aus Episoden (kein Modelltraining), und der Nachweis ihrer Wirkung stammt aus der Simulation — der Vergleich gegen eine echte Serverwelt steht aus.
 
 ### Phase 5 – Autonomie und Szenariobreite
 

@@ -150,6 +150,16 @@ export class ExperienceLearner {
     return this.state.runs;
   }
 
+  /** Weights derived from experience so far; promoted only through the policy gate. */
+  get candidateWeights(): PolicyWeights {
+    return this.state.candidateWeights;
+  }
+
+  /** The policy currently steering decisions, or null while the baseline is in force. */
+  get activeWeights(): PolicyWeights | null {
+    return this.state.activeWeights;
+  }
+
   get currentRun(): LearningRunContext | null {
     return this.runContext;
   }
@@ -452,6 +462,10 @@ export class ExperienceLearner {
     readonly enabled: boolean;
     readonly runs: number;
     readonly episodes: number;
+    /** Totals the promotion check needs: experience that contradicted the world or tripped safety. */
+    readonly contradictedConfirmations: number;
+    readonly safetyDenials: number;
+    readonly failures: number;
     readonly lastRunId: string | null;
     readonly contexts: readonly { key: string; attempts: number; successes: number }[];
     readonly activePolicy: { id: string; contexts: number } | null;
@@ -466,10 +480,21 @@ export class ExperienceLearner {
     readonly runEpisodes: number;
   } {
     const stats = this.state.stats;
+    let contradictedConfirmations = 0;
+    let safetyDenials = 0;
+    let failures = 0;
+    for (const stat of Object.values(stats)) {
+      contradictedConfirmations += stat.contradictedConfirmations;
+      safetyDenials += stat.safetyDenials;
+      failures += Math.max(0, stat.attempts - stat.successes);
+    }
     return {
       enabled: this.enabled,
       runs: this.state.runs,
       episodes: this.state.episodes,
+      contradictedConfirmations,
+      safetyDenials,
+      failures,
       lastRunId: this.state.lastRunId,
       contexts: Object.entries(stats)
         .map(([key, stat]) => ({ key, attempts: stat.attempts, successes: stat.successes }))

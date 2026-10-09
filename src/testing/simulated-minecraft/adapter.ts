@@ -109,7 +109,8 @@ function distance3(a: { x: number; y: number; z: number }, b: { x: number; y: nu
 export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservation> {
   readonly gameId = "minecraft-java";
   readonly capabilities: readonly CapabilityDefinition[];
-  readonly combatEnabled: boolean;
+  /** Combat gate, switchable at runtime for the same reason the live adapter exposes one. */
+  combatEnabled: boolean;
   readonly world: SimulatedMinecraftWorld;
 
   private statusValue: AdapterStatus = "disconnected";
@@ -134,6 +135,14 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     const omitted = new Set(options.omitCapabilities ?? []);
     this.capabilities = minecraftCapabilities.filter((capability) => !omitted.has(capability.name));
     this.world = new SimulatedMinecraftWorld(options.definition);
+  }
+
+  get combatAllowed(): boolean {
+    return this.combatEnabled;
+  }
+
+  setCombatAllowed(allowed: boolean): void {
+    this.combatEnabled = allowed;
   }
 
   get status(): AdapterStatus {

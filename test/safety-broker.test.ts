@@ -131,6 +131,37 @@ test("pause blocks world changes, trip blocks everything until an operator resum
   );
 });
 
+test("clearing a trip lifts the pause the trip imposed but never an operator's own pause", () => {
+  const broker = new SafetyBroker();
+  broker.beginRun("run-trip-reset");
+  broker.updateWorld(worldContext());
+
+  broker.trip("health collapsed");
+  assert.equal(broker.snapshot().tripped, true);
+  assert.equal(broker.snapshot().paused, true, "tripping freezes the run as well as denying approvals");
+  broker.clearTrip();
+  assert.equal(broker.snapshot().tripped, false);
+  assert.equal(
+    broker.snapshot().paused,
+    false,
+    "the pause that came from the trip is released with it, so a reset actually restarts the agent",
+  );
+
+  broker.pause("operator is reading the trace");
+  broker.trip("lava at the player's feet");
+  broker.clearTrip();
+  assert.equal(broker.snapshot().tripped, false);
+  assert.equal(broker.snapshot().paused, true, "an explicit pause outlives the trip that followed it");
+  assert.equal(broker.snapshot().pauseReason, "operator is reading the trace", "and keeps its own reason");
+  assert.equal(
+    broker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 }).code,
+    "RUN_PAUSED",
+    "so the run stays frozen until the operator resumes it",
+  );
+  broker.resume();
+  assert.equal(broker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 }).allowed, true);
+});
+
 test("a disabled policy is a panic switch for everything but reading", () => {
   const broker = new SafetyBroker({ enabled: false });
   broker.beginRun("run-disabled");

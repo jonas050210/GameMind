@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
     "test": "tsx --test test/*.test.ts",
@@ -24,7 +24,13 @@
     "sim:demo:explore": "tsx src/cli.ts --sim explore-remote-log --seed 101",
     "sim:demo:stall": "tsx src/cli.ts --sim recovery-single-hidden-obstacle --seed 101",
     "eval:offline": "tsx src/eval.ts",
-    "eval:offline:quick": "tsx src/eval.ts --seeds 5"
+    "eval:offline:quick": "tsx src/eval.ts --seeds 5",
+    "ui:demo": "tsx src/cli.ts --sim explore-remote-log --seed 101 --control-center",
+    "ui:demo:offline": "tsx src/cli.ts --demo-task --control-center",
+    "task:demo:mine": "tsx src/cli.ts --sim mine-stone-with-pickaxe --seed 101",
+    "task:minecraft:mine": "tsx src/cli.ts --task mine-stone",
+    "task:minecraft:shelter": "tsx src/cli.ts --task build-shelter",
+    "policy:status": "tsx src/cli.ts --policy status"
   },
   "dependencies": {
     "mineflayer": "4.39.0",
