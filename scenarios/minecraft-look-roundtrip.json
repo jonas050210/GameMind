@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "minecraft-look-roundtrip",
+  "seed": 1337,
+  "description": "Observe a deterministic Minecraft fixture, turn to a known view direction, and verify the updated world state.",
+  "steps": [
+    {
+      "id": "initial-observation",
+      "kind": "observe",
+      "expectedState": {
+        "player": {
+          "username": "GameMind",
+          "health": 20,
+          "food": 20,
+          "dimension": "overworld"
+        },
+        "sampledRegion": {
+          "radius": 3,
+          "sampledCells": 245,
+          "unknownCells": 0
+        }
+      }
+    },
+    {
+      "id": "orient-east",
+      "kind": "skill",
+      "skillId": "minecraft.orient",
+      "input": {
+        "yaw": 1.5707963267948966,
+        "pitch": -0.1
+      },
+      "expectedStatus": "succeeded",
+      "expectedConfirmed": true,
+      "expectedStateAfter": {
+        "player": {
+          "orientation": {
+            "yaw": 1.5707963267948966,
+            "pitch": -0.1
+          }
+        }
+      }
+    },
+    {
+      "id": "confirm-oriented-state",
+      "kind": "observe",
+      "expectedState": {
+        "player": {
+          "orientation": {
+            "yaw": 1.5707963267948966,
+            "pitch": -0.1
+          }
+        }
+      }
+    }
+  ]
+}
