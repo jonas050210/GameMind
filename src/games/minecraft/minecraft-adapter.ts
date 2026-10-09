@@ -1,0 +1,1180 @@
+import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import {
+  createBot,
+  type Bot,
+  type BotOptions,
+  type EquipmentDestination,
+} from "mineflayer";
+import { plugin as collectBlockPlugin } from "mineflayer-collectblock";
+import type { Movements as PathfinderMovements } from "mineflayer-pathfinder";
+import type { Logger } from "pino";
+import {
+  minecraftCapabilities,
+  MINECRAFT_COLLECT_BLOCK_CAPABILITY,
+  MINECRAFT_CRAFT_CAPABILITY,
+  MINECRAFT_EAT_CAPABILITY,
+  MINECRAFT_PLACE_TABLE_CAPABILITY,
+  MINECRAFT_EQUIP_CAPABILITY,
+  MINECRAFT_INSPECT_BLOCK_CAPABILITY,
+  MINECRAFT_LOOK_CAPABILITY,
+  MINECRAFT_NAVIGATE_CAPABILITY,
+  minecraftCollectBlockInputSchema,
+  minecraftCraftItemInputSchema,
+  minecraftEatFoodInputSchema,
+  minecraftPlaceTableInputSchema,
+  minecraftEquipInputSchema,
+  minecraftInspectBlockInputSchema,
+  minecraftLookInputSchema,
+  minecraftNavigateInputSchema,
+} from "./capabilities.js";
+import type { MinecraftObservation } from "./observation.js";
+import { isHostileMinecraftEntity } from "./threats.js";
+import { minecraftObservationSchema } from "./observation.js";
+import type {
+  AdapterAction,
+  AdapterActionOutcome,
+  AdapterStatus,
+  AdapterStatusChange,
+  CapabilityDefinition,
+  GameAdapter,
+  GameObservation,
+  GameSession,
+} from "../../core/types.js";
+
+const require = createRequire(import.meta.url);
+const unsafePlacementSupportNames = new Set([
+  "lava",
+  "water",
+  "fire",
+  "soul_fire",
+  "magma_block",
+  "cactus",
+]);
+const pathfinderApi = require("mineflayer-pathfinder") as typeof import("mineflayer-pathfinder");
+const toolApi = require("mineflayer-tool") as typeof import("mineflayer-tool");
+
+export interface MinecraftAdapterConfig {
+  readonly host: string;
+  readonly port: number;
+  readonly username: string;
+  readonly version: string;
+  readonly auth: "offline" | "microsoft";
+  readonly connectTimeoutMs: number;
+  readonly shutdownTimeoutMs: number;
+  readonly viewDistance: "tiny" | "short" | "normal" | "far";
+  readonly observationRadius: number;
+  readonly maxObservedBlocks: number;
+  readonly entityRadius: number;
+  readonly maxNavigationDistance: number;
+  readonly maxResourceGatherDistance: number;
+  readonly maxCraftingTableDistance: number;
+  readonly navigationStuckTimeoutMs: number;
+}
+
+export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
+  host: "127.0.0.1",
+  port: 25565,
+  username: "GameMind",
+  version: "1.20.4",
+  auth: "offline",
+  connectTimeoutMs: 15_000,
+  shutdownTimeoutMs: 2_000,
+  viewDistance: "short",
+  observationRadius: 3,
+  maxObservedBlocks: 64,
+  entityRadius: 16,
+  maxNavigationDistance: 48,
+  maxResourceGatherDistance: 24,
+  maxCraftingTableDistance: 4.5,
+  navigationStuckTimeoutMs: 10_000,
+};
+
+export type MinecraftBotFactory = (options: BotOptions) => Bot;
+
+export interface MinecraftAdapterDependencies {
+  readonly botFactory?: MinecraftBotFactory;
+  readonly installPlugins?: (bot: Bot) => void;
+  readonly configureSafeMovements?: (bot: Bot) => void;
+}
+
+class MinecraftAdapterError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "MinecraftAdapterError";
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function finiteOrNull(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function angleDifference(left: number, right: number): number {
+  let difference = (left - right) % (Math.PI * 2);
+  if (difference > Math.PI) difference -= Math.PI * 2;
+  if (difference < -Math.PI) difference += Math.PI * 2;
+  return Math.abs(difference);
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Action aborted.");
+}
+
+function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortError(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+function inventoryCount(bot: Bot, itemName: string): number {
+  return bot.inventory.items()
+    .filter((item) => item.name === itemName)
+    .reduce((sum, item) => sum + item.count, 0);
+}
+
+function hasVisibleHostileNear(bot: Bot, position: { x: number; y: number; z: number }, radius: number): boolean {
+  const playerEntityId = bot.entity.id;
+  return Object.values(bot.entities).some((entity) => {
+    if (entity.id === playerEntityId) return false;
+    const name = entity.name ?? entity.displayName ?? entity.username ?? entity.type;
+    const separation = Math.hypot(
+      entity.position.x - position.x,
+      entity.position.y - position.y,
+      entity.position.z - position.z,
+    );
+    return isHostileMinecraftEntity(name, entity.type) && separation <= radius;
+  });
+}
+
+function safeInstallPlugins(bot: Bot): void {
+  bot.loadPlugin(pathfinderApi.pathfinder);
+  bot.loadPlugin(toolApi.plugin);
+  bot.loadPlugin(collectBlockPlugin);
+}
+
+function configureConservativeMovements(bot: Bot): void {
+  if (!bot.pathfinder || !bot.collectBlock) {
+    throw new MinecraftAdapterError(
+      "Navigation and collection plugins were not installed on the Mineflayer bot.",
+      "MINECRAFT_PLUGIN_UNAVAILABLE",
+    );
+  }
+  const movements: PathfinderMovements = new pathfinderApi.Movements(bot);
+  movements.canDig = false;
+  movements.canOpenDoors = false;
+  movements.allow1by1towers = false;
+  movements.allowParkour = false;
+  movements.allowSprinting = false;
+  movements.allowFreeMotion = false;
+  movements.allowEntityDetection = true;
+  movements.maxDropDown = 1;
+  movements.infiniteLiquidDropdownDistance = false;
+  (movements as PathfinderMovements & { liquidCost: number }).liquidCost = 100;
+  movements.entityCost = 50;
+  movements.scafoldingBlocks.length = 0;
+  for (const name of [
+    "creeper",
+    "zombie",
+    "skeleton",
+    "spider",
+    "witch",
+    "enderman",
+    "husk",
+    "stray",
+    "drowned",
+    "pillager",
+    "vindicator",
+    "ravager",
+    "phantom",
+    "slime",
+    "magma_cube",
+    "blaze",
+    "ghast",
+    "hoglin",
+    "piglin_brute",
+    "warden",
+  ]) {
+    movements.entitiesToAvoid.add(name);
+  }
+  for (const name of ["lava", "fire", "soul_fire", "magma_block", "cactus"] as const) {
+    const block = bot.registry.blocksByName[name];
+    if (block) movements.blocksToAvoid.add(block.id);
+  }
+  (bot.pathfinder as typeof bot.pathfinder & { searchRadius: number }).searchRadius = 64;
+  bot.pathfinder.thinkTimeout = 5_000;
+  bot.pathfinder.setMovements(movements);
+  bot.collectBlock.movements = movements;
+}
+
+export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
+  readonly gameId = "minecraft-java";
+  readonly capabilities: readonly CapabilityDefinition[] = minecraftCapabilities;
+
+  private statusValue: AdapterStatus = "disconnected";
+  private sessionValue: GameSession | null = null;
+  private pendingSessionId: string | null = null;
+  private bot: Bot | null = null;
+  private sequence = 0;
+  private activeActionId: string | null = null;
+  private activeCapability: string | null = null;
+  private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
+  private readonly botFactory: MinecraftBotFactory;
+  private readonly installPlugins: (bot: Bot) => void;
+  private readonly configureSafeMovements: (bot: Bot) => void;
+
+  constructor(
+    private readonly logger: Logger,
+    private readonly config: MinecraftAdapterConfig = DEFAULT_MINECRAFT_CONFIG,
+    dependencies: MinecraftAdapterDependencies = {},
+  ) {
+    this.botFactory = dependencies.botFactory ?? createBot;
+    this.installPlugins = dependencies.installPlugins ?? safeInstallPlugins;
+    this.configureSafeMovements = dependencies.configureSafeMovements ?? configureConservativeMovements;
+
+    if (!config.host.trim()) throw new Error("Minecraft host must not be empty.");
+    if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65_535) {
+      throw new Error("Minecraft port must be an integer from 1 through 65535.");
+    }
+    if (!config.username.trim()) throw new Error("Minecraft username must not be empty.");
+    if (!config.version.trim()) throw new Error("Minecraft version must not be empty.");
+    if (!Number.isInteger(config.connectTimeoutMs) || config.connectTimeoutMs <= 0) {
+      throw new Error("Minecraft connection timeout must be a positive integer.");
+    }
+    if (!Number.isInteger(config.shutdownTimeoutMs) || config.shutdownTimeoutMs <= 0) {
+      throw new Error("Minecraft shutdown timeout must be a positive integer.");
+    }
+    if (!Number.isFinite(config.entityRadius) || config.entityRadius <= 0) {
+      throw new Error("Minecraft entity observation radius must be positive.");
+    }
+    if (!Number.isInteger(config.observationRadius) || config.observationRadius < 1) {
+      throw new Error("Minecraft observation radius must be a positive integer.");
+    }
+    if (!Number.isInteger(config.maxObservedBlocks) || config.maxObservedBlocks < 1) {
+      throw new Error("Maximum observed block count must be a positive integer.");
+    }
+    if (!Number.isFinite(config.maxNavigationDistance) || config.maxNavigationDistance < 1) {
+      throw new Error("Maximum navigation distance must be at least one block.");
+    }
+    if (!Number.isFinite(config.maxResourceGatherDistance) || config.maxResourceGatherDistance < 1) {
+      throw new Error("Maximum resource-gather distance must be at least one block.");
+    }
+    if (!Number.isFinite(config.maxCraftingTableDistance) || config.maxCraftingTableDistance < 1) {
+      throw new Error("Maximum crafting-table distance must be at least one block.");
+    }
+    if (!Number.isInteger(config.navigationStuckTimeoutMs) || config.navigationStuckTimeoutMs < 1_000) {
+      throw new Error("Navigation stuck timeout must be an integer of at least 1000 ms.");
+    }
+  }
+
+  get status(): AdapterStatus {
+    return this.statusValue;
+  }
+
+  get session(): GameSession | null {
+    return this.statusValue === "connected" ? this.sessionValue : null;
+  }
+
+  onStatusChange(listener: (change: AdapterStatusChange) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  async connect(): Promise<GameSession> {
+    if (this.statusValue === "connecting" || this.statusValue === "connected") {
+      if (this.sessionValue && this.statusValue === "connected") return this.sessionValue;
+      throw new Error(`Cannot connect while adapter is ${this.statusValue}.`);
+    }
+    if (this.statusValue === "stopping") {
+      throw new Error("Cannot connect while the previous Minecraft session is stopping.");
+    }
+    if (this.bot) await this.disconnect("closing stale Minecraft connection before reconnect");
+
+    const sessionId = randomUUID();
+    this.sequence = 0;
+    this.pendingSessionId = sessionId;
+    this.transition("connecting", null);
+
+    let bot: Bot;
+    try {
+      bot = this.botFactory({
+        host: this.config.host,
+        port: this.config.port,
+        username: this.config.username,
+        auth: this.config.auth,
+        version: this.config.version,
+        viewDistance: this.config.viewDistance,
+        hideErrors: true,
+        logErrors: false,
+      });
+      this.bot = bot;
+      this.installPlugins(bot);
+    } catch (error) {
+      const failedBot = this.bot;
+      this.bot = null;
+      this.pendingSessionId = null;
+      this.sessionValue = null;
+      this.transition("failed", errorMessage(error), sessionId);
+      if (failedBot) void this.quitAfterConnectFailure(failedBot, errorMessage(error));
+      throw error;
+    }
+
+    return new Promise<GameSession>((resolve, reject) => {
+      let settled = false;
+      const finishFailure = (error: Error, status: "failed" | "disconnected" = "failed") => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(connectTimer);
+        this.pendingSessionId = null;
+        this.sessionValue = null;
+        this.transition(status, error.message, sessionId);
+        reject(error);
+      };
+
+      const onSpawn = (): void => {
+        if (settled || this.bot !== bot) return;
+        try {
+          this.configureSafeMovements(bot);
+        } catch (error) {
+          const failure = error instanceof Error ? error : new Error(String(error));
+          finishFailure(failure);
+          void this.quitAfterConnectFailure(bot, failure.message);
+          return;
+        }
+        settled = true;
+        clearTimeout(connectTimer);
+        const session: GameSession = {
+          id: sessionId,
+          gameId: this.gameId,
+          gameVersion: bot.version || this.config.version,
+          connectedAt: new Date().toISOString(),
+        };
+        this.sessionValue = session;
+        this.pendingSessionId = null;
+        this.transition("connected", null);
+        resolve(session);
+      };
+
+      const onError = (error: Error): void => {
+        this.logger.error({ err: error, sessionId }, "Minecraft client emitted an error");
+        if (!settled) {
+          finishFailure(error);
+          void this.quitAfterConnectFailure(bot, error.message);
+        } else if (this.statusValue === "connected") {
+          this.sessionValue = null;
+          this.transition("failed", error.message, sessionId);
+          void this.quitAfterConnectFailure(bot, error.message);
+        }
+      };
+
+      const onKicked = (reason: string): void => {
+        const message = `Minecraft server kicked the bot: ${reason}`;
+        if (!settled) finishFailure(new Error(message), "disconnected");
+        else {
+          this.pendingSessionId = null;
+          this.sessionValue = null;
+          this.transition("disconnected", message, sessionId);
+        }
+      };
+
+      const onEnd = (reason: string): void => {
+        const message = reason || "Minecraft client connection ended.";
+        if (!settled) finishFailure(new Error(message), "disconnected");
+        this.pendingSessionId = null;
+        this.sessionValue = null;
+        if (this.bot === bot) this.bot = null;
+        this.transition("disconnected", message, sessionId);
+      };
+
+      bot.on("spawn", onSpawn);
+      bot.on("error", onError);
+      bot.on("kicked", onKicked);
+      bot.on("end", onEnd);
+
+      const connectTimer = setTimeout(() => {
+        const error = new Error(
+          `Timed out after ${this.config.connectTimeoutMs} ms waiting for Minecraft spawn.`,
+        );
+        finishFailure(error);
+        void this.quitAfterConnectFailure(bot, error.message);
+      }, this.config.connectTimeoutMs);
+    });
+  }
+
+  async observe(): Promise<GameObservation<MinecraftObservation>> {
+    const bot = this.requireConnectedBot();
+    const session = this.sessionValue;
+    if (!session) throw new MinecraftAdapterError("No active session.", "NO_ACTIVE_SESSION");
+
+    const position = bot.entity.position;
+    const nearbyBlocks: MinecraftObservation["nearbyBlocks"][number][] = [];
+    let sampledCells = 0;
+    let unknownCells = 0;
+    let truncated = false;
+    const radius = this.config.observationRadius;
+
+    for (let dx = -radius; dx <= radius; dx += 1) {
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        for (let dy = -2; dy <= 2; dy += 1) {
+          sampledCells += 1;
+          const block = bot.blockAt(position.offset(dx, dy, dz));
+          if (!block) {
+            unknownCells += 1;
+            continue;
+          }
+          if (block.name.endsWith("_air") || block.name === "air") continue;
+          if (nearbyBlocks.length >= this.config.maxObservedBlocks) {
+            truncated = true;
+            continue;
+          }
+          nearbyBlocks.push({
+            position: {
+              x: Math.floor(block.position.x),
+              y: Math.floor(block.position.y),
+              z: Math.floor(block.position.z),
+            },
+            name: block.name,
+            type: block.type,
+            boundingBox: block.boundingBox,
+          });
+        }
+      }
+    }
+
+    const playerEntityId = bot.entity.id;
+    const entities = Object.values(bot.entities)
+      .filter((entity) => entity.id !== playerEntityId)
+      .map((entity) => ({ entity, distance: entity.position.distanceTo(position) }))
+      .filter(({ distance }) => Number.isFinite(distance) && distance <= this.config.entityRadius)
+      .sort((left, right) => left.distance - right.distance)
+      .slice(0, 64)
+      .map(({ entity, distance }) => ({
+        id: String(entity.id),
+        name: entity.name ?? entity.displayName ?? entity.username ?? entity.type,
+        type: entity.type,
+        position: { x: entity.position.x, y: entity.position.y, z: entity.position.z },
+        distance,
+        health: finiteOrNull(entity.health),
+      }));
+
+    const equipmentSlot = (destination: EquipmentDestination) => {
+      const slot = bot.getEquipmentDestSlot(destination);
+      return bot.inventory.slots[slot] ?? null;
+    };
+    const state = minecraftObservationSchema.parse({
+      player: {
+        username: bot.username,
+        position: { x: position.x, y: position.y, z: position.z },
+        orientation: { yaw: bot.entity.yaw, pitch: bot.entity.pitch },
+        dimension: bot.game.dimension,
+        gameMode: bot.game.gameMode,
+        health: finiteOrNull(bot.health),
+        food: finiteOrNull(bot.food),
+        foodSaturation: finiteOrNull(bot.foodSaturation),
+        oxygenLevel: finiteOrNull(bot.oxygenLevel),
+        onGround: bot.entity.onGround,
+      },
+      inventory: bot.inventory.items().map((item) => ({
+        slot: item.slot,
+        name: item.name,
+        type: item.type,
+        count: item.count,
+        metadata: Number.isInteger(item.metadata) ? item.metadata : null,
+        durabilityUsed: finiteOrNull(item.durabilityUsed),
+      })),
+      equipment: {
+        hand: this.serializeItem(equipmentSlot("hand")),
+        "offhand": this.serializeItem(equipmentSlot("off-hand")),
+        head: this.serializeItem(equipmentSlot("head")),
+        torso: this.serializeItem(equipmentSlot("torso")),
+        legs: this.serializeItem(equipmentSlot("legs")),
+        feet: this.serializeItem(equipmentSlot("feet")),
+      },
+      entities,
+      nearbyBlocks,
+      sampledRegion: { radius, sampledCells, unknownCells, truncated },
+    });
+
+    return {
+      schemaVersion: 1,
+      gameId: this.gameId,
+      gameVersion: session.gameVersion,
+      sessionId: session.id,
+      sequence: this.sequence++,
+      observedAt: new Date().toISOString(),
+      state,
+    };
+  }
+
+  async executeAction(
+    action: AdapterAction,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const bot = this.requireConnectedBot();
+    if (!this.sessionValue || this.sessionValue.id !== action.sessionId) {
+      throw new MinecraftAdapterError("Action belongs to an expired session.", "STALE_SESSION");
+    }
+    if (this.activeActionId && this.activeActionId !== action.actionId) {
+      throw new MinecraftAdapterError("Minecraft adapter already has an active action.", "ACTION_BUSY");
+    }
+
+    this.activeActionId = action.actionId;
+    this.activeCapability = action.capability;
+    try {
+      if (signal.aborted) throw abortError(signal);
+      switch (action.capability) {
+        case MINECRAFT_LOOK_CAPABILITY:
+          return await this.executeLook(bot, action.input, signal);
+        case MINECRAFT_INSPECT_BLOCK_CAPABILITY:
+          return this.executeInspectBlock(bot, action.input);
+        case MINECRAFT_NAVIGATE_CAPABILITY:
+          return await this.executeNavigate(bot, action.input, signal);
+        case MINECRAFT_COLLECT_BLOCK_CAPABILITY:
+          return await this.executeCollectBlock(bot, action.input, signal);
+        case MINECRAFT_EQUIP_CAPABILITY:
+          return await this.executeEquip(bot, action.input, signal);
+        case MINECRAFT_CRAFT_CAPABILITY:
+          return await this.executeCraftItem(bot, action.input, signal);
+        case MINECRAFT_EAT_CAPABILITY:
+          return await this.executeEatFood(bot, action.input, signal);
+        case MINECRAFT_PLACE_TABLE_CAPABILITY:
+          return await this.executePlaceCraftingTable(bot, action.input, signal);
+        default:
+          throw new MinecraftAdapterError(
+            `Unsupported Minecraft capability '${action.capability}'.`,
+            "UNSUPPORTED_CAPABILITY",
+          );
+      }
+    } catch (error) {
+      if (signal.aborted) {
+        await this.cancelCurrentAction(bot, action.capability);
+        throw abortError(signal);
+      }
+      throw error;
+    } finally {
+      if (this.activeActionId === action.actionId) {
+        this.activeActionId = null;
+        this.activeCapability = null;
+      }
+    }
+  }
+
+  async cancelActiveAction(actionId: string, _reason: string): Promise<void> {
+    if (this.activeActionId !== actionId || !this.bot || !this.activeCapability) return;
+    await this.cancelCurrentAction(this.bot, this.activeCapability);
+  }
+
+  async disconnect(reason = "GameMind shutdown"): Promise<void> {
+    const bot = this.bot;
+    const disconnectSessionId = this.sessionValue?.id ?? this.pendingSessionId;
+    if (!bot) {
+      this.sessionValue = null;
+      this.pendingSessionId = null;
+      if (this.statusValue !== "disconnected") {
+        this.transition("disconnected", reason, disconnectSessionId);
+      }
+      return;
+    }
+
+    if (this.statusValue !== "stopping") this.transition("stopping", reason);
+    this.sessionValue = null;
+    this.pendingSessionId = null;
+
+    const ended = new Promise<void>((resolve) => {
+      if (this.bot !== bot) {
+        resolve();
+        return;
+      }
+      bot.once("end", () => resolve());
+    });
+    try {
+      bot.quit(reason);
+    } catch (error) {
+      this.logger.warn({ err: error, reason }, "Minecraft graceful quit failed; forcing socket close");
+    }
+
+    let shutdownTimer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      ended,
+      new Promise<void>((resolve) => {
+        shutdownTimer = setTimeout(resolve, this.config.shutdownTimeoutMs);
+      }),
+    ]);
+    if (shutdownTimer) clearTimeout(shutdownTimer);
+    if (this.bot === bot) {
+      try {
+        bot.end(reason);
+      } catch (error) {
+        this.logger.warn({ err: error, reason }, "Minecraft forced socket close failed");
+      }
+      this.bot = null;
+      this.transition("disconnected", reason, disconnectSessionId);
+    }
+  }
+
+  private async executeLook(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftLookInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid look parameters.", "INVALID_ACTION_INPUT");
+    const { yaw, pitch } = parsed.data;
+    await raceWithAbort(bot.look(yaw, pitch, false), signal);
+    const actualYaw = bot.entity.yaw;
+    const actualPitch = bot.entity.pitch;
+    const confirmed = angleDifference(actualYaw, yaw) <= 0.02 && Math.abs(actualPitch - pitch) <= 0.02;
+    return {
+      confirmed,
+      confirmation: "mineflayer_client_rotation_matches_request",
+      details: {
+        requestedYaw: yaw,
+        requestedPitch: pitch,
+        observedYaw: actualYaw,
+        observedPitch: actualPitch,
+        evidence:
+          "Mineflayer look operation completed and local client rotation matched; vanilla has no separate rotation acknowledgement packet.",
+      },
+    };
+  }
+
+  private executeInspectBlock(bot: Bot, input: unknown): AdapterActionOutcome {
+    const parsed = minecraftInspectBlockInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid block coordinates.", "INVALID_ACTION_INPUT");
+    const block = this.blockAtCoordinates(bot, parsed.data.x, parsed.data.y, parsed.data.z);
+    if (!block) {
+      throw new MinecraftAdapterError("Block is not loaded/observed by the client.", "BLOCK_UNKNOWN");
+    }
+    const distance = block.position.distanceTo(bot.entity.position);
+    if (distance > this.config.observationRadius + 2) {
+      throw new MinecraftAdapterError("Block is outside the local inspection radius.", "BLOCK_OUT_OF_RANGE");
+    }
+    return {
+      confirmed: true,
+      confirmation: "local_block_state_read",
+      details: {
+        position: { x: block.position.x, y: block.position.y, z: block.position.z },
+        name: block.name,
+        type: block.type,
+        boundingBox: block.boundingBox,
+        hardness: finiteOrNull(block.hardness),
+        canDig: bot.canDigBlock(block),
+      },
+    };
+  }
+
+  private async executeNavigate(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftNavigateInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid navigation target.", "INVALID_ACTION_INPUT");
+    if (!bot.pathfinder) {
+      throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
+    }
+    const { x, y, z, range } = parsed.data;
+    const from = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+    const targetDistance = Math.hypot(from.x - x, from.y - y, from.z - z);
+    if (targetDistance > this.config.maxNavigationDistance) {
+      throw new MinecraftAdapterError(
+        `Navigation target is ${targetDistance.toFixed(1)} blocks away; limit is ${this.config.maxNavigationDistance}.`,
+        "NAVIGATION_TARGET_TOO_FAR",
+      );
+    }
+    await this.navigateWithProgressWatchdog(
+      bot,
+      new pathfinderApi.goals.GoalNear(x, y, z, range),
+      signal,
+    );
+    const to = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
+    const horizontalDistance = Math.hypot(to.x - (x + 0.5), to.z - (z + 0.5));
+    const verticalDistance = Math.abs(to.y - y);
+    const confirmed = horizontalDistance <= range + 1.25 && verticalDistance <= 2;
+    return {
+      confirmed,
+      confirmation: "pathfinder_goal_reached_and_position_checked",
+      details: {
+        from,
+        to,
+        target: { x, y, z },
+        range,
+        horizontalDistance,
+        verticalDistance,
+        conservativeMovements: true,
+      },
+    };
+  }
+
+  private async navigateWithProgressWatchdog(
+    bot: Bot,
+    goal: InstanceType<typeof pathfinderApi.goals.GoalNear>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!bot.pathfinder) {
+      throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
+    }
+    await this.watchMovementProgress(
+      bot,
+      bot.pathfinder.goto(goal),
+      signal,
+      MINECRAFT_NAVIGATE_CAPABILITY,
+    );
+  }
+
+  private async watchMovementProgress<T>(
+    bot: Bot,
+    operation: Promise<T>,
+    signal: AbortSignal,
+    capability: string,
+  ): Promise<T> {
+    let lastProgressAt = Date.now();
+    let lastPosition = bot.entity.position.clone();
+    let stuckTimer: NodeJS.Timeout | undefined;
+    let stuckTriggered = false;
+    const stuck = new Promise<never>((_resolve, reject) => {
+      stuckTimer = setInterval(() => {
+        const position = bot.entity.position;
+        if (position.distanceTo(lastPosition) >= 0.2) {
+          lastPosition = position.clone();
+          lastProgressAt = Date.now();
+          return;
+        }
+        if (!stuckTriggered && Date.now() - lastProgressAt >= this.config.navigationStuckTimeoutMs) {
+          stuckTriggered = true;
+          reject(
+            new MinecraftAdapterError(
+              `Player made no movement progress for ${this.config.navigationStuckTimeoutMs} ms during '${capability}'.`,
+              "NAVIGATION_STUCK",
+            ),
+          );
+        }
+      }, Math.min(500, Math.max(100, this.config.navigationStuckTimeoutMs / 10)));
+    });
+    try {
+      return await raceWithAbort(Promise.race([operation, stuck]), signal);
+    } catch (error) {
+      if (error instanceof MinecraftAdapterError && error.code === "NAVIGATION_STUCK") {
+        await this.cancelCurrentAction(bot, capability);
+      }
+      throw error;
+    } finally {
+      if (stuckTimer) clearInterval(stuckTimer);
+    }
+  }
+
+  private async executeCollectBlock(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftCollectBlockInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid collection target.", "INVALID_ACTION_INPUT");
+    if (bot.game.dimension !== "overworld") {
+      throw new MinecraftAdapterError("This initial collection skill only supports overworld logs.", "UNSUPPORTED_DIMENSION");
+    }
+    if (!bot.collectBlock) {
+      throw new MinecraftAdapterError("Collect-block plugin is unavailable.", "COLLECTOR_UNAVAILABLE");
+    }
+    const block = this.blockAtCoordinates(bot, parsed.data.x, parsed.data.y, parsed.data.z);
+    if (!block || block.name !== parsed.data.blockName) {
+      throw new MinecraftAdapterError(
+        `Expected ${parsed.data.blockName} at the requested position, but the block is unknown or different.`,
+        "RESOURCE_TARGET_CHANGED",
+      );
+    }
+    const distance = block.position.distanceTo(bot.entity.position);
+    if (distance > this.config.maxResourceGatherDistance) {
+      throw new MinecraftAdapterError(
+        `Resource is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxResourceGatherDistance}.`,
+        "RESOURCE_TARGET_TOO_FAR",
+      );
+    }
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError(
+        `Log collection requires survival mode; current mode is '${bot.game.gameMode}'.`,
+        "GAME_MODE_BLOCKS_COLLECTION",
+      );
+    }
+    if (!bot.canDigBlock(block)) {
+      throw new MinecraftAdapterError("Minecraft client reports that this block cannot be harvested.", "BLOCK_NOT_HARVESTABLE");
+    }
+    if (hasVisibleHostileNear(bot, block.position.offset(0.5, 0.5, 0.5), parsed.data.dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${parsed.data.dangerRadius} blocks of the resource target.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
+
+    const itemName = parsed.data.blockName;
+    const inventoryBefore = inventoryCount(bot, itemName);
+    await this.watchMovementProgress(
+      bot,
+      bot.collectBlock.collect(block, { ignoreNoPath: false }),
+      signal,
+      MINECRAFT_COLLECT_BLOCK_CAPABILITY,
+    );
+    const inventoryAfter = inventoryCount(bot, itemName);
+    const remainingBlock = this.blockAtCoordinates(bot, parsed.data.x, parsed.data.y, parsed.data.z);
+    const blockRemoved = !remainingBlock || remainingBlock.name !== itemName;
+    const confirmed = inventoryAfter > inventoryBefore;
+    return {
+      confirmed,
+      confirmation: "collectblock_completed_and_inventory_delta_checked",
+      details: {
+        itemName,
+        coordinates: { x: parsed.data.x, y: parsed.data.y, z: parsed.data.z },
+        inventoryBefore,
+        inventoryAfter,
+        blockRemoved,
+      },
+    };
+  }
+
+  private async executeEquip(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftEquipInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid equipment request.", "INVALID_ACTION_INPUT");
+    const item = bot.inventory.items().find((candidate) => candidate.name === parsed.data.item);
+    if (!item) {
+      throw new MinecraftAdapterError(`Inventory does not contain '${parsed.data.item}'.`, "ITEM_NOT_IN_INVENTORY");
+    }
+    const destination = parsed.data.destination as EquipmentDestination;
+    await raceWithAbort(bot.equip(item, destination), signal);
+    const slot = bot.getEquipmentDestSlot(destination);
+    const equipped = bot.inventory.slots[slot] ?? null;
+    const confirmed = equipped?.name === parsed.data.item;
+    return {
+      confirmed,
+      confirmation: "equipment_slot_matches_requested_item",
+      details: {
+        item: parsed.data.item,
+        destination,
+        slot,
+        observedItem: equipped?.name ?? null,
+      },
+    };
+  }
+
+  private async executeCraftItem(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftCraftItemInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid craft request.", "INVALID_ACTION_INPUT");
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError("Crafting task actions require survival mode.", "GAME_MODE_BLOCKS_CRAFTING");
+    }
+    const before = inventoryCount(bot, parsed.data.item);
+    if (before >= parsed.data.count) {
+      return {
+        confirmed: true,
+        confirmation: "requested_item_count_already_in_inventory",
+        details: { item: parsed.data.item, requestedCount: parsed.data.count, inventoryBefore: before, inventoryAfter: before },
+      };
+    }
+    const itemData = bot.registry.itemsByName[parsed.data.item];
+    if (!itemData) {
+      throw new MinecraftAdapterError(`Minecraft registry has no item '${parsed.data.item}'.`, "CRAFT_ITEM_UNAVAILABLE");
+    }
+
+    let craftingTable = null;
+    if (parsed.data.craftingTable) {
+      craftingTable = this.blockAtCoordinates(
+        bot,
+        parsed.data.craftingTable.x,
+        parsed.data.craftingTable.y,
+        parsed.data.craftingTable.z,
+      );
+      if (!craftingTable || craftingTable.name !== "crafting_table") {
+        throw new MinecraftAdapterError("The observed crafting table is no longer present.", "CRAFTING_TABLE_CHANGED");
+      }
+      const distance = craftingTable.position.distanceTo(bot.entity.position);
+      if (distance > this.config.maxCraftingTableDistance) {
+        throw new MinecraftAdapterError(
+          `Crafting table is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxCraftingTableDistance}.`,
+          "CRAFTING_TABLE_TOO_FAR",
+        );
+      }
+      if (!bot.canSeeBlock(craftingTable)) {
+        throw new MinecraftAdapterError("Crafting table is occluded from the client.", "CRAFTING_TABLE_NOT_VISIBLE");
+      }
+    }
+
+    const deficit = parsed.data.count - before;
+    const recipes = bot.recipesFor(itemData.id, null, deficit, craftingTable);
+    const recipe = recipes.find((candidate) => !candidate.requiresTable || craftingTable !== null);
+    if (!recipe) {
+      throw new MinecraftAdapterError(
+        `No recipe for '${parsed.data.item}' is currently craftable with the available inventory${craftingTable ? " and crafting table" : ""}.`,
+        "CRAFTING_PREREQUISITES_UNAVAILABLE",
+      );
+    }
+    const craftRuns = Math.max(1, Math.ceil(deficit / Math.max(1, recipe.result.count)));
+    await raceWithAbort(bot.craft(recipe, craftRuns, craftingTable ?? undefined), signal);
+    const after = inventoryCount(bot, parsed.data.item);
+    return {
+      confirmed: after >= parsed.data.count,
+      confirmation: "mineflayer_craft_completed_and_inventory_delta_checked",
+      details: {
+        item: parsed.data.item,
+        requestedCount: parsed.data.count,
+        inventoryBefore: before,
+        inventoryAfter: after,
+        craftedCount: Math.max(0, after - before),
+        craftRuns,
+        usedCraftingTable: Boolean(craftingTable),
+        craftingTablePosition: parsed.data.craftingTable ?? null,
+      },
+    };
+  }
+
+  private async executeEatFood(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftEatFoodInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid food request.", "INVALID_ACTION_INPUT");
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError("Eating task actions require survival mode.", "GAME_MODE_BLOCKS_EATING");
+    }
+    const hungerBefore = finiteOrNull(bot.food);
+    if (hungerBefore === null || hungerBefore >= 20) {
+      throw new MinecraftAdapterError("Player hunger is full or unavailable; eating is not needed.", "FOOD_NOT_NEEDED");
+    }
+    const item = bot.inventory.items().find((candidate) => candidate.name === parsed.data.item);
+    if (!item) {
+      throw new MinecraftAdapterError(`Inventory does not contain '${parsed.data.item}'.`, "FOOD_NOT_IN_INVENTORY");
+    }
+    const countBefore = inventoryCount(bot, parsed.data.item);
+    await raceWithAbort(bot.equip(item, "hand"), signal);
+    await raceWithAbort(bot.consume(), signal);
+    const hungerAfter = finiteOrNull(bot.food);
+    const countAfter = inventoryCount(bot, parsed.data.item);
+    const confirmed = hungerAfter !== null && hungerAfter > hungerBefore && countAfter < countBefore;
+    return {
+      confirmed,
+      confirmation: "consumption_completed_and_hunger_plus_inventory_checked",
+      details: {
+        item: parsed.data.item,
+        hungerBefore,
+        hungerAfter,
+        foodCountBefore: countBefore,
+        foodCountAfter: countAfter,
+        evidence:
+          "Mineflayer consume promise completed; confirmation requires both a server-observed hunger increase and a decrease in the selected inventory stack.",
+      },
+    };
+  }
+
+  private async executePlaceCraftingTable(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftPlaceTableInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid crafting-table placement target.", "INVALID_ACTION_INPUT");
+    if (bot.game.gameMode !== "survival") {
+      throw new MinecraftAdapterError("Placing a crafting table requires survival mode.", "GAME_MODE_BLOCKS_PLACEMENT");
+    }
+    const tableItem = bot.inventory.items().find((item) => item.name === "crafting_table");
+    if (!tableItem) {
+      throw new MinecraftAdapterError("Inventory does not contain a crafting table.", "CRAFTING_TABLE_NOT_IN_INVENTORY");
+    }
+    const { x, y, z } = parsed.data;
+    const destination = this.blockAtCoordinates(bot, x, y, z);
+    if (!destination || (destination.name !== "air" && !destination.name.endsWith("_air"))) {
+      throw new MinecraftAdapterError("Crafting-table destination is unknown or occupied.", "PLACEMENT_CELL_NOT_EMPTY");
+    }
+    const support = this.blockAtCoordinates(bot, x, y - 1, z);
+    if (
+      !support ||
+      support.boundingBox !== "block" ||
+      unsafePlacementSupportNames.has(support.name) ||
+      !bot.canSeeBlock(support)
+    ) {
+      throw new MinecraftAdapterError("Crafting-table destination has no visible safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
+    }
+    const distance = destination.position.distanceTo(bot.entity.position);
+    if (distance > this.config.maxCraftingTableDistance) {
+      throw new MinecraftAdapterError(
+        `Crafting-table placement is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxCraftingTableDistance}.`,
+        "PLACEMENT_TARGET_TOO_FAR",
+      );
+    }
+    if (hasVisibleHostileNear(bot, destination.position.offset(0.5, 0.5, 0.5), parsed.data.dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${parsed.data.dangerRadius} blocks of the crafting-table destination.`,
+        "PLACEMENT_TARGET_THREATENED",
+      );
+    }
+    const playerDistance = Math.hypot(bot.entity.position.x - (x + 0.5), bot.entity.position.z - (z + 0.5));
+    if (playerDistance < 0.9 && Math.abs(bot.entity.position.y - y) < 2) {
+      throw new MinecraftAdapterError("Crafting-table placement would intersect the player.", "PLACEMENT_INTERSECTS_PLAYER");
+    }
+    const nearbyEntity = Object.values(bot.entities).find(
+      (entity) => entity.id !== bot.entity.id && entity.position.distanceTo(destination.position.offset(0.5, 0.5, 0.5)) < 1.1,
+    );
+    if (nearbyEntity) {
+      throw new MinecraftAdapterError("Crafting-table placement cell is occupied by an entity.", "PLACEMENT_INTERSECTS_ENTITY");
+    }
+
+    const countBefore = inventoryCount(bot, "crafting_table");
+    await raceWithAbort(bot.equip(tableItem, "hand"), signal);
+    await raceWithAbort(bot.placeBlock(support, bot.entity.position.offset(0, 1, 0).subtract(bot.entity.position)), signal);
+    const placed = this.blockAtCoordinates(bot, x, y, z);
+    const countAfter = inventoryCount(bot, "crafting_table");
+    const confirmed = placed?.name === "crafting_table" && countAfter < countBefore;
+    return {
+      confirmed,
+      confirmation: "crafting_table_block_and_inventory_delta_checked",
+      details: {
+        position: { x, y, z },
+        support: { x, y: y - 1, z, name: support.name },
+        inventoryBefore: countBefore,
+        inventoryAfter: countAfter,
+        placedBlock: placed?.name ?? null,
+      },
+    };
+  }
+
+  private cancelCurrentAction(bot: Bot, capability: string): Promise<void> {
+    const work: Promise<unknown>[] = [];
+    try {
+      if (capability === MINECRAFT_NAVIGATE_CAPABILITY && bot.pathfinder) {
+        bot.pathfinder.setGoal(null);
+      }
+      if (capability === MINECRAFT_COLLECT_BLOCK_CAPABILITY) {
+        bot.pathfinder?.setGoal(null);
+        if (bot.collectBlock) work.push(bot.collectBlock.cancelTask());
+      }
+      bot.clearControlStates();
+      bot.stopDigging();
+      if (capability === MINECRAFT_LOOK_CAPABILITY && bot.entity) {
+        work.push(bot.look(bot.entity.yaw, bot.entity.pitch, true));
+      }
+    } catch (error) {
+      this.logger.warn({ err: error, capability }, "Minecraft action cancellation command failed");
+    }
+    return Promise.allSettled(work).then(() => undefined);
+  }
+
+  private blockAtCoordinates(bot: Bot, x: number, y: number, z: number) {
+    return bot.blockAt(
+      bot.entity.position.offset(x - bot.entity.position.x, y - bot.entity.position.y, z - bot.entity.position.z),
+    );
+  }
+
+  private serializeItem(item: ReturnType<Bot["inventory"]["items"]>[number] | null) {
+    if (!item) return null;
+    return {
+      slot: item.slot,
+      name: item.name,
+      type: item.type,
+      count: item.count,
+      metadata: Number.isInteger(item.metadata) ? item.metadata : null,
+      durabilityUsed: finiteOrNull(item.durabilityUsed),
+    };
+  }
+
+  private requireConnectedBot(): Bot {
+    if (this.statusValue !== "connected" || !this.bot || !this.sessionValue) {
+      throw new MinecraftAdapterError("Minecraft adapter is not connected.", "NOT_CONNECTED");
+    }
+    if (!this.bot.entity?.position) {
+      throw new MinecraftAdapterError("Minecraft player entity is not ready.", "PLAYER_NOT_SPAWNED");
+    }
+    return this.bot;
+  }
+
+  private transition(
+    status: AdapterStatus,
+    reason: string | null,
+    sessionIdOverride?: string | null,
+  ): void {
+    this.statusValue = status;
+    const change: AdapterStatusChange = {
+      status,
+      at: new Date().toISOString(),
+      sessionId:
+        sessionIdOverride === undefined
+          ? this.sessionValue?.id ?? this.pendingSessionId
+          : sessionIdOverride,
+      reason,
+    };
+    for (const listener of this.statusListeners) {
+      try {
+        listener(change);
+      } catch (error) {
+        this.logger.error({ err: error, status }, "GameMind adapter status listener failed");
+      }
+    }
+  }
+
+  private async quitAfterConnectFailure(bot: Bot, reason: string): Promise<void> {
+    let settleEnd: ((outcome: "ended" | "timeout") => void) | undefined;
+    const endOutcome = new Promise<"ended" | "timeout">((resolve) => {
+      settleEnd = resolve;
+    });
+    const onEnd = (): void => settleEnd?.("ended");
+    bot.once("end", onEnd);
+    const timer = setTimeout(() => settleEnd?.("timeout"), this.config.shutdownTimeoutMs);
+    try {
+      bot.quit(reason);
+    } catch (error) {
+      this.logger.warn({ err: error }, "Graceful quit failed for an unsuccessful Minecraft connection");
+      try {
+        bot.end(reason);
+      } catch (endError) {
+        this.logger.warn({ err: endError }, "Could not force-close a failed Minecraft connection");
+      }
+    }
+    const outcome = await endOutcome;
+    clearTimeout(timer);
+    bot.removeListener("end", onEnd);
+    if (outcome === "timeout") {
+      try {
+        bot.end(reason);
+      } catch (error) {
+        this.logger.warn({ err: error }, "Timed-out Minecraft connection could not be force-closed");
+      }
+    }
+  }
+}
+
+export function minecraftAdapterConfigFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): MinecraftAdapterConfig {
+  const port = Number(env.MINECRAFT_PORT ?? DEFAULT_MINECRAFT_CONFIG.port);
+  const connectTimeoutMs = Number(
+    env.MINECRAFT_CONNECT_TIMEOUT_MS ?? DEFAULT_MINECRAFT_CONFIG.connectTimeoutMs,
+  );
+  const authValue = env.MINECRAFT_AUTH ?? DEFAULT_MINECRAFT_CONFIG.auth;
+  if (authValue !== "offline" && authValue !== "microsoft") {
+    throw new Error("MINECRAFT_AUTH must be either 'offline' or 'microsoft'.");
+  }
+
+  return {
+    ...DEFAULT_MINECRAFT_CONFIG,
+    host: env.MINECRAFT_HOST ?? DEFAULT_MINECRAFT_CONFIG.host,
+    port,
+    username: env.MINECRAFT_USERNAME ?? DEFAULT_MINECRAFT_CONFIG.username,
+    version: env.MINECRAFT_VERSION ?? DEFAULT_MINECRAFT_CONFIG.version,
+    auth: authValue,
+    connectTimeoutMs,
+  };
+}

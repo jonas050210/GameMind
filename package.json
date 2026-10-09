@@ -1,0 +1,38 @@
+{
+  "name": "gamemind",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A modular, observable game-AI runtime with a Minecraft Java adapter.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/src/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "tsx --test test/*.test.ts",
+    "scenario:demo": "tsx src/cli.ts --demo",
+    "scenario:minecraft": "tsx src/cli.ts --minecraft --look-yaw 1.5707963267948966 --look-pitch 0",
+    "task:demo": "tsx src/cli.ts --demo-task",
+    "task:demo:craft": "tsx src/cli.ts --demo-task craft-wooden-pickaxe",
+    "task:minecraft": "tsx src/cli.ts --task gather-logs",
+    "task:minecraft:craft": "tsx src/cli.ts --task craft-wooden-pickaxe"
+  },
+  "dependencies": {
+    "mineflayer": "4.39.0",
+    "mineflayer-collectblock": "1.6.0",
+    "mineflayer-pathfinder": "2.4.5",
+    "mineflayer-tool": "1.2.0",
+    "pino": "10.4.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}
