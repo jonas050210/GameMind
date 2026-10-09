@@ -15,7 +15,16 @@ const boot = (() => {
 })();
 
 const TOKEN = typeof boot.token === "string" ? boot.token : "";
-const state = { snapshot: null, stream: null, lastError: null, busy: false, pollTimer: null };
+const state = { snapshot: null, lastError: null, busy: false, pollTimer: null };
+
+/*
+  The page pulls one snapshot per tick; there is no push channel. The interval widens while the agent is
+  idle and while the tab is hidden, so an operator watching a live run sees each step while an open-but-
+  unwatched page costs the agent nothing.
+*/
+const POLL_RUNNING_MS = 1_000;
+const POLL_IDLE_MS = 3_000;
+const POLL_HIDDEN_MS = 15_000;
 
 const el = (id) => document.getElementById(id);
 const clear = (node) => node && node.replaceChildren();
@@ -90,7 +99,7 @@ function render() {
   renderPerformance(snapshot);
   renderSkills(snapshot);
   renderActions(snapshot);
-  renderEvents(snapshot);
+  renderBlocker(snapshot);
 }
 
 function renderHeader(snapshot) {
@@ -101,7 +110,13 @@ function renderHeader(snapshot) {
   el("connection-text").textContent =
     adapter === "connected"
       ? `${connection.gameId ?? "adapter"} · seq ${connection.sequence ?? 0}`
-      : `adapter ${adapter}`;
+      : `adapter ${adapter}${connection.statusReason ? ` · ${connection.statusReason}` : ""}`;
+  el("connection-text").title = [
+    `adapter: ${adapter}`,
+    connection.statusChangedAt ? `since ${connection.statusChangedAt}` : null,
+    connection.statusReason ? `reason: ${connection.statusReason}` : "reason: none reported",
+    connection.worldAvailable ? "world: live observation available" : "world: no live observation",
+  ].filter(Boolean).join("\n");
   const agent = snapshot.agent ?? {};
   const agentPill = el("agent-pill");
   const agentState = snapshot.safety?.tripped ? "tripped" : agent.state ?? "idle";
@@ -138,8 +153,10 @@ function renderRun(snapshot) {
   progress.parentElement?.setAttribute("aria-valuemax", String(maxActions));
   progress.parentElement?.setAttribute("aria-valuenow", String(Math.min(actionsUsed, maxActions)));
   el("run-hint").textContent = agent.startedAt ? `started ${ago(agent.startedAt)}` : "no run in progress";
-  if (agent.failure) {
-    el("run-hint").textContent = `failure: ${agent.failure.code ?? "unknown"}`;
+  const blocker = agent.blocker;
+  if (blocker && blocker.kind !== "none") {
+    el("run-hint").textContent = blocker.headline;
+    el("run-hint").title = [blocker.detail, blocker.hint].filter(Boolean).join("\n\n");
   }
   const budget = el("budget-input");
   if (document.activeElement !== budget && agent.maxActions != null) budget.value = String(agent.maxActions);
@@ -158,6 +175,41 @@ function renderRun(snapshot) {
   const startButton = document.querySelector("#task-form button[type=submit]");
   if (startButton) startButton.disabled = state.busy || agent.state === "running" || agent.state === "paused" || agent.state === "tripped";
   el("actions-hint").textContent = `${(snapshot.recentActions ?? []).length} action(s) in trace window`;
+}
+
+/**
+ * The one panel that answers "why is it not moving?". The classification comes from the agent (there is a
+ * single classifier in the runtime) and the text is the source's own words: the panel never rewrites a
+ * reason into a friendlier sentence, because the exact wording is what makes a live bug reportable.
+ */
+function renderBlocker(snapshot) {
+  const host = el("blocker");
+  if (!host) return;
+  clear(host);
+  const blocker = snapshot.agent?.blocker ?? null;
+  const kind = blocker?.kind ?? "none";
+  host.dataset.kind = kind;
+  if (!blocker || kind === "none") {
+    const row = node("div", "blocker-clear");
+    row.append(
+      chip(blocker?.label === "running" ? "acting" : "idle", { tone: "good" }),
+      node("span", null, blocker?.detail ?? "Nothing is blocking the agent."),
+    );
+    host.append(row);
+    el("blocker-note").textContent = "";
+    return;
+  }
+  const head = node("div", "blocker-head");
+  head.append(
+    chip(blocker.label ?? kind, { tone: kind === "safety" ? "warn" : "bad" }),
+    node("b", null, blocker.code ?? "no code"),
+    node("span", "blocker-owner", `owner: ${blocker.owner ?? "unknown"} · source: ${blocker.source ?? "unknown"} · ${blocker.retryable ? "the agent can retry" : "needs an outside change"}`),
+  );
+  host.append(head);
+  host.append(node("p", "blocker-detail", blocker.detail ?? "no reason text was reported"));
+  if (blocker.hint) host.append(node("p", "blocker-hint", blocker.hint));
+  if (blocker.at) host.append(node("p", "blocker-at", `recorded ${ago(blocker.at)} (${clock(blocker.at)})`));
+  el("blocker-note").textContent = blocker.headline ?? "";
 }
 
 function renderGoal(snapshot) {
@@ -356,28 +408,55 @@ function renderLearning(snapshot) {
 
 function renderWorld(snapshot) {
   const world = snapshot.world ?? {};
+  const facts = world.sessionFacts ?? null;
   const vitals = el("vitals");
   clear(vitals);
   const health = typeof world.health === "number" ? world.health : null;
   const food = typeof world.food === "number" ? world.food : null;
   vitals.append(
-    vital("Health", health === null ? "—" : `${num(health, 1)} / 20`, health === null ? null : Math.max(0, Math.min(1, health / 20)), health === null ? null : health < 8 ? "bad" : health < 14 ? "warn" : null),
-    vital("Hunger", food === null ? "—" : `${num(food)} / 20`, food === null ? null : Math.max(0, Math.min(1, food / 20)), food === null ? null : food < 6 ? "bad" : food < 12 ? "warn" : null),
+    vital("Health", health === null ? "not reported" : `${num(health, 1)} / 20`, health === null ? null : Math.max(0, Math.min(1, health / 20)), health === null ? "warn" : health < 8 ? "bad" : health < 14 ? "warn" : null),
+    vital("Hunger", food === null ? "not reported" : `${num(food)} / 20`, food === null ? null : Math.max(0, Math.min(1, food / 20)), food === null ? "warn" : food < 6 ? "bad" : food < 12 ? "warn" : null),
     vital("Position", world.position ? `${num(world.position.x, 0)} ${num(world.position.y, 0)} ${num(world.position.z, 0)}` : "—", null, null, "mono"),
-    vital("Time", world.time ? `${num(world.time.dayTicks)} ticks${world.time.isNight ? " · night" : " · day"}` : "—", null, null),
-    vital("Air", world.airTicks == null ? "—" : `${num(world.airTicks)} ticks`, null, world.airTicks != null && world.airTicks < 100 ? "bad" : null),
-    vital("Mode", [world.dimension, world.gameMode].filter(Boolean).join(" · ") || "—", null, null),
+    vital(
+      "Time",
+      world.time
+        ? `${world.time.dayTicks === null || world.time.dayTicks === undefined ? "ticks not reported" : `${num(world.time.dayTicks)} ticks`} · ${world.time.isNight ? "night" : "day"}${world.time.source ? ` (${world.time.source})` : ""}`
+        : "not reported",
+      null,
+      world.time ? null : "warn",
+    ),
+    // The gauge tops out at 300 ticks = 20 levels of air; "—" here means the session never sent one,
+    // which is a different situation from full lungs and must not be drawn as a full bar.
+    vital("Air", world.airTicks == null ? "not reported" : `${num(world.airTicks)} / 300 ticks`, world.airTicks == null ? null : Math.max(0, Math.min(1, world.airTicks / 300)), world.airTicks != null && world.airTicks < 100 ? "bad" : null),
+    vital("Dimension", factText(facts?.dimension, world.dimension), null, factTone(facts?.dimension), "mono"),
+    vital("Game mode", factText(facts?.gameMode, world.gameMode), null, factTone(facts?.gameMode), "mono"),
     vital("On ground", world.onGround === null || world.onGround === undefined ? "—" : world.onGround ? "yes" : "no", null, world.onGround === false ? "warn" : null),
-    vital("Life state", world.alive === null || world.alive === undefined ? "unknown" : world.alive ? "alive" : "dead", null, world.alive === false ? "bad" : null),
+    // "not reported" is load-bearing: the agent reads it as 'not proven dead', so a session that never
+    // sent a health packet must not be shown as a death.
+    vital("Life state", world.alive === null || world.alive === undefined ? "not reported" : world.alive ? "alive" : "dead", null, world.alive === false ? "bad" : null),
+    vital("Vitals seen", world.vitalsObservedAt ? ago(world.vitalsObservedAt) : "never in this session", null, world.vitalsObservedAt ? null : "warn"),
     vital("Deaths", world.deathCount === null || world.deathCount === undefined ? "—" : world.deathCount, null, world.deathCount ? "warn" : null),
     vital("Inventory full", world.inventoryFull === null || world.inventoryFull === undefined ? "—" : world.inventoryFull ? "yes" : "no", null, world.inventoryFull ? "bad" : null),
   );
   const census = Object.values(world.knownResourceBlocks ?? {}).reduce((total, count) => total + count, 0);
   el("world-hint").textContent = `explored ${world.exploredCells ?? 0} cells · ${world.minableBlocks ?? 0} minable · ${census} resources remembered`;
+  const freshness = world.freshness ?? null;
+  const provenance = world.provenance ?? null;
+  const stale = freshness?.stale === true || provenance?.source === "world-memory";
+  const freshnessLine = el("world-freshness");
+  if (freshnessLine) {
+    freshnessLine.dataset.state = stale ? "stale" : "live";
+    freshnessLine.textContent = freshnessReason(freshness, provenance, snapshot.connection ?? {});
+    if (facts?.lastChange) {
+      freshnessLine.title = `last session change (${facts.lastChange.kind}): ${facts.lastChange.detail} at ${facts.lastChange.at}`;
+    }
+  }
   const rememberedCount = (world.blocks ?? []).filter((block) => block.remembered).length;
   const visibleCount = (world.blocks ?? []).filter((block) => !block.remembered).length;
   const mapMeta = el("map-meta");
-  if (mapMeta) mapMeta.textContent = `${visibleCount} current · ${rememberedCount} last seen · ${world.perception?.loadedChunks ?? "?"} loaded chunks`;
+  if (mapMeta) mapMeta.textContent = stale
+    ? `${rememberedCount} remembered · ${visibleCount} live · no current observation`
+    : `${visibleCount} current · ${rememberedCount} last seen · ${world.perception?.loadedChunks ?? "?"} loaded chunks`;
   const inventory = el("inventory");
   clear(inventory);
   const items = world.inventory ?? [];
@@ -402,7 +481,44 @@ function renderWorld(snapshot) {
   } else {
     hostiles.append(node("span", "item empty", (world.entities ?? []).length ? "no hostiles in view" : "no entities observed"));
   }
-  drawMinimap(world);
+  drawMinimap(world, { stale: stale === true, provenance: provenance?.source ?? "world-memory" });
+}
+
+/** Renders one session fact as `value · evidence`; an unknown value is spelled out, never guessed. */
+function factText(fact, fallback) {
+  if (!fact) return fallback ? String(fallback) : "not reported";
+  const shown = fact.value === null || fact.value === undefined ? "not reported" : String(fact.value);
+  switch (fact.evidence) {
+    case "verified":
+      return `${shown} · verified (${fact.source})`;
+    case "single-source":
+      return `${shown} · one source (${fact.source})`;
+    case "conflicting":
+      return `unknown · sources disagree (${fact.note ?? fact.observed})`;
+    default:
+      return `unknown · ${fact.note ?? "not reported by the session"}`;
+  }
+}
+
+function factTone(fact) {
+  if (!fact) return "warn";
+  if (fact.value === null || fact.evidence === "conflicting") return "warn";
+  return null;
+}
+
+/** Says exactly which observation the panel is showing and how old it is. */
+function freshnessReason(freshness, provenance, connection) {
+  if (provenance?.source === "simulated") return "simulated world — not a live Minecraft observation";
+  if (!freshness || freshness.reason === "no-observation") {
+    return connection.adapterStatus === "connected"
+      ? "no observation yet — the agent has not read the world in this session"
+      : `no live observation — the adapter is ${connection.adapterStatus ?? "unknown"}`;
+  }
+  const age = freshness.ageMs == null ? "?" : `${Math.round(freshness.ageMs / 1000)}s`;
+  if (freshness.reason === "session-changed") return `stale — observation #${freshness.sequence} came from a previous session`;
+  if (freshness.stale) return `stale — observation #${freshness.sequence} is ${age} old`;
+  const extra = provenance?.source === "world-memory" ? " · remembered blocks only" : "";
+  return `live — observation #${freshness.sequence} (${age} old)${extra}`;
 }
 
 function renderPerformance(snapshot) {
@@ -465,8 +581,8 @@ function vital(label, value, ratio, tone, className) {
  * WebGL geometry sourced only from current observed blocks plus wireframe, last-seen memory markers.
  * Unknown and unloaded terrain is never synthesized.
  */
-function drawMinimap(world) {
-  drawWorldView(world);
+function drawMinimap(world, options) {
+  drawWorldView(world, options ?? { stale: true, provenance: "world-memory" });
 }
 
 function renderSkills(snapshot) {
@@ -526,56 +642,6 @@ function renderActions(snapshot) {
     /escape|flee|recover|rest|retreat|defend|regain/i.test(`${action.goalId ?? ""} ${action.skillId ?? ""}`),
   ).length;
   el("actions-hint").textContent = `${(snapshot.recentActions ?? []).length} action(s) kept in memory${recovery ? ` · ${recovery} recovery/defence action(s)` : ""}`;
-}
-
-function eventSummary(event) {
-  const data = event.data ?? {};
-  if (event.eventType === "player.death") {
-    return `Health ${data.health ?? "unknown"} · death count ${data.deathCount ?? "not reported"} · waiting for respawn`;
-  }
-  if (event.eventType === "decision.made") {
-    const selected = data.selected;
-    return typeof selected === "object" && selected !== null
-      ? `${selected.goalId ?? "goal"}${selected.targetKey ? ` · ${selected.targetKey}` : ""}${data.summary ? ` — ${data.summary}` : ""}`
-      : String(data.summary ?? "decision recorded");
-  }
-  if (event.eventType === "task.started") {
-    const task = data.task;
-    return typeof task === "object" && task !== null ? `${task.kind ?? "task"} · ${task.id ?? ""}` : "task loop started";
-  }
-  if (event.eventType === "skill.completed") {
-    return `${data.skillId ?? "skill"} · ${data.status ?? "result unknown"}${data.durationMs != null ? ` · ${num(data.durationMs)} ms` : ""}`;
-  }
-  if (event.eventType === "task.completed") {
-    const failure = data.failure;
-    return `${data.status ?? "task ended"}${typeof failure === "object" && failure !== null ? ` · ${failure.code ?? "failure"}` : ""}`;
-  }
-  if (event.eventType === "task.action") {
-    const action = data.action;
-    return typeof action === "object" && action !== null
-      ? `${action.skillId ?? action.capability ?? "action"} · ${action.status ?? "unknown"}${action.verification ? ` · ${action.verification}` : ""}`
-      : "task action recorded";
-  }
-  if (event.eventType.includes("safety")) return String(data.message ?? data.code ?? "safety policy event");
-  return String(data.summary ?? data.message ?? data.code ?? event.eventType.replaceAll(".", " "));
-}
-
-function renderEvents(snapshot) {
-  const list = el("events");
-  if (!list) return;
-  clear(list);
-  for (const event of (snapshot.recentEvents ?? []).slice(0, 24)) {
-    const item = document.createElement("li");
-    const tone = event.eventType === "player.death" || /failed|denied|refused/.test(event.eventType) ? "bad" : /completed|succeeded/.test(event.eventType) ? "good" : "normal";
-    item.dataset.tone = tone;
-    item.append(node("time", null, clock(event.timestamp)));
-    const detail = node("div", null);
-    detail.append(node("b", null, event.eventType));
-    detail.append(node("p", null, eventSummary(event)));
-    item.append(detail);
-    list.append(item);
-  }
-  if (!list.childElementCount) list.append(node("li", "empty-event", "Waiting for a decision or action trace…"));
 }
 
 function renderOffline(snapshot) {
@@ -713,58 +779,44 @@ function wireControls() {
   }
 }
 
-function connect() {
-  if (typeof EventSource !== "function") {
-    state.pollTimer = setInterval(() => void loadSnapshot(false), 2000);
-    return;
-  }
-  const stream = new EventSource("/api/stream");
-  state.stream = stream;
-  stream.addEventListener("snapshot", (event) => {
-    try {
-      state.snapshot = JSON.parse(event.data);
-      render();
-      renderOffline(state.snapshot);
-    } catch {
-      void loadSnapshot(true);
-    }
-  });
-  stream.addEventListener("change", () => void loadSnapshot(true));
-  // A trace event means the agent just acted: refresh shortly after, coalescing a burst of events into
-  // one request so a long action chain does not turn the stream into a polling loop.
-  let traceRefresh = 0;
-  stream.addEventListener("trace", () => {
-    if (traceRefresh) return;
-    traceRefresh = setTimeout(() => {
-      traceRefresh = 0;
-      void loadSnapshot(false);
-    }, 150);
-  });
-  stream.addEventListener("command", (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (data?.message) toast(`${data.type}: ${data.message}`, data.ok ? "good" : "bad");
-    } catch {
-      // The command result was already shown by the fetch response.
-    }
+/* ------------------------------------------------------------------ polling */
+
+/** How hard the page should look at the agent right now. */
+function desiredPollDelay(snapshot) {
+  if (typeof document !== "undefined" && document.hidden) return POLL_HIDDEN_MS;
+  const agent = snapshot?.agent ?? null;
+  if (!agent) return POLL_IDLE_MS;
+  if (agent.state === "running" || agent.state === "stopping" || state.busy) return POLL_RUNNING_MS;
+  return POLL_IDLE_MS;
+}
+
+/**
+ * One request in flight at a time, rescheduled after each answer. A fixed interval would stack requests on
+ * a slow snapshot — and a slow snapshot is exactly what a busy agent with a large world view looks like —
+ * so the loop waits for the previous one instead of overlapping it.
+ */
+function schedulePoll(delayMs) {
+  if (state.pollTimer) clearTimeout(state.pollTimer);
+  state.pollTimer = setTimeout(() => {
+    void (async () => {
+      await loadSnapshot(state.snapshot === null);
+      schedulePoll(desiredPollDelay(state.snapshot));
+    })();
+  }, delayMs);
+}
+
+function startPolling() {
+  document.addEventListener("visibilitychange", () => {
+    // Returning to a tab that was hidden must not leave a fifteen-second-old world on screen looking live.
     void loadSnapshot(true);
+    schedulePoll(desiredPollDelay(state.snapshot));
   });
-  stream.addEventListener("closing", () => stream.close());
-  stream.onerror = () => {
-    el("connection-pill").dataset.state = "degraded";
-    el("connection-text").textContent = "reconnecting to the agent…";
-  };
+  schedulePoll(POLL_RUNNING_MS);
 }
 
 if (typeof boot.title === "string" && boot.title.length) {
   el("title").textContent = boot.title;
 }
 wireControls();
-connect();
 void loadSnapshot(true);
-// If the event stream is gone (proxy restart, closed socket) fall back to polling, so the dashboard
-// keeps showing live state instead of freezing on its last frame.
-setInterval(() => {
-  const disconnected = !state.stream || state.stream.readyState === EventSource.CLOSED;
-  if (disconnected) void loadSnapshot(false);
-}, 3000);
+startPolling();

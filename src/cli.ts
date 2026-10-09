@@ -32,8 +32,37 @@ import { evaluationScenarios } from "./testing/eval/scenarios.js";
 import { SimulatedMinecraftAdapter } from "./testing/simulated-minecraft/adapter.js";
 import { loadScenario } from "./testing/scenario.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
+import { classifyFailure } from "./core/failure-taxonomy.js";
 
 type TaskChoice = ControlCenterTaskKind;
+
+/**
+ * The failure category the Control Center shows, attached to the CLI report too so stdout and the
+ * dashboard can never disagree about whether a stop was a safety refusal, a missing capability, a
+ * connection fault or a task that ran out of budget.
+ */
+function failureClassification(result: MinecraftTaskResult): Record<string, unknown> {
+  if (result.status === "succeeded" && result.failure === null) return {};
+  const classified = classifyFailure(result.failure?.code ?? null, result.failure?.message ?? null);
+  return {
+    classification: {
+      status: result.status,
+      kind: classified.kind,
+      label: classified.label,
+      code: classified.code,
+      owner: classified.owner,
+      retryable: classified.retryable,
+      ...(classified.hint ? { hint: classified.hint } : {}),
+    },
+  };
+}
+
+/** One line for the process error: what stopped, in whose component, with the source's own words kept. */
+function failureLine(result: MinecraftTaskResult, taskDescription: string): string {
+  const classified = classifyFailure(result.failure?.code ?? null, result.failure?.message ?? null);
+  const head = `${classified.label} · ${classified.code ?? "no code"} · ${classified.owner}`;
+  return `Minecraft ${taskDescription} task ended with status '${result.status}' (${head}): ${result.failure?.message ?? "the task reported no reason"}`;
+}
 
 type PolicyChoice = "status" | "promote" | "reject";
 
@@ -673,10 +702,11 @@ async function runDemoTask(
       worldKey: "offline-fixture-1337",
       offlineNote: "Offline demo: the world is a fixture, not a Minecraft server.",
       extraRunnerOptions: {},
-      report: (result) => console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result }, null, 2)),
+      report: (result) =>
+        console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result, ...failureClassification(result) }, null, 2)),
     });
     const result = await run(task);
-    console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result }, null, 2));
+    console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result, ...failureClassification(result) }, null, 2));
     if (host) {
       console.log(`Control Center for this offline run: ${host.handle?.url} (left open until Ctrl-C)`);
       await host.waitUntil(signal.signal);
@@ -745,6 +775,7 @@ async function runSimulatedScenario(
             starvationTicks: adapter.world.stats.starvationTicks,
           },
           ...result,
+          ...failureClassification(result),
         },
         null,
         2,
@@ -863,7 +894,8 @@ async function runMinecraft(
           memory: persistentMemory,
           offlineNote: null,
           extraRunnerOptions: {},
-          report: (result, source) => console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result }, null, 2)),
+          report: (result, source) =>
+            console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result, ...failureClassification(result) }, null, 2)),
         })
       ).host;
     }
@@ -876,7 +908,7 @@ async function runMinecraft(
             memory: persistentMemory,
             allowCombat: options.allowCombat,
           }).run(task);
-      console.log(JSON.stringify({ type: "task-report", startedBy: "cli", ...result }, null, 2));
+      console.log(JSON.stringify({ type: "task-report", startedBy: "cli", ...result, ...failureClassification(result) }, null, 2));
       if (host) {
         // The operator keeps the dashboard open after the task so the trace and the learning result stay
         // readable; a second task can be started from the UI against the same live session.
@@ -885,9 +917,7 @@ async function runMinecraft(
         await host.close();
       }
       if (result.status !== "succeeded") {
-        throw new Error(
-          `Minecraft ${options.task} task ended with status '${result.status}': ${result.failure?.message ?? "unknown task result"}`,
-        );
+        throw new Error(failureLine(result, String(options.task)));
       }
     } else if (options.lookYaw !== undefined) {
       const result = await skills.run("minecraft.orient", {

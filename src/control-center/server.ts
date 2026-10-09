@@ -9,7 +9,6 @@ import type {
   ControlCenterServerOptions,
   ControlCenterHandle,
   ControlCenterSnapshot,
-  ControlCenterTraceEvent,
 } from "./types.js";
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -57,10 +56,8 @@ async function readBody(request: import("node:http").IncomingMessage): Promise<s
  */
 export class ControlCenter {
   private readonly server: Server;
-  private readonly clients = new Set<import("node:http").ServerResponse>();
   private readonly token = randomUUID();
   private readonly staticDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
-  private readonly heartbeatMs: number;
   private snapshotCache: { at: number; value: ControlCenterSnapshot } | null = null;
   private lastSequence: number | null = null;
   private portValue = 0;
@@ -69,7 +66,6 @@ export class ControlCenter {
     private readonly host: ControlCenterHost,
     private readonly options: ControlCenterServerOptions = {},
   ) {
-    this.heartbeatMs = options.heartbeatMs ?? 1_500;
     this.server = createServer((request, response) => {
       void this.route(request, response).catch((error: unknown) => {
         this.options.logger?.warn(`Control Center request failed: ${String(error)}`);
@@ -107,33 +103,12 @@ export class ControlCenter {
       url: this.url,
       token: this.token,
       stop: (reason) => this.stop(reason),
-      notify: (event) => this.publish("change", { at: new Date().toISOString(), reason: event ?? "state" }),
-      broadcast: (event) => this.publish("trace", event),
     };
   }
 
-  async stop(reason = "closed"): Promise<void> {
-    for (const client of this.clients) {
-      try {
-        client.write(`event: closing\ndata: ${JSON.stringify({ reason })}\n\n`);
-        client.end();
-      } catch {
-        // The client is already gone.
-      }
-    }
-    this.clients.clear();
+  /** `reason` is accepted for handle compatibility; there is no longer a stream to announce it on. */
+  async stop(_reason?: string): Promise<void> {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
-  }
-
-  private publish(event: string, data: unknown): void {
-    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    for (const client of this.clients) {
-      try {
-        client.write(payload);
-      } catch {
-        this.clients.delete(client);
-      }
-    }
   }
 
   private async currentSnapshot(force = false): Promise<ControlCenterSnapshot> {
@@ -160,8 +135,16 @@ export class ControlCenter {
       json(response, 200, await this.currentSnapshot(url.searchParams.has("fresh")));
       return;
     }
-    if (request.method === "GET" && route === "/api/stream") {
-      this.openStream(request, response);
+    if (route === "/api/stream") {
+      // The live event stream was removed: every frame it pushed was a re-send of the same snapshot the
+      // poll returns, while the open connections made the page depend on a channel the agent never
+      // controlled. It answers 410 so a stale bookmark or cached page says so instead of hanging.
+      response.writeHead(410, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+      response.end(JSON.stringify({
+        ok: false,
+        code: "STREAM_REMOVED",
+        message: "The Control Center event stream was removed; poll GET /api/snapshot?fresh=1 instead.",
+      }));
       return;
     }
     if (request.method === "POST" && route === "/api/command") {
@@ -173,42 +156,6 @@ export class ControlCenter {
       return;
     }
     json(response, 405, { ok: false, message: `${request.method} is not supported on ${route}.` });
-  }
-
-  private openStream(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse): void {
-    response.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    });
-    response.write(": connected\n\n");
-    this.clients.add(response);
-    let closed = false;
-    const send = async (kind: string): Promise<void> => {
-      if (closed) return;
-      try {
-        if (kind === "snapshot") {
-          const snapshot = await this.currentSnapshot(true);
-          response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
-        } else {
-          response.write(`event: tick\ndata: ${JSON.stringify({ at: new Date().toISOString(), sequence: this.lastSequence })}\n\n`);
-        }
-      } catch {
-        closed = true;
-        this.clients.delete(response);
-      }
-    };
-    void send("snapshot");
-    const timer = setInterval(() => void send(this.snapshotCache ? "snapshot" : "tick"), this.heartbeatMs);
-    if (typeof timer === "object" && "unref" in timer) timer.unref();
-    const cleanup = (): void => {
-      closed = true;
-      clearInterval(timer);
-      this.clients.delete(response);
-    };
-    request.on("close", cleanup);
-    response.on("error", cleanup);
   }
 
   private async handleCommand(request: import("node:http").IncomingMessage, response: import("node:http").ServerResponse): Promise<void> {
@@ -244,7 +191,6 @@ export class ControlCenter {
           ? (result as { ok: boolean; message: string; data?: unknown })
           : { ok: true, message: `${type} accepted.` };
       json(response, normalized.ok ? 200 : 409, normalized);
-      this.publish("command", { type, ok: normalized.ok, message: normalized.message, at: new Date().toISOString() });
       void this.currentSnapshot(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -297,15 +243,4 @@ export async function startControlCenter(
 ): Promise<ControlCenterHandle> {
   const center = new ControlCenter(host, options ?? {});
   return center.start();
-}
-
-/** Trace sink that forwards every event to a running Control Center, used by hosts that own the recorder. */
-export interface BroadcastTarget {
-  broadcast(event: ControlCenterTraceEvent): void;
-}
-
-export function createBroadcastSink(target: () => BroadcastTarget | null): (event: ControlCenterTraceEvent) => void {
-  return (event) => {
-    target()?.broadcast(event);
-  };
 }

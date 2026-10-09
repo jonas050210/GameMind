@@ -35,6 +35,12 @@ export interface DecisionRecord {
   readonly alternatives: readonly DecisionCandidate[];
   readonly terminalStatus: "completed" | "blocked" | null;
   readonly summary: string;
+  /**
+   * Stable identifier for *why* a blocked decision blocked. Without it every stoppage reached an operator
+   * as the same generic "no feasible goal", which is useless when the real reason is a game-mode claim, a
+   * hostile, a missing tool or a spent budget.
+   */
+  readonly blockingCode?: string | null;
   /** Candidates that were evaluated and dropped, with the reason each one was dropped. */
   readonly rejected?: readonly DecisionRejection[];
   /** Human-readable summary of the safety broker's last verdict, when a broker is active. */

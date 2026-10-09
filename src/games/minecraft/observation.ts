@@ -52,10 +52,13 @@ export type MinecraftItemDrop = z.infer<typeof minecraftItemDropSchema>;
 
 /** Day-cycle information, used to decide when to prepare shelter before dark. */
 export const minecraftTimeInfoSchema = z.object({
-  /** Ticks into the current day cycle (Java Edition: 0 through 23999). */
-  dayTicks: z.number().finite().min(0).max(24_000),
-  day: z.number().int().nonnegative(),
+  /** Ticks into the current day cycle (Java Edition: 0 through 23999); null when only the day flag arrived. */
+  dayTicks: z.number().finite().min(0).max(24_000).nullable(),
+  /** Day counter as reported by the session; null when the session never sent one. */
+  day: z.number().int().nonnegative().nullable(),
   isNight: z.boolean(),
+  /** Which live field the night judgement came from, so a guess is never read as a measurement. */
+  source: z.string().optional(),
 });
 
 export type MinecraftTimeInfo = z.infer<typeof minecraftTimeInfoSchema>;
@@ -65,13 +68,29 @@ const minecraftChunkCoordinateSchema = z.object({
   z: z.number().int(),
 });
 
+/** One live session fact, with the evidence behind it. */
+export const minecraftSessionFieldSchema = z.object({
+  /** The value the agent will act on; null when the session did not report one it understands. */
+  value: z.string().nullable(),
+  /** `verified` needs two independent live sources agreeing; `unreported` means nothing usable arrived. */
+  evidence: z.enum(["verified", "single-source", "unreported", "conflicting"]),
+  source: z.string(),
+  /** The raw values read from the session, formatted for a log line or tooltip. */
+  observed: z.string(),
+  note: z.string().nullable(),
+});
+
+export type MinecraftSessionField = z.infer<typeof minecraftSessionFieldSchema>;
+
 export const minecraftObservationSchema = z.object({
   player: z.object({
     username: z.string(),
     position: vectorSchema,
     orientation: orientationSchema,
-    dimension: z.string(),
-    gameMode: z.string(),
+    /** Canonical dimension name (`overworld`, `the_nether`, `the_end`, or a server-provided name). */
+    dimension: z.string().nullable(),
+    /** Canonical game mode (`survival`, `hardcore`, `creative`, `adventure`, `spectator`). */
+    gameMode: z.string().nullable(),
     health: z.number().finite().nullable(),
     food: z.number().finite().nullable(),
     foodSaturation: z.number().finite().nullable(),
@@ -84,11 +103,28 @@ export const minecraftObservationSchema = z.object({
      * agent still needs.
      */
     inventoryFull: z.boolean().optional(),
-    /** Mineflayer's life state. Optional for older adapters that cannot expose it. */
-    alive: z.boolean().optional(),
+    /** Mineflayer's life state. Null/undefined means the session did not prove it; never a guess. */
+    alive: z.boolean().nullable().optional(),
     /** Death events observed by this adapter process; a counter survives an automatic respawn. */
     deathCount: z.number().int().nonnegative().optional(),
+    /**
+     * How the dimension, game mode and vitals were obtained. The dashboard shows this verbatim so an
+     * operator can tell "survival, verified" from "survival, guessed from one field".
+     */
+    session: z
+      .object({
+        dimension: minecraftSessionFieldSchema.optional(),
+        gameMode: minecraftSessionFieldSchema.optional(),
+        /** `update_health`/entity-metadata timestamps, so a vitals value can be called fresh or stale. */
+        vitalsObservedAt: z.string().nullable().optional(),
+        /** Whether the air figure is a measurement, and from which gauge. */
+        airEvidence: z.enum(["verified", "single-source", "unreported", "conflicting"]).optional(),
+        /** Raw session read-out of the vitals, for the diagnostic panel. */
+        vitalsObserved: z.string().optional(),
+      })
+      .optional(),
   }),
+
   inventory: z.array(minecraftItemStackSchema),
   equipment: z.object({
     hand: minecraftItemStackSchema.nullable(),

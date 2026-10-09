@@ -113,6 +113,12 @@ export interface MinecraftRunHostOptions {
   readonly createRunner: (options: MinecraftTaskRunnerOptions) => { run(task: MinecraftTask): Promise<MinecraftTaskResult> };
   /** Extra snapshot fields, used by the simulated host to mark the world as synthetic. */
   readonly decorate?: (base: ControlCenterSnapshot) => ControlCenterSnapshot;
+  /**
+   * Whether the world behind this run came from a live server. Left unset it is inferred from `offlineNote`,
+   * because the simulated host is the only caller that sets one, and an unmarked live run is worse than a
+   * double-marked simulated one.
+   */
+  readonly worldSource?: "live" | "simulated";
   /** Invoked when the operator starts a task from the UI and it finishes; the demo uses it to print a report. */
   readonly onTaskFinished?: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
 }
@@ -125,7 +131,6 @@ export interface MinecraftRunHost {
   readonly handle: ControlCenterHandle | null;
   /** Runs a task through the host's runner factory, so the UI sees it exactly as an operator-started run. */
   runTask(task: MinecraftTask): Promise<MinecraftTaskResult>;
-  notify(): void;
   /** Resolves when the abort signal fires: keeps a finished offline run inspectable in the browser. */
   waitUntil(signal: AbortSignal): Promise<void>;
   close(): Promise<void>;
@@ -149,7 +154,12 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   const memory = options.memory ?? new WorldMemory();
   const evaluationReportPath = options.evaluationReportPath ?? resolve("data/eval/offline-report.json");
   const evaluationScenarioIds = options.evaluationScenarioIds ?? [];
-  let notify: () => void = () => {};
+  // The dashboard polls the snapshot, so the host has nothing to push when state changes; `worldSource`
+  // and `sessionChange` only tell the poll what it is looking at.
+  const worldSource = options.worldSource ?? (options.offlineNote ? "simulated" : "live");
+  const sessionAdapter = options.runtime.adapter as unknown as {
+    readonly sessionChange?: { readonly at: string; readonly kind: string; readonly detail: string } | null;
+  };
 
   const source = createControlCenterSource({
     runtime: options.runtime,
@@ -160,6 +170,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     control,
     evaluationReportPath,
     evaluationScenarioIds,
+    worldSource,
+    sessionChange: () => sessionAdapter.sessionChange ?? null,
     ...(options.worldKey !== undefined ? { worldKey: options.worldKey } : {}),
     ...(options.offlineNote !== undefined ? { offlineNote: options.offlineNote } : {}),
     logger: options.logger,
@@ -180,7 +192,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     control.stopRequested = null;
     control.actionsUsed = 0;
     control.startedAt = new Date().toISOString();
-    notify();
     const runner = options.createRunner(host.runnerOptions);
     try {
       const result = await runner.run(task);
@@ -197,7 +208,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
         }
       }
       control.task = null;
-      notify();
     }
   }
 
@@ -218,19 +228,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       banner: options.offlineNote ?? null,
     },
   );
-  notify = () => handle.notify();
-  // Every recorded event is also pushed to the dashboard, so the panels follow the loop action by action
-  // instead of waiting for the next heartbeat frame.
-  const unsubscribeTrace = options.traceSink.subscribe((event) => {
-    handle.broadcast({
-      traceId: event.traceId,
-      eventType: event.eventType,
-      timestamp: event.timestamp,
-      correlationId: event.correlationId,
-      data: event.data,
-    });
-  });
-
   const host: MinecraftRunHost = {
     control,
     memory,
@@ -239,18 +236,15 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       memory,
       onAction: () => {
         control.actionsUsed += 1;
-        notify();
       },
       shouldStop: () => control.stopRequested,
     },
     runTask: (task) => execute(task, "cli"),
-    notify: () => handle.notify(),
     async waitUntil(signal) {
       if (signal.aborted) return;
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
     async close() {
-      unsubscribeTrace();
       await handle.stop("run host closing");
       if (memory instanceof PersistentWorldMemory) {
         try {

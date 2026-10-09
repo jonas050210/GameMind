@@ -64,9 +64,20 @@
           </div>
         </article>
 
+        <article class="card blocker-card">
+          <header class="card-head">
+            <div><span class="section-index">02 / WHY</span><h2>Blocker</h2></div>
+            <span class="hint" id="blocker-note"></span>
+          </header>
+          <div class="blocker" id="blocker" data-kind="none"></div>
+          <p class="micro-note">One classification per stoppage: a safety refusal, a missing capability, a
+            connection fault, missing perception, a planner decision or a task failure. The text is the
+            agent's own reason, not a paraphrase.</p>
+        </article>
+
         <article class="card task-card">
           <header class="card-head">
-            <div><span class="section-index">02 / COMMAND</span><h2>Issue task</h2></div>
+            <div><span class="section-index">03 / COMMAND</span><h2>Issue task</h2></div>
             <span class="hint">validated, bounded actions</span>
           </header>
           <form id="task-form" class="task-form">
@@ -90,7 +101,7 @@
 
         <article class="card decision-card">
           <header class="card-head">
-            <div><span class="section-index">03 / INTENT</span><h2>Current decision</h2></div>
+            <div><span class="section-index">04 / INTENT</span><h2>Current decision</h2></div>
             <span class="hint" id="goal-hint"></span>
           </header>
           <div id="goal" class="goal"></div>
@@ -104,7 +115,7 @@
 
         <article class="card safety-card">
           <header class="card-head">
-            <div><span class="section-index">04 / GUARDRAILS</span><h2>Safety broker</h2></div>
+            <div><span class="section-index">05 / GUARDRAILS</span><h2>Safety broker</h2></div>
             <span class="hint" id="safety-hint"></span>
           </header>
           <div class="metrics" id="safety-metrics"></div>
@@ -119,14 +130,15 @@
       <section class="column column-world" aria-label="Minecraft world state">
         <article class="card world-card">
           <header class="card-head world-head">
-            <div><span class="section-index">05 / WORLD STATE</span><h2>Observed world</h2></div>
+            <div><span class="section-index">06 / WORLD STATE</span><h2>Observed world</h2></div>
             <span class="hint" id="world-hint"></span>
           </header>
+          <p class="world-freshness" id="world-freshness" data-state="stale">no live observation</p>
           <div class="vitals" id="vitals"></div>
           <div class="map-panel">
             <div class="map-topline"><span>VOXEL VIEW · OBSERVED BLOCKS ONLY</span><span id="map-meta">waiting for world state</span></div>
             <canvas id="minimap" width="720" height="420" role="img" tabindex="0" aria-describedby="map-controls" aria-label="Interactive 3D voxel view of currently observed Minecraft blocks. Drag or use arrow keys to orbit; scroll or plus and minus to zoom."></canvas>
-            <div class="map-controls" id="map-controls"><span>Drag / arrows to orbit <b>·</b> scroll / + − to zoom</span><span>Unloaded terrain is not rendered</span></div>
+            <div class="map-controls" id="map-controls"><span>Drag / arrows to orbit <b>·</b> scroll / + − to zoom</span><span>Only blocks in the current observation or in world memory are drawn</span></div>
           </div>
           <ul class="legend">
             <li><span class="sw player"></span>agent</li>
@@ -145,7 +157,7 @@
 
         <article class="card performance-card">
           <header class="card-head">
-            <div><span class="section-index">06 / TELEMETRY</span><h2>Perception &amp; performance</h2></div>
+            <div><span class="section-index">07 / TELEMETRY</span><h2>Perception &amp; performance</h2></div>
             <span class="hint" id="performance-hint"></span>
           </header>
           <div class="metrics performance-metrics" id="performance-metrics"></div>
@@ -156,21 +168,13 @@
       <section class="column column-activity" aria-label="Agent activity and learning">
         <article class="card activity-card">
           <header class="card-head">
-            <div><span class="section-index">07 / EXECUTION</span><h2>Actions &amp; recovery</h2></div>
+            <div><span class="section-index">08 / EXECUTION</span><h2>Actions &amp; recovery</h2></div>
             <span class="hint" id="actions-hint"></span>
           </header>
           <ol class="timeline" id="actions"></ol>
           <div class="divider"></div>
           <h3 class="sub failures-head">Failures &amp; refusals</h3>
           <ol class="timeline compact" id="failures"></ol>
-        </article>
-
-        <article class="card event-card">
-          <header class="card-head">
-            <div><span class="section-index">08 / TRACE</span><h2>Live event stream</h2></div>
-            <span class="hint">recent non-observation events</span>
-          </header>
-          <ol class="event-list" id="events"></ol>
         </article>
 
         <article class="card skill-card">
@@ -203,7 +207,7 @@
 
     <footer class="ops-footer" id="footer">
       <span class="status-led" aria-hidden="true"></span><span id="toast" aria-live="polite" aria-atomic="true">Ready.</span><span class="spacer"></span>
-      <span class="hint">Live state · no sample telemetry</span>
+      <span class="hint">Polled snapshot · no sample telemetry</span>
     </footer>
 
     <script type="module" src="./app.js"></script>

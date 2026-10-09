@@ -303,10 +303,31 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         gameMode: world.gameMode,
         health: world.health,
         food: world.food,
-        foodSaturation: 0,
-        oxygenLevel: 300,
+        // The simulated world does not model saturation, and saying 0 would read as "starving at the
+        // first bite"; `null` is what is true.
+        foodSaturation: null,
+        // Air is only meaningful when the sim puts the player under water, which it never does.
+        oxygenLevel: null,
         onGround: true,
         inventoryFull: world.inventory.length >= world.maxInventoryStacks,
+        // The facts a live adapter reads out of Mineflayer are simply known here, so they are marked with
+        // their real origin instead of pretending to be a session read.
+        session: {
+          dimension: {
+            value: world.dimension,
+            evidence: "verified",
+            source: "simulated-world",
+            observed: "dimension=simulated-world",
+            note: "the scenario definition, not a server packet",
+          },
+          gameMode: {
+            value: world.gameMode,
+            evidence: "verified",
+            source: "simulated-world",
+            observed: "gameMode=simulated-world",
+            note: "the scenario definition, not a server packet",
+          },
+        },
       },
       inventory: world.inventory.map((stack) => ({ ...stack })),
       equipment: {

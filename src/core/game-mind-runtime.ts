@@ -29,6 +29,25 @@ export interface GameMindRuntimeOptions<TState = unknown> {
   readonly safetyContext?: (state: TState, meta: SafetyObservationMeta) => SafetyWorldContextInput;
 }
 
+/**
+ * Reads the optional status diagnostics an adapter may expose. Adapters answer for their own connection
+ * state, so the runtime forwards the reason instead of inventing one; an adapter that says nothing leaves
+ * the fields null rather than defaulting to a guess.
+ */
+function adapterDiagnostics(adapter: unknown): {
+  statusReason: string | null;
+  statusChangedAt: string | null;
+} {
+  const source = adapter as {
+    readonly statusReason?: unknown;
+    readonly lastStatus?: { readonly at?: unknown } | null;
+  };
+  return {
+    statusReason: typeof source?.statusReason === "string" ? source.statusReason : null,
+    statusChangedAt: typeof source?.lastStatus?.at === "string" ? source.lastStatus.at : null,
+  };
+}
+
 export class GameMindRuntime<TState = unknown> {
   readonly worldModel = new WorldModel<TState>();
   readonly safety: SafetyBroker | null;
@@ -82,6 +101,12 @@ export class GameMindRuntime<TState = unknown> {
     return this.worldModel.current;
   }
 
+  /** True while the world model holds an observation from the session that is active right now. */
+  get worldIsLive(): boolean {
+    const current = this.worldModel.current;
+    return current !== null && this.sessionValue !== null && current.sessionId === this.sessionValue.id;
+  }
+
   async connect(): Promise<GameSession> {
     if (this.shuttingDown) throw new Error("Runtime is shutting down and cannot reconnect.");
     if (this.adapter.status === "connected" && this.sessionValue) return this.sessionValue;
@@ -103,7 +128,39 @@ export class GameMindRuntime<TState = unknown> {
     return session;
   }
 
+  /**
+   * One observation at a time. The adapter reads live game objects that a concurrent read would also be
+   * mutating, and a Control Center refresh used to interleave with the runner's own pre-action
+   * observation, so both observed the same half-updated inventory. Calls queue instead of racing.
+   */
+  private observationQueue: Promise<unknown> = Promise.resolve();
+
   async observe(): Promise<WorldState<TState>> {
+    const run = this.observationQueue.then(() => this.observeNow());
+    // A failed observation must not wedge the queue for the rest of the run.
+    this.observationQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Returns the world the runtime already holds when it is young enough to act on, and observes only when
+   * it is not. Read-only surfaces use this so a viewer refresh never triggers a game interaction, while a
+   * stale world is still repaired rather than shown as if it were current.
+   */
+  async observeIfStale(maxAgeMs: number): Promise<WorldState<TState> | null> {
+    const current = this.worldModel.current;
+    const freshEnough = current !== null && Date.now() - (Date.parse(current.observedAt) || 0) <= maxAgeMs;
+    if (freshEnough && this.adapter.status === "connected") return current;
+    if (this.adapter.status !== "connected" || !this.sessionValue) return current;
+    try {
+      return await this.observe();
+    } catch (error) {
+      this.logger.warn({ err: error }, "Refresh observation failed; the runtime keeps its last world state");
+      return this.worldModel.current;
+    }
+  }
+
+  private async observeNow(): Promise<WorldState<TState>> {
     if (this.adapter.status !== "connected" || !this.sessionValue) {
       throw new Error("Cannot observe without an active GameMind session.");
     }
@@ -149,6 +206,11 @@ export class GameMindRuntime<TState = unknown> {
     readonly sessionId: string | null;
     readonly sequence: number | null;
     readonly lastObservationAt: string | null;
+    /** Why the adapter entered this status, verbatim from the adapter, when it said one. */
+    readonly statusReason: string | null;
+    readonly statusChangedAt: string | null;
+    /** Whether the world model holds an observation from the currently active session. */
+    readonly worldLive: boolean;
     readonly safety: ReturnType<SafetyBroker["snapshot"]> | null;
   } {
     const current = this.worldModel.current;
@@ -157,6 +219,8 @@ export class GameMindRuntime<TState = unknown> {
       sessionId: this.sessionValue?.id ?? null,
       sequence: current?.sequence ?? null,
       lastObservationAt: current?.observedAt ?? null,
+      ...adapterDiagnostics(this.adapter),
+      worldLive: current !== null && this.sessionValue !== null && current.sessionId === this.sessionValue.id,
       safety: this.safety?.snapshot() ?? null,
     };
   }

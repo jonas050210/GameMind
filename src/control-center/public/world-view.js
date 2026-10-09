@@ -5,6 +5,13 @@
 const orbit = { yaw: 0.72, pitch: 0.68, distance: 25, dragging: false, userAdjusted: false, lastX: 0, lastY: 0 };
 let renderer = null;
 let lastWorld = null;
+let lastOptions = { stale: false, provenance: "world-memory" };
+/**
+ * A failed WebGL context is a property of this browser session, not of the frame, so it is tried once.
+ * Retrying on every draw turned a "no GPU here" machine into a page that rebuilt a broken context dozens
+ * of times a second while the agent was running.
+ */
+let rendererAttempted = false;
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -26,13 +33,17 @@ function createRenderer(canvas) {
     attribute vec3 aPosition;
     attribute vec3 aColor;
     uniform mat4 uMvp;
+    uniform float uFogNear;
+    uniform float uFogFar;
     varying vec3 vColor;
     varying float vDepth;
     void main() {
       vec4 clip = uMvp * vec4(aPosition, 1.0);
       gl_Position = clip;
       vColor = aColor;
-      vDepth = clamp((clip.z / max(clip.w, 0.001) + 1.0) * 0.5, 0.0, 1.0);
+      // Distance along the view axis, in blocks. Normalised clip depth was used before, which collapses
+      // to ~1.0 for every vertex whenever the near/far range is wide, fogging the whole scene flat.
+      vDepth = clamp((clip.w - uFogNear) / max(uFogFar - uFogNear, 0.001), 0.0, 1.0);
     }
   `);
   const fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, `
@@ -57,7 +68,9 @@ function createRenderer(canvas) {
   const position = gl.getAttribLocation(program, "aPosition");
   const color = gl.getAttribLocation(program, "aColor");
   const mvp = gl.getUniformLocation(program, "uMvp");
-  if (position < 0 || color < 0 || !mvp) throw new Error("WebGL shader bindings are unavailable.");
+  const fogNear = gl.getUniformLocation(program, "uFogNear");
+  const fogFar = gl.getUniformLocation(program, "uFogFar");
+  if (position < 0 || color < 0 || !mvp || !fogNear || !fogFar) throw new Error("WebGL shader bindings are unavailable.");
   const positionBuffer = gl.createBuffer();
   const colorBuffer = gl.createBuffer();
   if (!positionBuffer || !colorBuffer) throw new Error("WebGL could not allocate geometry buffers.");
@@ -65,7 +78,7 @@ function createRenderer(canvas) {
   gl.depthFunc(gl.LEQUAL);
   gl.disable(gl.CULL_FACE);
   gl.clearColor(0.035, 0.055, 0.065, 1);
-  return { gl, program, position, color, mvp, positionBuffer, colorBuffer, canvas };
+  return { gl, program, position, color, mvp, fogNear, fogFar, positionBuffer, colorBuffer, canvas };
 }
 
 function setupInput(canvas) {
@@ -83,7 +96,7 @@ function setupInput(canvas) {
     orbit.pitch = Math.max(0.18, Math.min(1.42, orbit.pitch + (event.clientY - orbit.lastY) * 0.006));
     orbit.lastX = event.clientX;
     orbit.lastY = event.clientY;
-    if (lastWorld) drawWorldView(lastWorld);
+    if (lastWorld) drawWorldView(lastWorld, lastOptions);
   });
   const stopDrag = () => {
     orbit.dragging = false;
@@ -96,7 +109,7 @@ function setupInput(canvas) {
     event.preventDefault();
     orbit.userAdjusted = true;
     orbit.distance = Math.max(7, Math.min(100, orbit.distance * Math.exp(event.deltaY * 0.001)));
-    if (lastWorld) drawWorldView(lastWorld);
+    if (lastWorld) drawWorldView(lastWorld, lastOptions);
   }, { passive: false });
   canvas.addEventListener("keydown", (event) => {
     const angle = 0.12;
@@ -113,7 +126,7 @@ function setupInput(canvas) {
     } else return;
     event.preventDefault();
     if (event.key !== "Home") orbit.userAdjusted = true;
-    if (lastWorld) drawWorldView(lastWorld);
+    if (lastWorld) drawWorldView(lastWorld, lastOptions);
   });
 }
 
@@ -233,6 +246,7 @@ function drawGeometry(target, positions, colors, mode) {
   gl.drawArrays(mode, 0, positions.length / 3);
 }
 
+/** Flat 2D projection used when this browser has no usable WebGL context. */
 function drawFallback(canvas, world) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -256,14 +270,25 @@ function drawFallback(canvas, world) {
   ctx.fillRect(x - 4, y - 10, 8, 18);
   ctx.fillStyle = "#a8bcb9";
   ctx.font = "12px sans-serif";
-  ctx.fillText("3D unavailable · simplified observed-block view", 12, height - 14);
+  ctx.fillText("3D unavailable · simplified observed-block view", 12, height - 26);
+  if (lastOptions.stale) {
+    ctx.fillStyle = "#e8b45c";
+    ctx.fillText("no live observation · remembered blocks only", 12, height - 12);
+  }
 }
 
-export function drawWorldView(world) {
+/**
+ * Draws the observed world. `options.stale` marks the frame as showing memory rather than a current
+ * observation, which the panel reflects instead of drawing remembered blocks as if they were seen now.
+ */
+export function drawWorldView(world, options) {
   lastWorld = world;
+  if (options) lastOptions = options;
   const canvas = document.getElementById("minimap");
   if (!canvas) return;
-  if (!renderer) {
+  canvas.dataset.live = lastOptions.stale ? "0" : "1";
+  if (!renderer && !rendererAttempted) {
+    rendererAttempted = true;
     try {
       renderer = createRenderer(canvas);
       if (renderer) setupInput(canvas);
@@ -274,12 +299,16 @@ export function drawWorldView(world) {
     }
   }
   if (!renderer) {
+    canvas.dataset.renderer = "fallback";
     drawFallback(canvas, world);
     return;
   }
   const target = renderer;
   const { gl } = target;
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+  // A hidden or zero-sized canvas gives an aspect ratio of NaN, and every matrix built from it is then
+  // NaN — which clears the screen and looks exactly like "the agent sees no blocks".
+  if (canvas.clientWidth <= 0 || canvas.clientHeight <= 0) return;
   const displayWidth = Math.max(1, Math.floor(canvas.clientWidth * pixelRatio));
   const displayHeight = Math.max(1, Math.floor(canvas.clientHeight * pixelRatio));
   if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
@@ -292,13 +321,19 @@ export function drawWorldView(world) {
 
   const player = world.position ?? { x: 0, y: 0, z: 0 };
   const blocks = world.blocks ?? [];
-  if (!orbit.userAdjusted && blocks.length) {
-    const extent = blocks.reduce((radius, block) => Math.max(
+  // The camera frames what the agent is *looking at now*. Memory markers can sit far away from the
+  // player — that is the point of them — and including them in the auto-fit pushed the camera out to the
+  // clamp, which is what made the live blocks render as a dot at the far plane.
+  const liveBlocks = blocks.filter((block) => !block.remembered);
+  const fitBlocks = liveBlocks.length ? liveBlocks : blocks;
+  let extent = 6;
+  if (!orbit.userAdjusted && fitBlocks.length) {
+    extent = fitBlocks.reduce((radius, block) => Math.max(
       radius,
       Math.hypot(block.x + 0.5 - player.x, block.z + 0.5 - player.z),
       Math.abs(block.y + 0.5 - player.y) * 1.1,
-    ), 0);
-    orbit.distance = Math.max(14, Math.min(72, extent * 2.25 + 13));
+    ), 1);
+    orbit.distance = Math.max(12, Math.min(90, extent * 1.35 + 8));
   }
   const horizontal = orbit.distance * Math.cos(orbit.pitch);
   const eye = [
@@ -308,8 +343,14 @@ export function drawWorldView(world) {
   ];
   const center = [0, 0.8, 0];
   const view = lookAt(eye, center, [0, 1, 0]);
-  const projection = perspective(Math.PI / 3.2, canvas.width / canvas.height, 0.1, 180);
+  // Depth range around what is actually in the scene: a fixed 0.1..180 range spends almost all of the
+  // depth buffer on empty space, so nearby geometry collides at the far plane and disappears.
+  const near = Math.max(0.5, orbit.distance - extent - 6);
+  const far = orbit.distance + Math.max(extent, 24) + 40;
+  const projection = perspective(Math.PI / 3.2, canvas.width / canvas.height, near, far);
   gl.uniformMatrix4fv(target.mvp, false, multiply(projection, view));
+  gl.uniform1f(target.fogNear, orbit.distance * 0.55);
+  gl.uniform1f(target.fogFar, far * 0.9);
 
   const blockPositions = [];
   const blockColors = [];
@@ -317,7 +358,9 @@ export function drawWorldView(world) {
   const memoryColors = [];
   for (const block of blocks) {
     const centerBlock = [block.x + 0.5 - player.x, block.y + 0.5 - player.y, block.z + 0.5 - player.z];
-    if (block.remembered) appendWireCube(memoryPositions, memoryColors, centerBlock, [0.92, 0.92, 0.92], [0.10, 0.82, 0.96]);
+    // A remembered marker is a wireframe and nothing else: it was seen in an earlier observation, and
+    // painting it as a solid block would show terrain the agent is not currently observing.
+    if (block.remembered || block.source === "memory") appendWireCube(memoryPositions, memoryColors, centerBlock, [0.92, 0.92, 0.92], [0.10, 0.82, 0.96]);
     else appendCube(blockPositions, blockColors, centerBlock, [0.96, 0.96, 0.96], colorForBlock(block));
   }
   appendCube(blockPositions, blockColors, [0, 0.88, 0], [0.48, 1.76, 0.48], [0.24, 0.88, 0.66]);

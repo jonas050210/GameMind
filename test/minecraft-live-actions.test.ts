@@ -57,8 +57,18 @@ interface MockBlock {
 
 interface MockOptions {
   readonly gameMode?: string;
+  /** `bot.player.gamemode`, the second live source Mineflayer keeps. */
+  readonly playerGameMode?: number | string;
+  readonly dimension?: string | number | null;
+  /** Replaces `bot.game` entirely, e.g. `{}` as it is before the login packet is handled. */
+  readonly game?: Record<string, unknown>;
   readonly health?: number;
   readonly food?: number;
+  /** When true the session never sent an `update_health` packet, so the fields are absent. */
+  readonly vitalsUnreported?: boolean;
+  readonly oxygenLevel?: number | null;
+  readonly isAlive?: boolean;
+  readonly time?: { timeOfDay: number; day: number; isDay: boolean } | null;
   readonly regenerate?: boolean;
 }
 
@@ -88,10 +98,20 @@ function createLiveMock(options: MockOptions = {}) {
     version: "1.20.4",
     entity: player,
     entities,
-    game: { dimension: "overworld", gameMode: options.gameMode ?? "survival", minY: -64, height: 384 },
-    foodSaturation: 5,
-    oxygenLevel: 300,
-    inventory: { items: () => inventory, slots: [] as unknown[] },
+    // `game` is exactly what Mineflayer keeps: the login packet's fields, empty until that arrives.
+    game: options.game ?? {
+      ...(options.dimension === null ? {} : { dimension: options.dimension ?? "overworld" }),
+      gameMode: options.gameMode ?? "survival",
+      minY: -64,
+      height: 384,
+    },
+    // Mineflayer's player list entry carries the raw mode id, independent of `bot.game.gameMode`.
+    ...(options.playerGameMode === undefined ? {} : { player: { gamemode: options.playerGameMode } }),
+    ...(options.time === null ? {} : { time: options.time ?? { timeOfDay: 6_000, day: 0, isDay: true } }),
+    foodSaturation: options.vitalsUnreported ? undefined : 5,
+    oxygenLevel: options.oxygenLevel === undefined ? 20 : options.oxygenLevel,
+    ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
+    inventory: { items: () => inventory, slots: [] as unknown[], emptySlotCount: () => Math.max(0, 36 - inventory.length) },
     getEquipmentDestSlot: () => 0,
     blockAt: (position: { x: number; y: number; z: number }) => {
       const x = Math.floor(position.x);
@@ -156,6 +176,7 @@ function createLiveMock(options: MockOptions = {}) {
   Object.defineProperty(bot, "health", {
     configurable: true,
     get: () => {
+      if (options.vitalsUnreported) return undefined;
       if (options.regenerate) health = Math.min(20, health + 1);
       return health;
     },
@@ -163,7 +184,10 @@ function createLiveMock(options: MockOptions = {}) {
       health = value;
     },
   });
-  Object.defineProperty(bot, "food", { configurable: true, get: () => food });
+  Object.defineProperty(bot, "food", {
+    configurable: true,
+    get: () => (options.vitalsUnreported ? undefined : food),
+  });
 
   const addDrop = (name: string, count: number, x: number, z: number) => {
     const id = Object.keys(entities).length + 10;
@@ -214,6 +238,29 @@ async function connectAdapter(mock: ReturnType<typeof createLiveMock>, overrides
   });
   await adapter.connect();
   return adapter;
+}
+
+/**
+ * Collects one log and returns how the adapter answered. The gate regression cares only that the answer is
+ * not a refusal attributed to the session facts, so any other outcome (including a mock that never gained
+ * the item) counts as "the gate stayed open".
+ */
+async function attemptCollection(adapter: MinecraftAdapter, sessionId: string): Promise<{ code: string | null; message: string }> {
+  try {
+    const outcome = await adapter.executeAction(
+      {
+        actionId: randomUUID(),
+        sessionId,
+        capability: "minecraft.collect_block",
+        input: { x: 6, y: 64, z: 5, blockName: "oak_log", dangerRadius: 8 },
+      },
+      new AbortController().signal,
+    );
+    return { code: null, message: String(outcome.confirmation ?? "executed") };
+  } catch (error) {
+    const failure = error as { code?: string; message?: string };
+    return { code: failure.code ?? null, message: String(failure.message ?? error) };
+  }
 }
 
 async function run(adapter: MinecraftAdapter, capability: string, input: unknown) {
@@ -369,5 +416,167 @@ test("an unreadable dropped item or block state is skipped without failing the w
   assert.equal(observation.state.itemDrops.length, 1, "the readable drop is kept and the broken one is skipped");
   assert.equal(observation.state.itemDrops[0]?.name, "bread");
   assert.ok(observation.state.resourceSightings.some((sighting) => sighting.name === "sweet_berry_bush"));
+  await adapter.disconnect("test");
+});
+
+/* ---------------------------------------------------------------- live session facts */
+
+test("an unreported dimension or game mode is reported as unknown and never blocks work", async () => {
+  // This is the exact live shape of a session whose login packet had not been handled yet: `bot.game` is
+  // an empty object, so the old code read `undefined !== "overworld"` and blocked every skill.
+  const mock = createLiveMock({ game: {} });
+  mock.blocks.set("6,64,5", { name: "oak_log", type: 1, boundingBox: "block" });
+  const adapter = await connectAdapter(mock);
+  const state = (await adapter.observe()).state;
+
+  assert.equal(state.player.dimension, null);
+  assert.equal(state.player.gameMode, null);
+  assert.equal(state.player.session?.dimension?.evidence, "unreported");
+  assert.equal(state.player.session?.gameMode?.evidence, "unreported");
+
+  const session = adapter.session;
+  assert.ok(session);
+  const outcome = await attemptCollection(adapter, session.id);
+  assert.notEqual(outcome.code, "GAME_MODE_BLOCKS_COLLECTION", "an unknown mode must not become a refusal");
+  assert.notEqual(outcome.code, "UNSUPPORTED_DIMENSION", "an unknown dimension must not become a refusal");
+  assert.doesNotMatch(outcome.message, /survival mode|overworld/, `the refusal text leaked: ${outcome.message}`);
+  await adapter.disconnect("test");
+});
+
+test("a verified Creative report refuses collection and carries the evidence", async () => {
+  const mock = createLiveMock({ gameMode: "creative", playerGameMode: 1 });
+  mock.blocks.set("6,64,5", { name: "oak_log", type: 1, boundingBox: "block" });
+  const adapter = await connectAdapter(mock);
+  const state = (await adapter.observe()).state;
+  assert.equal(state.player.gameMode, "creative");
+  assert.equal(state.player.session?.gameMode?.evidence, "verified");
+
+  const session = adapter.session;
+  assert.ok(session);
+  const outcome = await attemptCollection(adapter, session.id);
+  assert.equal(outcome.code, "GAME_MODE_BLOCKS_COLLECTION");
+  assert.match(outcome.message, /creative \(verified: bot\.game\.gameMode \+ bot\.player\.gamemode\)/);
+  await adapter.disconnect("test");
+});
+
+test("disagreeing game-mode sources are reported as a conflict instead of blocking survival", async () => {
+  // `bot.game.gameMode` only refreshes on `game_state_change`, so a `/gamemode survival` on the server can
+  // leave it saying "creative" while the player list already says survival. Refusing here was the false
+  // Creative report the live test hit.
+  const mock = createLiveMock({ gameMode: "creative", playerGameMode: 0 });
+  mock.blocks.set("6,64,5", { name: "oak_log", type: 1, boundingBox: "block" });
+  const adapter = await connectAdapter(mock);
+  const state = (await adapter.observe()).state;
+  assert.equal(state.player.gameMode, null);
+  assert.equal(state.player.session?.gameMode?.evidence, "conflicting");
+  assert.match(String(state.player.session?.gameMode?.note ?? ""), /creative \(bot\.game\.gameMode\) and survival/);
+
+  const session = adapter.session;
+  assert.ok(session);
+  const outcome = await attemptCollection(adapter, session.id);
+  assert.notEqual(outcome.code, "GAME_MODE_BLOCKS_COLLECTION", "a conflict is reported, not refused");
+  assert.doesNotMatch(outcome.message, /requires survival mode/);
+  await adapter.disconnect("test");
+});
+
+test("a server that names the world instead of the dimension is not read as 'no overworld'", async () => {
+  const mock = createLiveMock({ dimension: "minecraft:overworld" });
+  const adapter = await connectAdapter(mock);
+  const state = (await adapter.observe()).state;
+  assert.equal(state.player.dimension, "overworld");
+  await adapter.disconnect("test");
+
+  const nether = await connectAdapter(createLiveMock({ dimension: -1 }));
+  const netherState = (await nether.observe()).state;
+  assert.equal(netherState.player.dimension, "the_nether");
+  await nether.disconnect("test");
+
+  const custom = await connectAdapter(createLiveMock({ dimension: "custom:lobby" }));
+  const customState = (await custom.observe()).state;
+  assert.equal(customState.player.dimension, "custom:lobby");
+  assert.match(String(customState.player.session?.dimension?.note ?? ""), /never as the overworld/);
+  await custom.disconnect("test");
+});
+
+test("mid-session mode and dimension changes are picked up by the next observation", async () => {
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  const before = (await adapter.observe()).state;
+  assert.equal(before.player.gameMode, "survival");
+
+  const game = mock.bot.game as unknown as { gameMode: string; dimension: string };
+  game.gameMode = "creative";
+  game.dimension = "minecraft:the_nether";
+  mock.bot.emit("game");
+
+  const after = (await adapter.observe()).state;
+  assert.equal(after.player.gameMode, "creative", "the gate re-reads the session instead of trusting connect time");
+  assert.equal(after.player.dimension, "the_nether");
+  assert.equal(after.player.session?.gameMode?.evidence, "single-source");
+  const change = (adapter as unknown as { sessionChange?: { kind: string; detail: string } }).sessionChange;
+  assert.equal(change?.kind, "game");
+  assert.match(String(change?.detail), /creative/);
+  await adapter.disconnect("test");
+});
+
+test("vitals the session never sent stay unknown instead of becoming safe numbers", async () => {
+  const mock = createLiveMock({ vitalsUnreported: true, oxygenLevel: null });
+  const adapter = await connectAdapter(mock);
+  const state = (await adapter.observe()).state;
+  assert.equal(state.player.health, null);
+  assert.equal(state.player.food, null);
+  assert.equal(state.player.foodSaturation, null);
+  assert.equal(state.player.oxygenLevel, null, "no air metadata is not full lungs");
+  assert.equal(state.player.alive, null, "an unreported life state is not a death");
+  assert.equal(state.player.session?.vitalsObservedAt ?? null, null, "nothing has been observed this session");
+  assert.equal(state.player.deathCount, 0);
+
+  // The inventory claim now comes from the window's empty-slot count, not a stack-count guess.
+  assert.equal(state.player.inventoryFull, false);
+  await adapter.disconnect("test");
+});
+
+test("the air gauge is reported in ticks, so a half-empty tank reads as half empty", async () => {
+  const adapter = await connectAdapter(createLiveMock({ oxygenLevel: 10 }));
+  const state = (await adapter.observe()).state;
+  assert.equal(state.player.oxygenLevel, 150);
+  assert.equal(state.player.session?.airEvidence, "single-source");
+  await adapter.disconnect("test");
+});
+
+test("health and hunger are re-read from the session on every observation", async () => {
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  const first = (await adapter.observe()).state;
+  assert.equal(first.player.health, 20);
+
+  mock.bot.health = 7;
+  mock.bot.emit("health");
+  const second = (await adapter.observe()).state;
+  assert.equal(second.player.health, 7);
+  assert.ok(second.player.session?.vitalsObservedAt, "the session reported health, so its age is knowable");
+
+  const drained = (mock.bot as unknown as { oxygenLevel: number | null });
+  drained.oxygenLevel = 2;
+  const third = (await adapter.observe()).state;
+  assert.equal(third.player.oxygenLevel, 30);
+  await adapter.disconnect("test");
+});
+
+test("a payload that does not match the contract fails as a named validation error", async () => {
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  // A proxy that echoes the entity as a string is the kind of surprise that used to kill the whole run
+  // with an unreadable ZodError dump; the observation must now say which field broke.
+  (mock.bot as unknown as { username: unknown }).username = 42;
+  await assert.rejects(
+    () => adapter.observe(),
+    (error: unknown) => {
+      const failure = error as { code?: string; message?: string };
+      assert.equal(failure.code, "OBSERVATION_SCHEMA_INVALID");
+      assert.match(String(failure.message), /player\.username/);
+      return true;
+    },
+  );
   await adapter.disconnect("test");
 });

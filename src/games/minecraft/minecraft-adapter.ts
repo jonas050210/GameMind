@@ -53,6 +53,19 @@ import {
   isRipeBerryBush,
 } from "./block-classes.js";
 import type { MinecraftObservation } from "./observation.js";
+import {
+  airTicksFromSession,
+  describeSessionField,
+  dimensionDefinitelyNotOverworld,
+  gameModeDefinitelyNotSurvival,
+  readDimension,
+  readGameMode,
+  readTimeInfo,
+  readVitals,
+  type LiveBotLike,
+  type MinecraftGameMode,
+  type SessionField,
+} from "./live-session.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 import { isMineableBlockName, minecraftMiningRequirements, estimatedDigSeconds, bestPickaxeTier, canMineWithTier } from "./mining.js";
 import { bestWeapon, combatIsAllowed, weaponDamageFor } from "./combat.js";
@@ -163,18 +176,15 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Day-cycle facts from Mineflayer. `timeOfDay` is a 0..1 fraction of the cycle and `isDay` is the
- * server's own judgement; when the server does not send them the agent reports "day, unknown source"
- * rather than guessing night, because night is only used to *add* caution.
+ * Day-cycle facts from Mineflayer, read from the live session. When the server has sent no `update_time`
+ * the observation carries no `time` at all instead of a fabricated noon: a missing day cycle is reported
+ * as missing. The parsing rules, including why `timeOfDay` is ticks rather than a fraction, live in
+ * `readTimeInfo`.
  */
-function minecraftTimeInfo(bot: Bot): { dayTicks: number; day: number; isNight: boolean } {
-  const fraction = typeof bot.time?.timeOfDay === "number" ? bot.time.timeOfDay : Number.NaN;
-  const dayTicks = Number.isFinite(fraction)
-    ? Math.min(23_999, Math.max(0, Math.round(fraction * 24_000)))
-    : 0;
-  const day = Number.isFinite(bot.time?.day) ? Math.max(0, Math.trunc(bot.time.day)) : 0;
-  const isNight = typeof bot.time?.isDay === "boolean" ? !bot.time.isDay : dayTicks >= 13_000 && dayTicks < 23_000;
-  return { dayTicks, day, isNight };
+function minecraftTimeInfo(
+  bot: Bot,
+): { dayTicks: number | null; day: number | null; isNight: boolean; source: string } | null {
+  return readTimeInfo(bot as unknown as LiveBotLike);
 }
 
 function finiteOrNull(value: number | undefined): number | null {
@@ -301,11 +311,59 @@ function cardinalShelterCount(bot: Bot, feet: { x: number; y: number; z: number 
   return solid;
 }
 
-/** Mineflayer's 0..10 air gauge converted to Minecraft air ticks (300 = full lungs). */
-function oxygenTicksFromLevel(level: number | null | undefined): number {
-  if (typeof level !== "number" || !Number.isFinite(level)) return 300;
-  return Math.max(0, Math.min(300, Math.round(level * 30)));
+/**
+ * The mode/dimension gates every world-changing capability used to read `bot.game.gameMode` and compare
+ * it with the literal `"survival"`. On a live 1.20.4 session that comparison can fail for reasons that
+ * have nothing to do with the game (a numeric id from a proxy, a `minecraft:`-prefixed identifier, a
+ * field Mineflayer has not filled in yet), and every action then refused with a mode the player was not
+ * actually in. The gate now refuses only what the session *positively reported*: a verified non-survival
+ * mode, or a verified non-overworld dimension. An unreported value is logged and carried into the action
+ * outcome as evidence, never turned into a refusal or into an invented mode.
+ */
+function gameModeGate(
+  bot: Bot,
+): { readonly block: true; readonly reason: string } | { readonly block: false; readonly evidence: string } {
+  const mode: SessionField<MinecraftGameMode> = readGameMode(bot as unknown as LiveBotLike);
+  if (gameModeDefinitelyNotSurvival(mode)) {
+    return { block: true, reason: `the live session reports ${describeSessionField(mode)}` };
+  }
+  return { block: false, evidence: describeSessionField(mode) };
 }
+
+function dimensionGate(
+  bot: Bot,
+): { readonly block: true; readonly reason: string } | { readonly block: false; readonly evidence: string } {
+  const dimension = readDimension(bot as unknown as LiveBotLike);
+  if (dimensionDefinitelyNotOverworld(dimension)) {
+    return { block: true, reason: `the live session reports ${describeSessionField(dimension)}` };
+  }
+  return { block: false, evidence: describeSessionField(dimension) };
+}
+
+/**
+ * Validates an observation payload and turns a schema mismatch into an actionable error.
+ *
+ * A raw ZodError stringifies to a wall of JSON, which is what an operator actually saw when a live
+ * session first reported a dimension as a number: the run died as `TASK_RUNTIME_ERROR` and nothing said
+ * which field was wrong or what the server had sent. The message names each offending path and the value
+ * that arrived, and the caller's diagnostics are logged alongside it.
+ */
+function parseMinecraftObservation(candidate: unknown, diagnostics?: string): MinecraftObservation {
+  const parsed = minecraftObservationSchema.safeParse(candidate);
+  if (parsed.success) return parsed.data;
+  const issues = parsed.error.issues
+    .slice(0, 8)
+    .map((issue) => {
+      const received = "value" in issue ? JSON.stringify((issue as { value?: unknown }).value) ?? "undefined" : "an unusable value";
+      return `${issue.path.join(".") || "observation"}: expected ${issue.code}, received ${received}`;
+    })
+    .join("; ");
+  throw new MinecraftAdapterError(
+    `Observation failed validation: ${issues}${diagnostics ? ` · live session: ${diagnostics}` : ""}`,
+    "OBSERVATION_SCHEMA_INVALID",
+  );
+}
+
 
 function clampFinite(value: number | undefined, min: number, max: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return min;
@@ -382,6 +440,15 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private bot: Bot | null = null;
   private sequence = 0;
   private deathCount = 0;
+  /** When the live session last sent an `update_health` packet, i.e. when vitals were truly observed. */
+  private vitalsObservedAt: string | null = null;
+  /** Last game-state change the session reported, so a mode or dimension change is attributable. */
+  private lastSessionChange: { at: string; kind: string; detail: string } | null = null;
+  /** Reported once per session, so an unverified dimension does not flood the log every observation. */
+  private unverifiedFactsReported = false;
+  private readonly sessionListeners: Array<{ event: string; handler: () => void }> = [];
+  private lastStatusChange: AdapterStatusChange | null = null;
+
   private activeActionId: string | null = null;
   private activeCapability: string | null = null;
   private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
@@ -484,6 +551,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
 
     const sessionId = randomUUID();
     this.sequence = 0;
+    this.vitalsObservedAt = null;
+    this.lastSessionChange = null;
+    this.unverifiedFactsReported = false;
     this.pendingSessionId = sessionId;
     this.transition("connecting", null);
 
@@ -526,6 +596,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
 
       const onSpawn = (): void => {
         if (this.bot !== bot) return;
+        this.watchSession(bot, sessionId);
         if (settled) {
           // Mineflayer emits spawn again after a death/respawn. Pathfinder movement state is
           // re-applied because plugins may reset their world context on respawn.
@@ -693,23 +764,44 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       return bot.inventory.slots[slot] ?? null;
     };
     const validationStartedAt = performance.now();
-    const parsedState = minecraftObservationSchema.parse({
+    // Every session fact below is read from the live bot at this moment: no value is carried over from a
+    // previous observation, and none is invented when the session has not reported one.
+    const dimension = readDimension(bot as unknown as LiveBotLike);
+    const gameMode = readGameMode(bot as unknown as LiveBotLike);
+    const vitals = readVitals(bot as unknown as LiveBotLike);
+    const inventoryWindow = bot.inventory as unknown as { emptySlotCount?: () => number };
+    const emptySlots = typeof inventoryWindow.emptySlotCount === "function"
+      ? inventoryWindow.emptySlotCount()
+      : null;
+    const timeInfo = minecraftTimeInfo(bot);
+    this.reportUnverifiedSessionFacts(dimension, gameMode, vitals);
+    const parsedState = parseMinecraftObservation({
       player: {
         username: bot.username,
         position: { x: position.x, y: position.y, z: position.z },
         orientation: { yaw: bot.entity.yaw, pitch: bot.entity.pitch },
-        dimension: bot.game.dimension,
-        gameMode: bot.game.gameMode,
-        health: finiteOrNull(bot.health),
-        food: finiteOrNull(bot.food),
-        foodSaturation: finiteOrNull(bot.foodSaturation),
-        // Mineflayer reports 0..10; the observation contract speaks air ticks like the game logic does.
-        oxygenLevel: oxygenTicksFromLevel(bot.oxygenLevel),
-        onGround: bot.entity.onGround,
-        // `items()` covers the 27 main-inventory slots; a full one cannot accept a new stack name.
-        inventoryFull: bot.inventory.items().length >= 27,
-        alive: (bot as Bot & { isAlive?: boolean }).isAlive ?? (finiteOrNull(bot.health) ?? 0) > 0,
+        dimension: dimension.value,
+        gameMode: gameMode.value,
+        health: vitals.health,
+        food: vitals.food,
+        foodSaturation: vitals.foodSaturation,
+        // Mineflayer's air gauge is `air_supply / 15`, so it is converted back to ticks here. An absent
+        // gauge stays absent: a fabricated "full lungs" hides drowning from the safety policy.
+        oxygenLevel: vitals.airTicks,
+        onGround: typeof bot.entity.onGround === "boolean" ? bot.entity.onGround : false,
+        // An empty-slot count from the inventory window is the only proof that nothing more can be held.
+        ...(emptySlots === null
+          ? { inventoryFull: bot.inventory.items().length >= 36 }
+          : { inventoryFull: emptySlots === 0 }),
+        alive: vitals.alive,
         deathCount: this.deathCount,
+        session: {
+          dimension,
+          gameMode,
+          ...(this.vitalsObservedAt ? { vitalsObservedAt: this.vitalsObservedAt } : {}),
+          airEvidence: vitals.airEvidence,
+          vitalsObserved: vitals.healthObserved,
+        },
       },
       inventory: bot.inventory.items().map((item) => ({
         slot: item.slot,
@@ -746,7 +838,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         unknownCells,
         truncated: cubeTruncated,
       },
-      time: minecraftTimeInfo(bot),
+      ...(timeInfo ? { time: timeInfo } : {}),
       minableSightings: minableSightings.blocks,
       minableScan: {
         radius: this.config.resourceScanRadius,
@@ -1180,9 +1272,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftCollectBlockInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid collection target.", "INVALID_ACTION_INPUT");
-    if (bot.game.dimension !== "overworld") {
-      throw new MinecraftAdapterError("This initial collection skill only supports overworld logs.", "UNSUPPORTED_DIMENSION");
-    }
+    this.requireOverworld(bot, "Log collection", "UNSUPPORTED_DIMENSION");
     if (!bot.collectBlock) {
       throw new MinecraftAdapterError("Collect-block plugin is unavailable.", "COLLECTOR_UNAVAILABLE");
     }
@@ -1200,12 +1290,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         "RESOURCE_TARGET_TOO_FAR",
       );
     }
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError(
-        `Log collection requires survival mode; current mode is '${bot.game.gameMode}'.`,
-        "GAME_MODE_BLOCKS_COLLECTION",
-      );
-    }
+    this.requireSurvivalMode(bot, "Log collection", "GAME_MODE_BLOCKS_COLLECTION");
     if (!bot.canDigBlock(block)) {
       throw new MinecraftAdapterError("Minecraft client reports that this block cannot be harvested.", "BLOCK_NOT_HARVESTABLE");
     }
@@ -1276,9 +1361,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftCraftItemInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid craft request.", "INVALID_ACTION_INPUT");
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError("Crafting task actions require survival mode.", "GAME_MODE_BLOCKS_CRAFTING");
-    }
+    this.requireSurvivalMode(bot, "Crafting task actions", "GAME_MODE_BLOCKS_CRAFTING");
     const before = inventoryCount(bot, parsed.data.item);
     if (before >= parsed.data.count) {
       return {
@@ -1350,9 +1433,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftEatFoodInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid food request.", "INVALID_ACTION_INPUT");
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError("Eating task actions require survival mode.", "GAME_MODE_BLOCKS_EATING");
-    }
+    this.requireSurvivalMode(bot, "Eating task actions", "GAME_MODE_BLOCKS_EATING");
     const hungerBefore = finiteOrNull(bot.food);
     if (hungerBefore === null || hungerBefore >= 20) {
       throw new MinecraftAdapterError("Player hunger is full or unavailable; eating is not needed.", "FOOD_NOT_NEEDED");
@@ -1389,12 +1470,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftPickupItemInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid pickup request.", "INVALID_ACTION_INPUT");
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError(
-        `Item pickup requires survival mode; current mode is '${bot.game.gameMode}'.`,
-        "GAME_MODE_BLOCKS_PICKUP",
-      );
-    }
+    this.requireSurvivalMode(bot, "Item pickup", "GAME_MODE_BLOCKS_PICKUP");
     if (!bot.pathfinder) {
       throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
     }
@@ -1449,12 +1525,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftHarvestBerriesInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid berry harvest request.", "INVALID_ACTION_INPUT");
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError(
-        `Berry harvesting requires survival mode; current mode is '${bot.game.gameMode}'.`,
-        "GAME_MODE_BLOCKS_HARVEST",
-      );
-    }
+    this.requireSurvivalMode(bot, "Berry harvesting", "GAME_MODE_BLOCKS_HARVEST");
     if (!bot.pathfinder) {
       throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
     }
@@ -1527,12 +1598,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftRestInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid rest request.", "INVALID_ACTION_INPUT");
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError(
-        `Resting is only modelled for survival mode; current mode is '${bot.game.gameMode}'.`,
-        "GAME_MODE_BLOCKS_REST",
-      );
-    }
+    this.requireSurvivalMode(bot, "Resting", "GAME_MODE_BLOCKS_REST");
     const healthBefore = finiteOrNull(bot.health);
     if (healthBefore === null) {
       throw new MinecraftAdapterError("Player health is unavailable; resting cannot be verified.", "HEALTH_UNKNOWN");
@@ -1604,9 +1670,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftPlaceTableInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid crafting-table placement target.", "INVALID_ACTION_INPUT");
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError("Placing a crafting table requires survival mode.", "GAME_MODE_BLOCKS_PLACEMENT");
-    }
+    this.requireSurvivalMode(bot, "Placing a crafting table", "GAME_MODE_BLOCKS_PLACEMENT");
     const tableItem = bot.inventory.items().find((item) => item.name === "crafting_table");
     if (!tableItem) {
       throw new MinecraftAdapterError("Inventory does not contain a crafting table.", "CRAFTING_TABLE_NOT_IN_INVENTORY");
@@ -1704,12 +1768,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const parsed = minecraftMineBlockInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid mining target.", "INVALID_ACTION_INPUT");
     const { x, y, z, blockName, dangerRadius } = parsed.data;
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError(
-        `Mining requires survival mode; current mode is '${bot.game.gameMode}'.`,
-        "GAME_MODE_BLOCKS_MINING",
-      );
-    }
+    this.requireSurvivalMode(bot, "Mining", "GAME_MODE_BLOCKS_MINING");
     const block = this.blockAtCoordinates(bot, x, y, z);
     if (!block || block.name !== blockName) {
       throw new MinecraftAdapterError(
@@ -1861,12 +1920,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     dangerRadius: number,
     signal: AbortSignal,
   ): Promise<AdapterActionOutcome> {
-    if (bot.game.gameMode !== "survival") {
-      throw new MinecraftAdapterError(
-        `Placing ${blockName} requires survival mode; current mode is '${bot.game.gameMode}'.`,
-        "GAME_MODE_BLOCKS_PLACEMENT",
-      );
-    }
+    this.requireSurvivalMode(bot, `Placing ${blockName}`, "GAME_MODE_BLOCKS_PLACEMENT");
     const item = bot.inventory.items().find((candidate) => candidate.name === blockName);
     if (!item) {
       throw new MinecraftAdapterError(`Inventory does not contain ${blockName}.`, "PLACEMENT_BLOCK_NOT_IN_INVENTORY");
@@ -2217,6 +2271,135 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     return this.bot;
   }
 
+  /**
+   * Refuses an action only when the live session *positively reports* a non-survival mode. A mode the
+   * session never sent is reported in the log and in the observation, and never becomes a refusal: a
+   * survival player must not be blocked by a field Mineflayer failed to fill in.
+   */
+  private requireSurvivalMode(bot: Bot, activity: string, code: string): void {
+    const gate = gameModeGate(bot);
+    if (gate.block) {
+      throw new MinecraftAdapterError(`${activity} requires survival mode; ${gate.reason}.`, code);
+    }
+    if (readGameMode(bot as unknown as LiveBotLike).value === null) {
+      this.logger.warn(
+        { activity, evidence: gate.evidence },
+        "game mode could not be read from the live session; the action proceeds without a mode claim",
+      );
+    }
+  }
+
+  /** As `requireSurvivalMode`, for the overworld-only restriction: only a verified other dimension blocks. */
+  private requireOverworld(bot: Bot, activity: string, code: string): void {
+    const gate = dimensionGate(bot);
+    if (gate.block) {
+      throw new MinecraftAdapterError(`${activity} only runs in the overworld; ${gate.reason}.`, code);
+    }
+  }
+
+  /**
+   * Says once per session what the live session could not prove. Silent on every subsequent observation,
+   * so the log records the gap without drowning in it.
+   */
+  private reportUnverifiedSessionFacts(
+    dimension: SessionField<string>,
+    gameMode: SessionField<MinecraftGameMode>,
+    vitals: ReturnType<typeof readVitals>,
+  ): void {
+    const gaps: string[] = [];
+    if (dimension.value === null) gaps.push(`dimension ${dimension.evidence} (${dimension.observed})`);
+    if (gameMode.value === null) gaps.push(`game mode ${gameMode.evidence} (${gameMode.observed})`);
+    if (vitals.health === null) gaps.push(`health unreported (${vitals.healthObserved})`);
+    if (vitals.food === null) gaps.push(`hunger unreported (${vitals.healthObserved})`);
+    if (vitals.airTicks === null) gaps.push("air supply unreported");
+    if (gaps.length === 0) return;
+    if (this.unverifiedFactsReported) return;
+    this.unverifiedFactsReported = true;
+    this.logger.warn(
+      { gaps, vitalsObservedAt: this.vitalsObservedAt },
+      "live session did not report some player facts; the agent reports them as unknown instead of using defaults",
+    );
+  }
+
+  /**
+   * Subscribes to the live session's own change signals. Health, hunger and the game state are only ever
+   * as current as the last packet, so the adapter records when they arrived and re-reads them on every
+   * observation instead of caching a value from connect time.
+   */
+  private watchSession(bot: Bot, sessionId: string): void {
+    this.detachSessionWatchers();
+    const onHealth = (): void => {
+      this.vitalsObservedAt = new Date().toISOString();
+    };
+    const onGame = (): void => {
+      const game = (bot as unknown as LiveBotLike).game as Record<string, unknown> | undefined;
+      const change = {
+        at: new Date().toISOString(),
+        kind: "game",
+        detail: `dimension=${JSON.stringify(game?.dimension) ?? "absent"} gameMode=${JSON.stringify(game?.gameMode) ?? "absent"}`,
+      };
+      this.lastSessionChange = change;
+      // A dimension or mode change invalidates the "already reported" flag, so the new state gets its own
+      // log line, and the next observation re-reads everything from the session.
+      this.unverifiedFactsReported = false;
+      this.logger.info({ sessionId, ...change }, "Minecraft session reported a game-state change");
+    };
+    const onDeath = (): void => {
+      this.lastSessionChange = { at: new Date().toISOString(), kind: "death", detail: "player died" };
+      onHealth();
+    };
+    const onBreath = (): void => {
+      onHealth();
+    };
+    const bind = (event: string, handler: () => void): void => {
+      if (typeof (bot as unknown as { on?: unknown }).on !== "function") return;
+      (bot as unknown as { on(event: string, listener: () => void): void }).on(event, handler);
+      this.sessionListeners.push({ event, handler });
+    };
+    bind("health", onHealth);
+    bind("breath", onBreath);
+    bind("game", onGame);
+    bind("death", onDeath);
+    // The first health value is usually already in place when the bot spawns, before any event fires.
+    if (typeof bot.health === "number") this.vitalsObservedAt = new Date().toISOString();
+  }
+
+  private detachSessionWatchers(): void {
+    const bot = this.bot as unknown as { removeListener?: (event: string, listener: () => void) => void } | null;
+    for (const { event, handler } of this.sessionListeners) {
+      try {
+        bot?.removeListener?.(event, handler);
+      } catch {
+        // The client is already gone; the listener dies with it.
+      }
+    }
+    this.sessionListeners.length = 0;
+  }
+
+
+  /**
+   * Why the adapter is in the state it is in. The Control Center shows this verbatim: "failed" without a
+   * reason is the difference between an operator being able to fix a connection and being able only to
+   * watch it fail.
+   */
+  get statusReason(): string | null {
+    return this.lastStatusChange?.reason ?? null;
+  }
+
+  get lastStatus(): AdapterStatusChange | null {
+    return this.lastStatusChange;
+  }
+
+  /** When the live session last proved the player's vitals, or null when it never has. */
+  get vitalsObservedAtIso(): string | null {
+    return this.vitalsObservedAt;
+  }
+
+  /** The last dimension/game-mode change the session reported, for the dashboard's session panel. */
+  get sessionChange(): { at: string; kind: string; detail: string } | null {
+    return this.lastSessionChange;
+  }
+
   private transition(
     status: AdapterStatus,
     reason: string | null,
@@ -2232,6 +2415,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           : sessionIdOverride,
       reason,
     };
+    this.lastStatusChange = change;
+    if (status === "connected") this.unverifiedFactsReported = false;
     for (const listener of this.statusListeners) {
       try {
         listener(change);

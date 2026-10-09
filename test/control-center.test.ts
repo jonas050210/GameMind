@@ -156,7 +156,12 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.equal(before.learning?.evaluation?.generatedAt, null, "a missing report must read as unmeasured, not as zero");
     assert.ok(before.capabilities.length > 0);
     assert.ok(before.world.health !== null, "health comes from the observed player state");
-    assert.ok(before.recentEvents.some((event) => event.eventType === "session.started"));
+    assert.equal(before.connection.worldAvailable, true, "a connected adapter with a live observation can show the world");
+    assert.equal(before.world.freshness.reason, "fresh", "the panel says which observation it is showing");
+    assert.equal(before.world.provenance.source, "simulated", "a simulated run is never presented as a live observation");
+    assert.equal(before.agent.blocker.kind, "none", "an idle, unblocked run must not be shown as blocked");
+    assert.equal(before.world.sessionFacts?.gameMode.value, "survival");
+    assert.equal(before.world.sessionFacts?.gameMode.evidence, "verified");
     assert.equal(before.world.perception, null, "the simulator does not invent live adapter timing data");
     assert.ok(before.world.blocks.every((block) => Number.isFinite(block.x) && Number.isFinite(block.y) && Number.isFinite(block.z)));
 
@@ -170,7 +175,8 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.ok(after.world.inventory.some((item) => item.name === "oak_log" && item.count >= 1), "inventory must be read from the world");
     assert.ok(after.goal, "the last decision trace is exposed");
     assert.equal(typeof after.goal?.rationale, "string");
-    assert.ok(after.recentEvents.some((event) => event.eventType === "task.completed"), "task lifecycle events are surfaced separately from observation frames");
+    assert.equal(after.agent.blocker.kind, "none", "a succeeded run leaves no blocker behind");
+    assert.ok(after.agent.status === "succeeded");
     assert.ok(after.recentActions.length > 0, "executed skills are listed from the trace");
     assert.ok(
       after.recentActions.every((action) => action.status.length > 0 && action.at.length > 0),
@@ -391,9 +397,17 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     assert.ok(!html.includes("__CONTROL_TOKEN__"), "the token placeholder must be replaced when serving");
     assert.ok(html.includes(fixture.host.handle?.token ?? "missing"), "the served page carries this server's token");
     const clientScript = await (await fetch(`${base}/app.js`)).text();
-    for (const route of ["/api/snapshot", "/api/command", "/api/stream"]) {
+    for (const route of ["/api/snapshot", "/api/command"]) {
       assert.ok(clientScript.includes(route), `the UI must call ${route} on this same server`);
     }
+    assert.ok(
+      !clientScript.includes("EventSource") && !clientScript.includes("/api/stream"),
+      "the removed live event stream must not be re-opened by the UI: the snapshot poll is the only read channel",
+    );
+    assert.ok(
+      /POLL_HIDDEN_MS|document\.hidden/.test(clientScript),
+      "polling must back off while the tab is hidden, so an unwatched page costs the agent nothing",
+    );
     assert.ok(clientScript.includes("aria-valuenow"), "the action-budget progress bar must expose its live value");
     for (const asset of ["styles.css", "app.js", "world-view.js", "index.html"]) {
       const response = await fetch(`${base}/${asset}`);
@@ -408,6 +422,22 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
       );
       assert.ok(!/<link[^>]+href=["']http/.test(body) && !/<script[^>]+src=["']http/.test(body), `${asset} must not load remote code`);
     }
+    // Every element id the renderer looks up must exist in the served page: the dashboard has no type
+    // checker over its DOM, so a card that is renamed in the HTML fails silently at runtime in the browser.
+    const markup = await (await fetch(`${base}/index.html`)).text();
+    const declared = new Set([...markup.matchAll(/id="([^"]+)"/g)].map((match) => match[1] ?? ""));
+    const OPTIONAL_IDS = new Set(["theme-toggle"]);
+    const lookedUp = [...new Set([...clientScript.matchAll(/el\("([^"]+)"\)/g)].map((match) => match[1] ?? ""))];
+    assert.deepEqual(
+      lookedUp.filter((id) => !declared.has(id) && !OPTIONAL_IDS.has(id)),
+      [],
+      "the page must declare every element the renderers touch",
+    );
+    // The removed live-stream card must not leave its renderer behind, and the blocker card must be wired.
+    assert.ok(!clientScript.includes('el("events")'), "the live event stream card is gone from the UI");
+    assert.ok(lookedUp.includes("blocker"), "the blocker panel is rendered from the snapshot");
+    assert.ok(lookedUp.includes("world-freshness"), "the world panel states how current its data is");
+
     const missing = await fetch(`${base}/../etc/passwd`);
     assert.ok(missing.status === 404 || missing.status === 403, "path escapes are refused");
   } finally {
@@ -415,63 +445,29 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
   }
 });
 
-test("the event stream pushes snapshots and trace events without a second request", async () => {
+test("the removed event stream is reported as gone and the snapshot poll stays authoritative", async () => {
   const fixture = await startFixture();
   try {
     const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
     const response = await fetch(`${base}/api/stream`, { headers: { accept: "text/event-stream" } });
-    assert.equal(response.status, 200);
-    assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
-    const reader = response.body?.getReader();
-    assert.ok(reader, "the stream must be readable");
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const deadline = Date.now() + 10_000;
-    let frame: ControlCenterSnapshot | null = null;
-    while (!frame && Date.now() < deadline) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      const marker = buffer.indexOf("event: snapshot\ndata: ");
-      if (marker >= 0) {
-        const start = marker + "event: snapshot\ndata: ".length;
-        const end = buffer.indexOf("\n\n", start);
-        if (end > start) {
-          frame = JSON.parse(buffer.slice(start, end)) as ControlCenterSnapshot;
-        }
-      }
-    }
-    assert.ok(frame, "the server must push a snapshot frame on connect");
-    const seen = frame as ControlCenterSnapshot;
-    assert.equal(seen.connection.adapterStatus, "connected");
-    assert.equal(seen.connection.server, "explore-remote-log#101");
-    // A state change is visible in the next pushed frame, proving the stream follows the runtime.
-    await fixture.command("pause", "streamed pause");
-    let sawPause = false;
-    while (!sawPause && Date.now() < deadline) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      sawPause = /"pauseReason":"streamed pause"/.test(buffer);
-    }
-    assert.ok(sawPause, "the pushed frame must carry the operator's pause reason");
-    await fixture.command("resume");
+    assert.equal(response.status, 410, "the stream endpoint is retired, not silently empty");
+    const body = (await response.json()) as { ok?: boolean; code?: string; message?: string };
+    assert.equal(body.ok, false);
+    assert.equal(body.code, "STREAM_REMOVED");
+    assert.match(String(body.message), /\/api\/snapshot/);
 
-    // The stream also carries individual trace events, so the panels follow the loop action by action.
-    void fixture.command("startTask", { kind: "gather-logs", count: 1 });
-    let sawTraceEvent = "";
-    while (!sawTraceEvent && Date.now() < deadline + 15_000) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      buffer += decoder.decode(chunk.value, { stream: true });
-      const match = /event: trace\ndata: (\{.*?\})\n\n/.exec(buffer);
-      if (match?.[1]) {
-        const parsed = JSON.parse(match[1]) as { eventType?: string };
-        if (parsed.eventType) sawTraceEvent = parsed.eventType;
-      }
-    }
-    assert.ok(sawTraceEvent, "trace events must be pushed, not only polled");
-    reader.cancel().catch(() => undefined);
+    // What the stream used to prove about liveness is now proven by the poll: a command's effect is
+    // visible in the next snapshot without the client having to know when the agent acted.
+    await fixture.command("pause", "pause observed through polling");
+    const paused = await fixture.snapshots();
+    assert.equal(paused.safety?.paused, true);
+    assert.equal(paused.safety?.pauseReason, "pause observed through polling");
+    assert.equal(paused.agent.blocker.kind, "safety", "an operator hold must read as a safety refusal, not a failure");
+    assert.match(paused.agent.blocker.detail, /pause observed through polling/);
+    await fixture.command("resume");
+    const resumed = await fixture.snapshots();
+    assert.equal(resumed.safety?.paused, false);
+    assert.equal(resumed.agent.blocker.kind, "none");
   } finally {
     await fixture.close();
   }
