@@ -135,6 +135,36 @@ test("a ripe berry bush is harvested as a survival source; an unripe one is igno
   assert.notEqual(model.decide(unripe, gather, context()).selected?.skillId, "minecraft.harvest-berries");
 });
 
+test("a remembered unripe bush is revisited to refresh observation without assuming that it matured", () => {
+  const memory = new WorldMemory();
+  const lastSeen = observationAt(origin, {
+    player: { ...observationAt(origin).player, food: 6 },
+    resourceSightings: [sighting("sweet_berry_bush", 4, 64, 0, { age: 1 })],
+  });
+  memory.observe(lastSeen, 1);
+
+  const away = { x: 30.5, y: 64, z: 0.5 };
+  const stale = observationAt(away, { player: { ...observationAt(away).player, food: 6 } });
+  memory.observe(stale, 2);
+  const refresh = model.decide(stale, secure, context({
+    memory,
+    origin: { x: origin.x, z: origin.z },
+    explorationLegsUsed: secure.maxExplorationLegs,
+  }));
+  assert.equal(refresh.selected?.goalId, "recheck:berry");
+  assert.equal(refresh.selected?.skillId, "minecraft.navigate");
+  assert.deepEqual(refresh.selected?.input, { x: 4, y: 64, z: 0, range: 3 });
+  assert.match(refresh.selected?.rationale ?? "", /ripeness is not assumed/);
+
+  const returned = observationAt({ x: 4.5, y: 64, z: 0.5 }, {
+    player: { ...observationAt(origin).player, position: { x: 4.5, y: 64, z: 0.5 }, food: 6 },
+    resourceSightings: [sighting("sweet_berry_bush", 4, 64, 0, { age: 3 })],
+  });
+  memory.observe(returned, 3);
+  const harvest = model.decide(returned, secure, context({ memory, origin: { x: origin.x, z: origin.z } }));
+  assert.equal(harvest.selected?.skillId, "minecraft.harvest-berries");
+});
+
 test("resting is chosen when health is low, food supports regeneration, and no hostile is visible", () => {
   const state = observationAt(origin, { player: { ...observationAt(origin).player, health: 8, food: 20 } });
   const decision = model.decide(state, gather, context());

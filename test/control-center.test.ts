@@ -16,6 +16,7 @@ import { SimulatedMinecraftAdapter } from "../src/testing/simulated-minecraft/ad
 import type { MinecraftTaskResult } from "../src/games/minecraft/task-runner.js";
 import type { MinecraftTask } from "../src/games/minecraft/task.js";
 import type { ControlCenterSnapshot } from "../src/control-center/types.js";
+import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
 
 /**
  * These tests drive the Control Center through its HTTP surface against a real agent (simulated world,
@@ -76,6 +77,7 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     port: 0,
     bindHost: "127.0.0.1",
     evaluationReportPath: path.join(directory, "no-report.json"),
+    evaluationScenarioIds: evaluationScenarios().map((candidate) => candidate.id),
     createRunner: (extra) => {
       const stopAfter = options.stopAfterActions ?? null;
       let actions = 0;
@@ -144,6 +146,9 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.equal(before.agent.taskId, null);
     assert.equal(before.agent.state, "idle");
     assert.equal(before.offlineNote, "test fixture: simulated world");
+    assert.ok(before.performance.logicalCpus >= 1);
+    assert.ok(Number.isFinite(before.performance.process.rssBytes));
+    assert.ok(Number.isFinite(before.performance.process.eventLoopUtilizationPercent));
     assert.equal(before.goal, null);
     assert.equal(before.safety?.policyId, "gamemind-minecraft-v1");
     assert.equal(before.safety?.paused, false);
@@ -151,6 +156,9 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.equal(before.learning?.evaluation?.generatedAt, null, "a missing report must read as unmeasured, not as zero");
     assert.ok(before.capabilities.length > 0);
     assert.ok(before.world.health !== null, "health comes from the observed player state");
+    assert.ok(before.recentEvents.some((event) => event.eventType === "session.started"));
+    assert.equal(before.world.perception, null, "the simulator does not invent live adapter timing data");
+    assert.ok(before.world.blocks.every((block) => Number.isFinite(block.x) && Number.isFinite(block.y) && Number.isFinite(block.z)));
 
     const result = await fixture.runTask(taskFromControlCenterRequest({ kind: "gather-logs", count: 1 }));
     assert.equal(result.status, "succeeded", `the gather task should succeed in this world: ${JSON.stringify(result.failure)}`);
@@ -162,6 +170,7 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.ok(after.world.inventory.some((item) => item.name === "oak_log" && item.count >= 1), "inventory must be read from the world");
     assert.ok(after.goal, "the last decision trace is exposed");
     assert.equal(typeof after.goal?.rationale, "string");
+    assert.ok(after.recentEvents.some((event) => event.eventType === "task.completed"), "task lifecycle events are surfaced separately from observation frames");
     assert.ok(after.recentActions.length > 0, "executed skills are listed from the trace");
     assert.ok(
       after.recentActions.every((action) => action.status.length > 0 && action.at.length > 0),
@@ -188,6 +197,52 @@ test("snapshot reflects the live runtime, before and after a real task", async (
       "the runtime sequence only moves forward",
     );
     assert.ok(after.world.exploredCells > 0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("world map distinguishes current wide-scan sightings from older memory", async () => {
+  const fixture = await startFixture();
+  try {
+    const observed = fixture.runtime.currentWorldState;
+    assert.ok(observed);
+    const position = { x: 10, y: 64, z: 0 };
+    const sighting: MinecraftObservation["resourceSightings"][number] = {
+      name: "oak_log",
+      position,
+      distance: Math.hypot(
+        observed.state.player.position.x - position.x,
+        observed.state.player.position.y - position.y,
+        observed.state.player.position.z - position.z,
+      ),
+    };
+    fixture.host.memory.observe(
+      { ...observed.state, resourceSightings: [...observed.state.resourceSightings, sighting] },
+      observed.sequence,
+    );
+
+    const currentSnapshot = await fixture.snapshots();
+    const currentMarker = currentSnapshot.world.blocks.find(
+      (block) => block.x === position.x && block.y === position.y && block.z === position.z,
+    );
+    assert.ok(currentMarker, "a block seen in the current strategic scan is shown on the map");
+    assert.equal(currentMarker.remembered, false, "a current wide-scan sighting is not styled as stale memory");
+
+    const nextObservation = await fixture.runtime.observe();
+    fixture.host.memory.observe(
+      {
+        ...nextObservation.state,
+        resourceScan: { ...nextObservation.state.resourceScan, truncated: true },
+      },
+      nextObservation.sequence,
+    );
+    const laterSnapshot = await fixture.snapshots();
+    const rememberedMarker = laterSnapshot.world.blocks.find(
+      (block) => block.x === position.x && block.y === position.y && block.z === position.z,
+    );
+    assert.ok(rememberedMarker, "an incomplete later scan must not erase the last known block");
+    assert.equal(rememberedMarker.remembered, true, "a sighting from an earlier observation is marked as memory");
   } finally {
     await fixture.close();
   }
@@ -327,6 +382,11 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /<canvas id="minimap"/);
+    assert.match(html, /[Ii]nteractive 3D voxel view/);
+    assert.match(html, /id="minimap"[^>]+tabindex="0"/);
+    assert.match(html, /aria-describedby="map-controls"/);
+    assert.match(html, /aria-live="polite"/);
+    assert.match(html, /id="task-form"/);
     assert.match(html, /id="boot-data"/);
     assert.ok(!html.includes("__CONTROL_TOKEN__"), "the token placeholder must be replaced when serving");
     assert.ok(html.includes(fixture.host.handle?.token ?? "missing"), "the served page carries this server's token");
@@ -334,10 +394,14 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     for (const route of ["/api/snapshot", "/api/command", "/api/stream"]) {
       assert.ok(clientScript.includes(route), `the UI must call ${route} on this same server`);
     }
-    for (const asset of ["styles.css", "app.js", "index.html"]) {
+    assert.ok(clientScript.includes("aria-valuenow"), "the action-budget progress bar must expose its live value");
+    for (const asset of ["styles.css", "app.js", "world-view.js", "index.html"]) {
       const response = await fetch(`${base}/${asset}`);
       assert.equal(response.status, 200, `${asset} must be served from the package, not a CDN`);
       const body = await response.text();
+      if (asset === "world-view.js") {
+        assert.ok(body.includes('event.key === "ArrowLeft"') && body.includes('event.key === "Home"'), "the voxel view must have keyboard orbit and reset controls");
+      }
       assert.ok(
         !/https?:\/\/(?!127\.0\.0\.1|localhost|www\.w3\.org)/.test(body),
         `${asset} must not reference external origins: the dashboard runs with no network access`,
@@ -446,25 +510,16 @@ test("policy commands refuse without evidence and roll back what was learned", a
   try {
     const empty = await fixture.command("promotePolicy");
     assert.equal(empty.status, 409);
-    assert.match(empty.body.message ?? "", /Nothing learned yet/);
+    assert.match(empty.body.message ?? "", /no episodes have been recorded/);
 
     await fixture.runTask(taskFromControlCenterRequest({ kind: "gather-logs", count: 1 }));
     const promoted = await fixture.command("promotePolicy");
-    assert.equal(promoted.status, promoted.body.ok ? 200 : 409, `promotion reported: ${promoted.body.message}`);
+    assert.equal(promoted.status, 409, "episode collection alone cannot bypass the offline comparison gate");
+    assert.match(promoted.body.message ?? "", /offline evaluation report|candidate weight comparison/);
     const afterPromote = await fixture.snapshots();
     const promotedLearning = afterPromote.learning;
     assert.ok(promotedLearning);
-    if (promoted.status === 200) {
-      assert.ok(promotedLearning.activePolicy, "a promoted policy becomes the active one");
-      assert.match(promotedLearning.activePolicy?.id ?? "", /^(baseline|learned)-/);
-      assert.ok(promotedLearning.history[0]?.promoted, "the promotion is recorded in the history");
-    } else {
-      assert.match(
-        promoted.body.message ?? "",
-        /contradicted|baseline/,
-        "the valid refusals are contradicted evidence or a candidate that never left the baseline",
-      );
-    }
+    assert.equal(promotedLearning.activePolicy, null, "a missing comparison report leaves the baseline active");
     const rejected = await fixture.command("rejectPolicy");
     assert.equal(rejected.status, 200);
     const afterReject = (await fixture.snapshots()).learning;
@@ -492,6 +547,10 @@ test("task requests are validated through the same schemas the CLI uses", () => 
   const craft = taskFromControlCenterRequest({ kind: "craft-wooden-pickaxe" });
   assert.equal(craft.kind, "craft_item");
 
+  const shelter = taskFromControlCenterRequest({ kind: "build-shelter" });
+  assert.equal(shelter.kind, "build_shelter");
+  assert.equal((shelter as { maxBlocks: number }).maxBlocks, 4);
+
   assert.throws(() => taskFromControlCenterRequest({ kind: "kill-player" }), /Unknown task kind/);
   assert.throws(() => taskFromControlCenterRequest({ kind: "gather-logs", resource: "cobblestone" }), /not a log/);
   assert.throws(() => taskFromControlCenterRequest({ kind: "gather-logs", count: 999 }));
@@ -505,6 +564,9 @@ test("the evaluation panel reads the offline report and refuses to invent number
     assert.equal(missing.passed, null);
     assert.equal(missing.learning, null);
     assert.equal(missing.model, null);
+    assert.equal(missing.policyCandidateId, null);
+    assert.equal(missing.policyPromotable, null);
+    assert.deepEqual(missing.scenarioIds, []);
 
     const file = path.join(directory, "offline-report.json");
     await writeFile(
@@ -530,6 +592,10 @@ test("the evaluation panel reads the offline report and refuses to invent number
             passed: true,
           },
         ],
+        policyComparison: {
+          candidatePolicyId: "learned-4-test",
+          decision: { promote: false, reasons: ["safety incident found", "no measured improvement"] },
+        },
       }),
       "utf8",
     );
@@ -541,6 +607,10 @@ test("the evaluation panel reads the offline report and refuses to invent number
     assert.equal(summary.model, "minecraft-priority-utility.v3");
     assert.equal(summary.seedsPerScenario, 20);
     assert.equal(summary.scenarios, 3, "the scenario count comes from the report body");
+    assert.deepEqual(summary.scenarioIds, ["a", "b", "c"]);
+    assert.equal(summary.policyCandidateId, "learned-4-test");
+    assert.equal(summary.policyPromotable, false);
+    assert.deepEqual(summary.policyGateReasons, ["safety incident found", "no measured improvement"]);
     assert.deepEqual(summary.learning, {
       baselineWastedActions: 6,
       candidateWastedActions: 1,

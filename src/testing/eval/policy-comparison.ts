@@ -7,7 +7,7 @@ import {
   type PolicyGateScenarioMetric,
   type PolicyGateThresholds,
 } from "../../core/learning/policy-gate.js";
-import { runEvaluationOnce } from "./harness.js";
+import { runEvaluationOnce, type EvaluationReport } from "./harness.js";
 import type { EvaluationScenario } from "./scenarios.js";
 
 /**
@@ -95,6 +95,27 @@ export async function evaluatePolicyMetricSet(options: PolicyMetricOptions): Pro
   };
 }
 
+/** Reuses the baseline runs already produced by the main evaluation instead of spending another full suite on them. */
+export function baselinePolicyMetricsFromReport(report: EvaluationReport): PolicyGateMetricSet {
+  return {
+    label: "baseline",
+    runs: report.totals.runs,
+    successRate: report.totals.successRate,
+    unsafeActions: report.totals.unsafeActions,
+    deaths: report.totals.deaths,
+    unverifiedConfirmations: report.totals.unverifiedConfirmations,
+    medianActions: report.totals.medianActions,
+    scenarios: report.scenarios.map((scenario) => ({
+      scenarioId: scenario.scenarioId,
+      successRate: scenario.successRate,
+      unsafeActions: scenario.unsafeActions,
+      deaths: scenario.deaths,
+      unverifiedConfirmations: scenario.unverifiedConfirmations,
+      medianActions: scenario.medianActions,
+    })),
+  };
+}
+
 export interface PolicyComparisonResult {
   readonly baseline: PolicyGateMetricSet;
   readonly candidate: PolicyGateMetricSet;
@@ -104,14 +125,16 @@ export interface PolicyComparisonResult {
 /**
  * Measures a candidate weight set against the baseline on the same seeds. Promotion is the caller's
  * decision; this only answers "does this change make the agent better without making it less safe?".
+ * A supplied baseline metric set must come from the exact same scenarios and seeds as the candidate.
  */
 export async function comparePolicyAgainstBaseline(
   scenarios: readonly EvaluationScenario[],
   seeds: readonly number[],
   candidateWeights: PolicyWeights,
   thresholds: Partial<PolicyGateThresholds> = {},
+  baselineMetrics?: PolicyGateMetricSet,
 ): Promise<PolicyComparisonResult> {
-  const baseline = await evaluatePolicyMetricSet({ scenarios, seeds, label: "baseline" });
+  const baseline = baselineMetrics ?? await evaluatePolicyMetricSet({ scenarios, seeds, label: "baseline" });
   const candidate = await evaluatePolicyMetricSet({
     scenarios,
     seeds,

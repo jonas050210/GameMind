@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { MinecraftBlockPosition, MinecraftObservation, MinecraftVector } from "./observation.js";
 import { distanceBetween, isResourceBlockName, isRipeBerryBush } from "./block-classes.js";
 import { isMineableBlockName } from "./mining.js";
@@ -56,6 +57,34 @@ export interface MemorySummary {
   readonly trackedHostiles: number;
 }
 
+/** Persistent, world-scoped knowledge. Moving hostiles and transient item drops are deliberately excluded. */
+export interface WorldMemorySnapshot {
+  readonly schemaVersion: 1;
+  readonly worldKey: string;
+  readonly savedAt: string;
+  readonly observations: number;
+  readonly blocks: readonly BlockSighting[];
+  readonly minable: readonly BlockSighting[];
+  readonly exploredCells: readonly string[];
+}
+
+const persistentBlockSightingSchema = z.object({
+  key: z.string(),
+  name: z.string(),
+  position: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }),
+  ripe: z.boolean().nullable(),
+  lastSeenSequence: z.number().int(),
+});
+const worldMemorySnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  worldKey: z.string().min(1),
+  savedAt: z.string().datetime(),
+  observations: z.number().int().nonnegative(),
+  blocks: z.array(persistentBlockSightingSchema).max(8_192),
+  minable: z.array(persistentBlockSightingSchema).max(8_192),
+  exploredCells: z.array(z.string().regex(/^-?\d+,-?\d+$/)).max(100_000),
+});
+
 export function blockKey(position: MinecraftBlockPosition): string {
   return `${position.x},${position.y},${position.z}`;
 }
@@ -102,6 +131,32 @@ export function markCoverage(
 }
 
 /**
+ * Marks coverage only where the wide scanner has both queried and had a client-loaded chunk column.
+ * A scan radius is not evidence that Minecraft sent those chunks: positions outside the loaded
+ * columns remain unknown and must stay eligible for active exploration.
+ */
+export function markLoadedChunkCoverage(
+  explored: Set<string>,
+  center: { readonly x: number; readonly z: number },
+  radius: number,
+  loadedChunks: readonly { readonly x: number; readonly z: number }[],
+): void {
+  for (const chunk of loadedChunks) {
+    // Eight-block coverage cells align exactly with Minecraft's sixteen-block chunk columns.
+    for (let offsetX = 0; offsetX < 2; offsetX += 1) {
+      for (let offsetZ = 0; offsetZ < 2; offsetZ += 1) {
+        const cellX = chunk.x * 2 + offsetX;
+        const cellZ = chunk.z * 2 + offsetZ;
+        const cell = coverageCellCenter(cellX, cellZ);
+        if (Math.hypot(cell.x - center.x, cell.z - center.z) + CELL_HALF_DIAGONAL <= radius) {
+          explored.add(coverageCellKey(cellX, cellZ));
+        }
+      }
+    }
+  }
+}
+
+/**
  * Short-term belief about the world, built from successive observations.
  *
  * Sightings are only removed when the observation proves they are gone: a block inside a fully
@@ -138,7 +193,17 @@ export class WorldMemory {
     this.observationCount += 1;
 
     const player = state.player.position;
-    markCoverage(this.explored, player, state.resourceScan.radius);
+    if (state.resourceScan.loadedChunks !== undefined) {
+      // A saturated resource scan is a lower bound, not an exhaustive look. Keep those cells open
+      // for exploration instead of treating unreturned areas as known-empty.
+      if (!state.resourceScan.truncated) {
+        markLoadedChunkCoverage(this.explored, player, state.resourceScan.radius, state.resourceScan.loadedChunks);
+      }
+    } else if (!state.resourceScan.truncated) {
+      // Compatibility path for older adapters/fixtures that do not describe loaded chunks. Even here,
+      // a saturated result set cannot establish that omitted cells were inspected.
+      markCoverage(this.explored, player, state.resourceScan.radius);
+    }
 
     let added = 0;
     let removed = 0;
@@ -271,8 +336,13 @@ export class WorldMemory {
       Math.abs(position.y - region.center.y) <= region.verticalRadius;
     if (inLocalCube) return true;
     const scan = kind === "resource" ? state.resourceScan : state.minableScan;
-    if (!scan) return false;
-    return !scan.truncated && distanceBetween(position, scan.center) <= scan.radius;
+    if (!scan || scan.truncated || distanceBetween(position, scan.center) > scan.radius) return false;
+    if (scan.loadedChunks !== undefined) {
+      const chunkX = Math.floor(position.x / 16);
+      const chunkZ = Math.floor(position.z / 16);
+      if (!scan.loadedChunks.some((chunk) => chunk.x === chunkX && chunk.z === chunkZ)) return false;
+    }
+    return true;
   }
 
   /** Resource and table blocks, optionally restricted to block names. */
@@ -320,6 +390,54 @@ export class WorldMemory {
   /** Drops a remembered mineable block, e.g. after a dig proved it is gone. */
   forgetMinable(key: string): boolean {
     return this.mined.delete(key);
+  }
+
+  /** Returns a compact snapshot for durable storage; transient hostiles and item drops are excluded. */
+  exportSnapshot(worldKey: string, savedAt = new Date().toISOString()): WorldMemorySnapshot {
+    return {
+      schemaVersion: 1,
+      worldKey,
+      savedAt,
+      observations: this.observationCount,
+      blocks: [...this.blocks.values()].slice(-8_192),
+      minable: [...this.mined.values()].slice(-8_192),
+      exploredCells: [...this.explored].slice(-100_000),
+    };
+  }
+
+  /** Restores only validated, fresh knowledge for the exact same world identity. */
+  restoreSnapshot(value: unknown, worldKey: string, maxAgeMs = 7 * 24 * 60 * 60 * 1_000): boolean {
+    const parsed = worldMemorySnapshotSchema.safeParse(value);
+    if (!parsed.success || parsed.data.worldKey !== worldKey) return false;
+    const validResourceBlocks = parsed.data.blocks.every((sighting) =>
+      sighting.key === blockKey(sighting.position) &&
+      isResourceBlockName(sighting.name) &&
+      (sighting.name === "sweet_berry_bush" || sighting.ripe === null),
+    );
+    const validMinableBlocks = parsed.data.minable.every((sighting) =>
+      sighting.key === blockKey(sighting.position) && isMineableBlockName(sighting.name) && sighting.ripe === null,
+    );
+    if (!validResourceBlocks || !validMinableBlocks) return false;
+    const savedAtMs = Date.parse(parsed.data.savedAt);
+    if (!Number.isFinite(savedAtMs) || Date.now() - savedAtMs > maxAgeMs || savedAtMs > Date.now() + 5 * 60 * 1_000) {
+      return false;
+    }
+
+    this.blocks.clear();
+    this.mined.clear();
+    this.items.clear();
+    this.hostiles.clear();
+    this.explored.clear();
+    this.observationCount = parsed.data.observations;
+    this.lastSequence = Number.NEGATIVE_INFINITY;
+    for (const sighting of parsed.data.blocks) {
+      this.blocks.set(sighting.key, { ...sighting, lastSeenSequence: -1 });
+    }
+    for (const sighting of parsed.data.minable) {
+      this.mined.set(sighting.key, { ...sighting, lastSeenSequence: -1 });
+    }
+    for (const cell of parsed.data.exploredCells) this.explored.add(cell);
+    return true;
   }
 
   summary(): MemorySummary {

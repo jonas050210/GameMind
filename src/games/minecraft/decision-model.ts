@@ -68,6 +68,10 @@ const SIDESTEP_DISTANCE = 6;
 const MAX_PLAN_STEPS = 12;
 /** Remembered targets up to this far beyond the collection limit are approached before collecting. */
 const APPROACH_EXTRA_RANGE = 32;
+/** Keep the player close enough for the ordinary local observation to refresh a remembered bush. */
+const BERRY_RECHECK_LOCAL_RADIUS = 6;
+/** The adapter's default navigation limit; do not send a recheck farther than that. */
+const MAX_NAVIGATION_DISTANCE = 48;
 /** A hazard block this close to the player triggers the safety goal of moving away. */
 const HAZARD_FLEE_DISTANCE = 2.5;
 /** Night, low health, or a hostile within this many blocks makes "close the shelter" a survival goal. */
@@ -934,6 +938,35 @@ function foodSourceCandidates(
 
   if (available(context, "minecraft.harvest-berries")) {
     for (const bush of knownBlocks(state, memory, new Set(["sweet_berry_bush"]))) {
+      if (bush.ripe === false) {
+        // A remembered age-one bush can mature while it is outside the current scan. Do not infer
+        // that it has ripened; move back within local observation range and let the next observation
+        // decide. This is a bounded, known-target refresh rather than another blind exploration leg.
+        const recheckLimit = Math.min(task.maxTargetDistance + APPROACH_EXTRA_RANGE, MAX_NAVIGATION_DISTANCE);
+        const origin = context.origin;
+        const outsideTaskArea = origin !== undefined &&
+          Math.hypot(bush.position.x - origin.x, bush.position.z - origin.z) > task.explorationRadius + 16;
+        const targetKey = `recheck:berry:${bush.key}`;
+        if (
+          bush.distance > BERRY_RECHECK_LOCAL_RADIUS &&
+          bush.distance <= recheckLimit &&
+          !outsideTaskArea &&
+          !nearbyDanger(centerOf(bush.position), threats.visibleHostiles, dangerRadius) &&
+          !isExcluded(context, targetKey) &&
+          available(context, "minecraft.navigate")
+        ) {
+          candidates.push({
+            goalId: "recheck:berry",
+            priorityBand: BAND_SURVIVAL,
+            score: 340 - bush.distance,
+            skillId: "minecraft.navigate",
+            input: { x: bush.position.x, y: bush.position.y, z: bush.position.z, range: 3 },
+            targetKey,
+            rationale: `The known sweet berry bush was last observed unripe; approach its remembered coordinates to refresh its age (ripeness is not assumed).`,
+          });
+        }
+        continue;
+      }
       if (bush.ripe !== true) continue;
       if (bush.distance > maxDistance) {
         const approach = approachCandidate(

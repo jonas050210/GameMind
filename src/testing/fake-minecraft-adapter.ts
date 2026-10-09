@@ -39,6 +39,8 @@ export interface FakeMinecraftAdapterOptions {
   readonly initialObservation?: MinecraftObservation;
   /** Exact x,y,z navigation destinations that model walls or unavailable paths. */
   readonly unreachableNavigationTargets?: readonly string[];
+  /** Test-only respawn after this many observations of a dead player. */
+  readonly autoRespawnAfterObservations?: number;
 }
 
 function errorFromAbort(signal: AbortSignal): Error {
@@ -270,6 +272,7 @@ export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private sessionValue: GameSession | null = null;
   private stateValue: MinecraftObservation;
   private sequence = 0;
+  private deadObservationCount = 0;
   private connectionCount = 0;
   private activeActionId: string | null = null;
   private activeActionWaiters: Array<() => void> = [];
@@ -320,6 +323,16 @@ export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
   async observe(): Promise<GameObservation<MinecraftObservation>> {
     const session = this.session;
     if (!session) throw new Error("Fake Minecraft adapter is not connected.");
+    if (this.stateValue.player.alive === false || (this.stateValue.player.health ?? 0) <= 0) {
+      this.deadObservationCount += 1;
+      const respawnAfter = this.options.autoRespawnAfterObservations;
+      if (respawnAfter !== undefined && this.deadObservationCount >= respawnAfter) {
+        this.stateValue = {
+          ...this.stateValue,
+          player: { ...this.stateValue.player, alive: true, health: 20 },
+        };
+      }
+    }
     return {
       schemaVersion: 1,
       gameId: this.gameId,

@@ -7,12 +7,15 @@ import type { SafetyBroker } from "../../core/safety-broker.js";
 import { startControlCenter } from "../../control-center/server.js";
 import type { ControlCenterHandle, ControlCenterSnapshot } from "../../control-center/types.js";
 import type { MinecraftObservation } from "./observation.js";
+import { PersistentWorldMemory } from "./persistent-world-memory.js";
 import { WorldMemory } from "./world-memory.js";
 import {
+  DEFAULT_BUILD_SHELTER_TASK,
   DEFAULT_CRAFT_PICKAXE_TASK,
   DEFAULT_GATHER_LOG_TASK,
   DEFAULT_MINE_COBBLESTONE_TASK,
   DEFAULT_SECURE_FOOD_TASK,
+  buildShelterTaskSchema,
   craftItemTaskSchema,
   gatherResourceTaskSchema,
   mineResourceTaskSchema,
@@ -25,7 +28,7 @@ import type { MinecraftTaskResult, MinecraftTaskRunnerOptions } from "./task-run
 import { createControlCenterSource, type RunControl } from "./run-control.js";
 
 /** Task kinds the Control Center may start. Each maps onto one validated task schema. */
-export const controlCenterTaskKinds = ["gather-logs", "mine-stone", "craft-wooden-pickaxe", "secure-food"] as const;
+export const controlCenterTaskKinds = ["gather-logs", "mine-stone", "craft-wooden-pickaxe", "secure-food", "build-shelter"] as const;
 export type ControlCenterTaskKind = (typeof controlCenterTaskKinds)[number];
 
 /**
@@ -82,6 +85,12 @@ export function taskFromControlCenterRequest(request: {
       ...(targetCount === undefined ? {} : { targetHunger: Math.min(20, targetCount) }),
     });
   }
+  if (kind === "build-shelter") {
+    return buildShelterTaskSchema.parse({
+      ...DEFAULT_BUILD_SHELTER_TASK,
+      id: "ui-build-shelter",
+    });
+  }
   throw new Error(`Unknown task kind '${kind}'. Choose one of: ${controlCenterTaskKinds.join(", ")}.`);
 }
 
@@ -95,6 +104,8 @@ export interface MinecraftRunHostOptions {
   readonly worldKey?: string | null;
   readonly offlineNote?: string | null;
   readonly evaluationReportPath?: string | null;
+  /** Current complete scenario manifest required for the same-seed candidate comparison. */
+  readonly evaluationScenarioIds?: readonly string[];
   readonly title?: string;
   readonly port?: number;
   readonly bindHost?: string;
@@ -136,6 +147,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     startedAt: null,
   };
   const memory = options.memory ?? new WorldMemory();
+  const evaluationReportPath = options.evaluationReportPath ?? resolve("data/eval/offline-report.json");
+  const evaluationScenarioIds = options.evaluationScenarioIds ?? [];
   let notify: () => void = () => {};
 
   const source = createControlCenterSource({
@@ -145,7 +158,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     safety: options.safety,
     traceSink: options.traceSink,
     control,
-    evaluationReportPath: options.evaluationReportPath ?? resolve("data/eval/offline-report.json"),
+    evaluationReportPath,
+    evaluationScenarioIds,
     ...(options.worldKey !== undefined ? { worldKey: options.worldKey } : {}),
     ...(options.offlineNote !== undefined ? { offlineNote: options.offlineNote } : {}),
     logger: options.logger,
@@ -175,6 +189,13 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       options.onTaskFinished?.(result, origin);
       return result;
     } finally {
+      if (memory instanceof PersistentWorldMemory) {
+        try {
+          await memory.flush();
+        } catch (error) {
+          options.logger.warn({ err: error }, "Could not flush persistent world memory after task completion");
+        }
+      }
       control.task = null;
       notify();
     }
@@ -231,6 +252,13 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     async close() {
       unsubscribeTrace();
       await handle.stop("run host closing");
+      if (memory instanceof PersistentWorldMemory) {
+        try {
+          await memory.flush();
+        } catch (error) {
+          options.logger.warn({ err: error }, "Could not flush persistent world memory during shutdown");
+        }
+      }
     },
   };
 

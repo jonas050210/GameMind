@@ -23,6 +23,9 @@ import {
   type MinecraftTaskRunnerOptions,
 } from "./games/minecraft/task-runner.js";
 import { readEvaluationSummary } from "./games/minecraft/run-control.js";
+import { policyPromotionRefusalReasons } from "./games/minecraft/policy-promotion.js";
+import { PersistentWorldMemory } from "./games/minecraft/persistent-world-memory.js";
+import type { WorldMemory } from "./games/minecraft/world-memory.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./games/minecraft/capabilities.js";
 import { createFakeMinecraftFixture, FakeMinecraftAdapter } from "./testing/fake-minecraft-adapter.js";
 import { evaluationScenarios } from "./testing/eval/scenarios.js";
@@ -68,6 +71,8 @@ interface CliOptions {
   /** Experience recording is on by default; --no-learning turns persistence off. */
   readonly learning: boolean;
   readonly learningDirectory: string;
+  readonly memoryDirectory: string;
+  readonly worldKey?: string;
   /** Operator opt-in for the combat capability, at the adapter and the safety policy together. */
   readonly allowCombat: boolean;
   readonly policy?: PolicyChoice;
@@ -105,6 +110,8 @@ function parseArgs(args: readonly string[]): CliOptions {
   let controlHost = process.env.GAMEMIND_CONTROL_HOST ?? "127.0.0.1";
   let learning = true;
   let learningDirectory = process.env.GAMEMIND_LEARNING_DIR ?? "data/learning";
+  let memoryDirectory = process.env.GAMEMIND_MEMORY_DIR ?? "data/world-memory";
+  let worldKey = process.env.GAMEMIND_WORLD_KEY?.trim() || undefined;
   let allowCombat = false;
   let policy: PolicyChoice | undefined;
   let help = false;
@@ -245,6 +252,15 @@ function parseArgs(args: readonly string[]): CliOptions {
       case "--learning-dir":
         learningDirectory = value();
         break;
+      case "--memory-dir":
+        memoryDirectory = value();
+        break;
+      case "--world-key": {
+        const key = value().trim();
+        if (!key) throw new Error("--world-key must not be empty.");
+        worldKey = key;
+        break;
+      }
       case "--allow-combat":
         allowCombat = true;
         break;
@@ -336,6 +352,8 @@ function parseArgs(args: readonly string[]): CliOptions {
     controlHost,
     learning,
     learningDirectory,
+    memoryDirectory,
+    ...(worldKey !== undefined ? { worldKey } : {}),
     allowCombat,
     ...(policy !== undefined ? { policy } : {}),
   };
@@ -387,6 +405,8 @@ Learning and policy:
   --learn              Record episodes and reuse them (on by default)
   --no-learning        Turn the experience store off for this run
   --learning-dir PATH  Experience store directory (default: data/learning)
+  --memory-dir PATH    World knowledge directory (default: data/world-memory or GAMEMIND_MEMORY_DIR)
+  --world-key KEY      Stable base identity for this world (default: server host + port)
   --policy STATUS|PROMOTE|REJECT
                        Inspect, promote or roll back the learned policy; promotion also requires a
                        passing 'npm run eval:offline' report
@@ -446,6 +466,7 @@ interface RunHostParts {
   readonly decisionModel: MinecraftTaskDecisionModel;
   readonly learner: ExperienceLearner | null;
   readonly worldKey: string | null;
+  readonly memory?: WorldMemory;
   readonly offlineNote: string | null;
   readonly extraRunnerOptions: MinecraftTaskRunnerOptions;
   readonly report: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
@@ -462,6 +483,7 @@ async function openRunHost(
     new MinecraftTaskRunner(parts.runtime, parts.skills, parts.decisionModel, parts.logger, {
       ...(parts.learner ? { learner: parts.learner } : {}),
       worldKey: parts.worldKey,
+      ...(parts.memory ? { memory: parts.memory } : {}),
       allowCombat: parts.options.allowCombat,
       ...parts.extraRunnerOptions,
       ...extra,
@@ -476,7 +498,9 @@ async function openRunHost(
     logger: parts.logger,
     ...(parts.learner ? { learner: parts.learner } : {}),
     worldKey: parts.worldKey,
+    ...(parts.memory ? { memory: parts.memory } : {}),
     offlineNote: parts.offlineNote,
+    evaluationScenarioIds: evaluationScenarios().map((scenario) => scenario.id),
     title: parts.offlineNote ? "GameMind (offline world)" : "GameMind",
     ...(parts.options.controlPort !== undefined ? { port: parts.options.controlPort } : {}),
     bindHost: parts.options.controlHost,
@@ -535,20 +559,17 @@ async function runPolicyCommand(options: CliOptions, logger: ReturnType<typeof c
     return;
   }
   const report = await readEvaluationSummary(resolve("data/eval/offline-report.json"));
-  const problems: string[] = [];
-  if (!report.generatedAt) {
-    problems.push("there is no offline evaluation report; run 'npm run eval:offline' first");
-  } else if (report.passed !== true) {
-    problems.push(`the last offline evaluation did not pass (unsafe actions: ${report.unsafeActions ?? "unknown"})`);
-  }
   const snapshot = learner.snapshot();
-  if (snapshot.episodes === 0) problems.push("no episodes have been recorded, so there is no candidate to promote");
-  if (snapshot.candidatePolicy.contexts === 0) {
-    problems.push("the derived candidate is still the baseline: no context reached the sample threshold, so promotion would change nothing");
-  }
-  if (snapshot.contradictedConfirmations > 0) {
-    problems.push(`${snapshot.contradictedConfirmations} confirmation(s) were contradicted by the world`);
-  }
+  const problems = policyPromotionRefusalReasons(
+    {
+      episodes: snapshot.episodes,
+      candidateContexts: snapshot.candidatePolicy.contexts,
+      contradictedConfirmations: snapshot.contradictedConfirmations,
+      candidateWeightsId: learner.candidateWeights.id,
+    },
+    report,
+    evaluationScenarios().map((scenario) => scenario.id),
+  );
   if (problems.length > 0) {
     throw new Error(`Refusing to promote the learned policy: ${problems.join("; ")}.`);
   }
@@ -581,6 +602,19 @@ async function runDemoTask(
     throw new Error(
       "--demo-task does not support mine-stone: the offline fixture has no diggable stone. Use 'npm run task:demo:mine' (simulated world) or --task mine-stone against a server.",
     );
+  }
+  if (taskKind === "build-shelter") {
+    // The shelter needs mutable block state, which the tiny fake fixture does not model.
+    await runSimulatedScenario(
+      "shelter-close-cardinal-sides",
+      options.seed ?? 101,
+      trace,
+      ring,
+      logger,
+      options,
+      true,
+    );
+    return;
   }
   if (taskKind === "secure-food") {
     // Berries and drops only exist in the simulated world, so the food demo runs there.
@@ -788,12 +822,22 @@ async function runMinecraft(
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+  let persistentMemory: PersistentWorldMemory | null = null;
 
   try {
     const session = await runtime.connect();
+    const dimension = runtime.currentWorldState?.state.player.dimension ?? "unknown";
+    const worldKey = options.worldKey
+      ? `minecraft-java:${options.worldKey}:${dimension}`
+      : `minecraft-java:${config.host.toLowerCase()}:${config.port}:${dimension}`;
+    persistentMemory = await PersistentWorldMemory.open(resolve(options.memoryDirectory), worldKey, { logger });
+    const initialWorld = runtime.currentWorldState;
+    if (initialWorld) persistentMemory.observe(initialWorld.state, initialWorld.sequence);
     logger.info(
       {
         sessionId: session.id,
+        worldKey,
+        memoryFile: persistentMemory.filePath,
         gameVersion: session.gameVersion,
         host: config.host,
         port: config.port,
@@ -815,7 +859,8 @@ async function runMinecraft(
           safety,
           decisionModel,
           learner,
-          worldKey: `${config.host}:${config.port}`,
+          worldKey,
+          memory: persistentMemory,
           offlineNote: null,
           extraRunnerOptions: {},
           report: (result, source) => console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result }, null, 2)),
@@ -827,7 +872,8 @@ async function runMinecraft(
         ? await host.runTask(task)
         : await new MinecraftTaskRunner(runtime, skills, decisionModel, logger, {
             ...(learner ? { learner } : {}),
-            worldKey: `${config.host}:${config.port}`,
+            worldKey,
+            memory: persistentMemory,
             allowCombat: options.allowCombat,
           }).run(task);
       console.log(JSON.stringify({ type: "task-report", startedBy: "cli", ...result }, null, 2));
@@ -877,6 +923,13 @@ async function runMinecraft(
   } finally {
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    if (persistentMemory) {
+      try {
+        await persistentMemory.flush();
+      } catch (error) {
+        logger.warn({ err: error }, "Persistent world memory did not flush cleanly at shutdown");
+      }
+    }
     await runtime.shutdown("CLI run complete");
   }
 }

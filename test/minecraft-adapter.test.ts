@@ -7,6 +7,7 @@ import { createMinecraftAgent } from "../src/games/minecraft/create-agent.js";
 import {
   DEFAULT_MINECRAFT_CONFIG,
   MinecraftAdapter,
+  minecraftAdapterConfigFromEnv,
   type MinecraftAdapterConfig,
   type MinecraftBotFactory,
 } from "../src/games/minecraft/minecraft-adapter.js";
@@ -128,6 +129,13 @@ function createMockBot(
     version: "1.20.4",
     entity: playerEntity,
     entities: { 1: playerEntity, 2: cow },
+    // prismarine-world currently returns these chunk coordinates as strings at runtime.
+    world: { getColumns: () => [
+      { chunkX: "0", chunkZ: "0" },
+      { chunkX: "-1", chunkZ: "0" },
+      { chunkX: "not-a-coordinate", chunkZ: "0" },
+      { chunkX: "-3", chunkZ: "2" },
+    ] },
     game: { dimension: "overworld", gameMode: "survival" },
     health: 20,
     food: 20,
@@ -277,6 +285,16 @@ function createTestAdapter(
   });
 }
 
+test("automatic respawn defaults on, is configurable from the environment, and rejects invalid values", () => {
+  assert.equal(minecraftAdapterConfigFromEnv({}).autoRespawn, true);
+  assert.equal(minecraftAdapterConfigFromEnv({ MINECRAFT_AUTO_RESPAWN: "false" }).autoRespawn, false);
+  assert.equal(minecraftAdapterConfigFromEnv({ MINECRAFT_AUTO_RESPAWN: "TRUE" }).autoRespawn, true);
+  assert.throws(
+    () => minecraftAdapterConfigFromEnv({ MINECRAFT_AUTO_RESPAWN: "sometimes" }),
+    /MINECRAFT_AUTO_RESPAWN must be 'true' or 'false'/,
+  );
+});
+
 test("Minecraft adapter connects, structures observations, executes and confirms look, then shuts down", async () => {
   const logger = pino({ level: "silent" });
   const trace = new TraceRecorder(new MemoryTraceSink(), logger);
@@ -295,10 +313,12 @@ test("Minecraft adapter connects, structures observations, executes and confirms
   // Resource and table blocks are listed first so that the capped local sample never drops them.
   assert.equal(initial.state.nearbyBlocks[0]?.name, "oak_log");
   assert.ok(initial.state.nearbyBlocks.some((block) => block.name === "grass_block"));
-  assert.equal(initial.state.sampledRegion.sampledCells, 245);
+  assert.equal(initial.state.sampledRegion.sampledCells, 605);
   assert.equal(initial.state.sampledRegion.center.x, 0);
   assert.equal(initial.state.sampledRegion.verticalRadius, 2);
   assert.deepEqual(initial.state.resourceSightings, []);
+  assert.deepEqual(initial.state.resourceScan.loadedChunks, [{ x: 0, z: 0 }, { x: -1, z: 0 }]);
+  assert.deepEqual(initial.state.minableScan?.loadedChunks, [{ x: 0, z: 0 }, { x: -1, z: 0 }]);
   assert.deepEqual(initial.state.itemDrops, []);
 
   const result = await skills.run("minecraft.orient", { yaw: Math.PI / 2, pitch: 0.1 });
@@ -484,12 +504,16 @@ test("stalled resource collection is cancelled by the shared movement watchdog",
   await runtime.shutdown("collection watchdog test finished");
 });
 
-test("plugin installation precedes spawn-time conservative movement setup", async () => {
+test("plugin installation precedes safe movement setup and Mineflayer receives the respawn setting", async () => {
   const logger = pino({ level: "silent" });
   const bot = createMockBot(true);
-  const factory: MinecraftBotFactory = (_options: BotOptions) => bot;
+  let respawnOption: boolean | undefined;
+  const factory: MinecraftBotFactory = (options: BotOptions) => {
+    respawnOption = options.respawn;
+    return bot;
+  };
   const setupOrder: string[] = [];
-  const adapter = new MinecraftAdapter(logger, config(), {
+  const adapter = new MinecraftAdapter(logger, config({ autoRespawn: false }), {
     botFactory: factory,
     installPlugins: () => setupOrder.push("plugins"),
     configureSafeMovements: () => setupOrder.push("safe-movements"),
@@ -497,6 +521,7 @@ test("plugin installation precedes spawn-time conservative movement setup", asyn
 
   await adapter.connect();
   assert.deepEqual(setupOrder, ["plugins", "safe-movements"]);
+  assert.equal(respawnOption, false);
   assert.equal(adapter.status, "connected");
   await adapter.disconnect("plugin lifecycle test complete");
 });

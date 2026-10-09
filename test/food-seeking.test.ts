@@ -44,6 +44,17 @@ test("the reachable food-seeking outcome holds across a seed sample for the berr
   assert.ok(successes >= 6, `at least 6 of ${seeds.length} seeds succeed, got ${successes}`);
 });
 
+test("maturing remembered berries remain reachable after exploration budget exhaustion", async () => {
+  for (const seed of [397, 434]) {
+    const run = await runEvaluationOnce(scenario("food-remote-berries"), seed);
+    assert.equal(run.status, "succeeded", `seed ${seed}: ${run.failureCode ?? ""}`);
+    assert.ok(run.actionGoals.includes("recheck:berry"), `seed ${seed} refreshed the remembered bush age`);
+    assert.ok(run.actionGoals.some((goal) => goal.startsWith("harvest:")), `seed ${seed} harvested observed ripe berries`);
+    assert.equal(run.metrics.unverifiedConfirmations, 0, `seed ${seed}`);
+    assert.equal(run.metrics.unsafeActions, 0, `seed ${seed}`);
+  }
+});
+
 test("a zombie guarding ripe berries is never approached to harvest while it is in range", async () => {
   for (const seed of [101, 138, 175, 213, 250]) {
     const run = await runEvaluationOnce(scenario("survival-zombie-guards-berries"), seed);

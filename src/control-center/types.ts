@@ -61,10 +61,32 @@ export interface ControlCenterWorld {
   readonly saturation: number | null;
   readonly airTicks: number | null;
   readonly onGround: boolean | null;
+  readonly alive: boolean | null;
+  readonly deathCount: number | null;
   readonly time: { readonly dayTicks: number; readonly isNight: boolean } | null;
+  readonly perception: {
+    readonly totalMs: number;
+    readonly localScanMs: number;
+    readonly strategicScanMs: number;
+    readonly entityScanMs: number;
+    readonly validationMs: number;
+    readonly sampledCells: number;
+    readonly unknownCells: number;
+    readonly localBlocksFound: number;
+    readonly localBlocksReturned: number;
+    readonly entitiesReturned: number;
+    readonly resourceSightings: number;
+    readonly minableSightings: number;
+    readonly loadedChunks: number | null;
+    readonly resourceScanRadius: number;
+    readonly resourceScanTruncated: boolean;
+    readonly minableScanRadius: number | null;
+    readonly minableScanTruncated: boolean | null;
+  } | null;
   readonly entities: readonly {
     readonly id: string;
     readonly name: string;
+    readonly position: { readonly x: number; readonly y: number; readonly z: number };
     readonly distance: number;
     readonly hostile: boolean;
   }[];
@@ -76,6 +98,8 @@ export interface ControlCenterWorld {
     readonly hazard: boolean;
     /** Highlighted on the map: a resource block, or the block the current task is about. */
     readonly resource: boolean;
+    /** True only for a prior-observation memory marker; false for blocks seen in this observation's local or strategic scan. */
+    readonly remembered?: boolean;
   }[];
   /** Per-name census of resource blocks the world model still holds. */
   readonly knownResourceBlocks: Readonly<Record<string, number>>;
@@ -189,8 +213,34 @@ export interface ControlCenterCapability {
   readonly skillId: string | null;
 }
 
+export interface ControlCenterRuntimePerformance {
+  readonly sampledAt: string;
+  readonly sampleWindowMs: number;
+  readonly nodeVersion: string;
+  readonly platform: string;
+  readonly architecture: string;
+  readonly logicalCpus: number;
+  readonly process: {
+    /** Process CPU time divided by elapsed time and logical CPU count, as a percentage of host capacity. */
+    readonly cpuCapacityPercent: number;
+    readonly eventLoopUtilizationPercent: number;
+    readonly rssBytes: number;
+    readonly heapUsedBytes: number;
+    readonly heapTotalBytes: number;
+    readonly externalBytes: number;
+    readonly uptimeSeconds: number;
+  };
+  readonly host: {
+    readonly totalMemoryBytes: number;
+    readonly freeMemoryBytes: number;
+    readonly loadAverage1m: number | null;
+  };
+}
+
 export interface ControlCenterSnapshot {
   readonly generatedAt: string;
+  /** Lightweight process/host sampling; no inspector, profiler, or Minecraft tick hook is enabled. */
+  readonly performance: ControlCenterRuntimePerformance;
   readonly connection: ControlCenterConnection;
   readonly agent: ControlCenterAgent;
   readonly goal: ControlCenterGoal | null;
@@ -201,6 +251,8 @@ export interface ControlCenterSnapshot {
   /** One entry per executed skill, newest first, folded from the skill and task traces. */
   readonly recentActions: readonly ControlCenterActionView[];
   readonly recentFailures: readonly ControlCenterFailureView[];
+  /** Recent non-observation trace events, including deaths, recovery, policy changes and task lifecycle. */
+  readonly recentEvents: readonly ControlCenterTraceEvent[];
   /** Recent complete decision records, including the alternatives that lost. */
   readonly recentDecisions: readonly ControlCenterTraceEvent[];
   readonly skillMetrics: readonly ControlCenterSkillMetric[];
@@ -217,6 +269,7 @@ export interface EvaluationSummary {
   /** When the report was generated; null when no report exists yet. */
   readonly generatedAt: string | null;
   readonly scenarios: number;
+  readonly scenarioIds: readonly string[];
   readonly runs: number;
   readonly successRate: number | null;
   readonly unsafeActions: number | null;
@@ -226,7 +279,12 @@ export interface EvaluationSummary {
   readonly model: string | null;
   /** Seeds per scenario in the report. */
   readonly seedsPerScenario: number | null;
-  /** Repeat-run effect of the learning memory, measured on the same seeded worlds; null when unmeasured. */
+  /** Candidate weight table actually measured against the baseline, if one existed. */
+  readonly policyCandidateId: string | null;
+  /** Whether the stored same-seed policy comparison recommends promotion; null means no candidate was evaluated. */
+  readonly policyPromotable: boolean | null;
+  readonly policyGateReasons: readonly string[];
+  /** Repeat-run effect of the target-failure memory on the same seeded worlds; null when unmeasured. */
   readonly learning: {
     readonly baselineWastedActions: number;
     readonly candidateWastedActions: number;

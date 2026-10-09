@@ -25,7 +25,7 @@ const WALK_HUNGER_PER_BLOCK = 1 / 300;
 const REGEN_INTERVAL_MS = 4_000;
 const BERRY_GROWTH_INTERVAL_MS = 60_000;
 const PICKUP_RADIUS = 1.2;
-const LOCAL_RADIUS = 3;
+const LOCAL_RADIUS = 5;
 const LOCAL_VERTICAL_RADIUS = 2;
 const RESOURCE_SCAN_RADIUS = 24;
 const ENTITY_RADIUS = 16;
@@ -272,6 +272,31 @@ export class SimulatedMinecraftWorld {
 
   get navigationStuckTimeoutMs(): number {
     return this.definition.navigationStuckTimeoutMs;
+  }
+
+  /** Exact fully-loaded chunk columns in the bounded wide-scan radius; partial edge chunks stay unknown. */
+  loadedChunksWithinRadius(centerX: number, centerZ: number, radius: number): { x: number; z: number }[] {
+    const minX = Math.floor((centerX - radius) / 16);
+    const maxX = Math.floor((centerX + radius) / 16);
+    const minZ = Math.floor((centerZ - radius) / 16);
+    const maxZ = Math.floor((centerZ + radius) / 16);
+    const loaded: Array<{ x: number; z: number }> = [];
+    for (let chunkX = minX; chunkX <= maxX; chunkX += 1) {
+      for (let chunkZ = minZ; chunkZ <= maxZ; chunkZ += 1) {
+        const west = chunkX * 16;
+        const east = west + 15;
+        const north = chunkZ * 16;
+        const south = north + 15;
+        if (
+          west < -this.definition.loadedRadius || east > this.definition.loadedRadius ||
+          north < -this.definition.loadedRadius || south > this.definition.loadedRadius
+        ) continue;
+        const nearestX = Math.max(west, Math.min(centerX, east));
+        const nearestZ = Math.max(north, Math.min(centerZ, south));
+        if (Math.hypot(nearestX - centerX, nearestZ - centerZ) <= radius) loaded.push({ x: chunkX, z: chunkZ });
+      }
+    }
+    return loaded;
   }
 
   /** Block at a coordinate: `null` when the chunk is not loaded (unknown), otherwise a view. */

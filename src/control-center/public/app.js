@@ -4,6 +4,8 @@
   served by the same process that owns the agent, and every value on screen comes from GET /api/snapshot.
 */
 
+import { drawWorldView } from "./world-view.js";
+
 const boot = (() => {
   try {
     return JSON.parse(document.getElementById("boot-data")?.textContent ?? "{}");
@@ -85,8 +87,10 @@ function render() {
   renderSafety(snapshot);
   renderLearning(snapshot);
   renderWorld(snapshot);
+  renderPerformance(snapshot);
   renderSkills(snapshot);
   renderActions(snapshot);
+  renderEvents(snapshot);
 }
 
 function renderHeader(snapshot) {
@@ -103,7 +107,9 @@ function renderHeader(snapshot) {
   const agentState = snapshot.safety?.tripped ? "tripped" : agent.state ?? "idle";
   agentPill.dataset.state = agentState;
   el("agent-text").textContent = agentState;
-  el("updated").textContent = `updated ${clock(snapshot.generatedAt)}`;
+  el("updated").textContent = connection.lastObservationAt
+    ? `OBS ${ago(connection.lastObservationAt)}`
+    : `UPDATED ${clock(snapshot.generatedAt)}`;
   el("subtitle").textContent = [connection.server, connection.gameVersion].filter(Boolean).join(" · ") || "Control Center";
 }
 
@@ -120,13 +126,17 @@ function renderRun(snapshot) {
     metric("Approved", safety.actionsApproved ?? 0, { tone: "good" }),
     metric("Denied", safety.actionsDenied ?? 0, { tone: safety.actionsDenied ? "bad" : null }),
     metric("Elapsed", agent.elapsedMs != null ? `${num(agent.elapsedMs / 1000, 1)}s` : "—"),
-    metric("Status", agent.status ?? (agent.taskId ? "running" : "idle"), {
-      tone: agent.status === "success" ? "good" : agent.status ? "bad" : null,
+    metric("Status", agent.status ?? (agent.taskId ? "running" : agent.state ?? "idle"), {
+      tone: ["succeeded", "idle", "stopped"].includes(agent.status ?? agent.state) ? "good" : agent.status ? "bad" : null,
     }),
   );
   const progress = el("run-progress");
-  const ratio = agent.maxActions ? Math.min(1, (agent.actionsUsed ?? 0) / agent.maxActions) : 0;
+  const actionsUsed = Math.max(0, agent.actionsUsed ?? 0);
+  const maxActions = Math.max(1, agent.maxActions ?? 100);
+  const ratio = Math.min(1, actionsUsed / maxActions);
   progress.style.width = `${Math.round(ratio * 100)}%`;
+  progress.parentElement?.setAttribute("aria-valuemax", String(maxActions));
+  progress.parentElement?.setAttribute("aria-valuenow", String(Math.min(actionsUsed, maxActions)));
   el("run-hint").textContent = agent.startedAt ? `started ${ago(agent.startedAt)}` : "no run in progress";
   if (agent.failure) {
     el("run-hint").textContent = `failure: ${agent.failure.code ?? "unknown"}`;
@@ -145,7 +155,9 @@ function renderRun(snapshot) {
     if (!(button instanceof HTMLButtonElement)) continue;
     button.disabled = state.busy;
   }
-  el("actions-hint").textContent = `${(snapshot.recentActions ?? []).length} kept in memory`;
+  const startButton = document.querySelector("#task-form button[type=submit]");
+  if (startButton) startButton.disabled = state.busy || agent.state === "running" || agent.state === "paused" || agent.state === "tripped";
+  el("actions-hint").textContent = `${(snapshot.recentActions ?? []).length} action(s) in trace window`;
 }
 
 function renderGoal(snapshot) {
@@ -287,6 +299,18 @@ function renderLearning(snapshot) {
         ? `${evaluation.scenarios} scenarios · ${evaluation.runs} runs · ${evaluation.model ?? "unknown model"} · ${evaluation.seedsPerScenario ?? "?"} seeds${evaluation.generatedAt ? ` · ${ago(evaluation.generatedAt)}` : ""}`
         : "run npm run eval:offline to measure",
     }),
+    metric(
+      "Weight candidate gate",
+      evaluation?.policyPromotable === true ? "pass" : evaluation?.policyCandidateId ? "held" : "not measured",
+      {
+        tone: evaluation?.policyPromotable === true ? "good" : evaluation?.policyCandidateId ? "warn" : null,
+        note: evaluation?.policyCandidateId
+          ? `${evaluation.policyCandidateId} · real baseline comparison; promotion also requires the full 20+ seed scenario set${evaluation.policyGateReasons?.[0] ? ` · ${evaluation.policyGateReasons[0]}` : ""}`
+          : (learning.candidatePolicy?.contexts ?? 0) > 0
+            ? "a weighted candidate exists, but this report has not measured it against the baseline"
+            : "no derived weight candidate is available from current experience",
+      },
+    ),
   );
   const unsafe = evaluation?.unsafeActions;
   if (typeof unsafe === "number") {
@@ -344,10 +368,16 @@ function renderWorld(snapshot) {
     vital("Air", world.airTicks == null ? "—" : `${num(world.airTicks)} ticks`, null, world.airTicks != null && world.airTicks < 100 ? "bad" : null),
     vital("Mode", [world.dimension, world.gameMode].filter(Boolean).join(" · ") || "—", null, null),
     vital("On ground", world.onGround === null || world.onGround === undefined ? "—" : world.onGround ? "yes" : "no", null, world.onGround === false ? "warn" : null),
+    vital("Life state", world.alive === null || world.alive === undefined ? "unknown" : world.alive ? "alive" : "dead", null, world.alive === false ? "bad" : null),
+    vital("Deaths", world.deathCount === null || world.deathCount === undefined ? "—" : world.deathCount, null, world.deathCount ? "warn" : null),
     vital("Inventory full", world.inventoryFull === null || world.inventoryFull === undefined ? "—" : world.inventoryFull ? "yes" : "no", null, world.inventoryFull ? "bad" : null),
   );
   const census = Object.values(world.knownResourceBlocks ?? {}).reduce((total, count) => total + count, 0);
-  el("world-hint").textContent = `explored ${world.exploredCells ?? 0} cells · ${world.minableBlocks ?? 0} minable · ${census} resource block(s) remembered`;
+  el("world-hint").textContent = `explored ${world.exploredCells ?? 0} cells · ${world.minableBlocks ?? 0} minable · ${census} resources remembered`;
+  const rememberedCount = (world.blocks ?? []).filter((block) => block.remembered).length;
+  const visibleCount = (world.blocks ?? []).filter((block) => !block.remembered).length;
+  const mapMeta = el("map-meta");
+  if (mapMeta) mapMeta.textContent = `${visibleCount} current · ${rememberedCount} last seen · ${world.perception?.loadedChunks ?? "?"} loaded chunks`;
   const inventory = el("inventory");
   clear(inventory);
   const items = world.inventory ?? [];
@@ -375,6 +405,48 @@ function renderWorld(snapshot) {
   drawMinimap(world);
 }
 
+function renderPerformance(snapshot) {
+  const metrics = el("performance-metrics");
+  if (!metrics) return;
+  clear(metrics);
+  const runtime = snapshot.performance ?? null;
+  const perception = snapshot.world?.perception ?? null;
+  const mb = (bytes) => typeof bytes === "number" && Number.isFinite(bytes) ? `${num(bytes / (1024 * 1024), 1)} MB` : "—";
+  if (runtime) {
+    const hostMemoryUsed = Math.max(0, runtime.host.totalMemoryBytes - runtime.host.freeMemoryBytes);
+    metrics.append(
+      metric("Process CPU", `${num(runtime.process.cpuCapacityPercent, 1)}%`, { note: `of ${runtime.logicalCpus} logical CPUs · ${num(runtime.sampleWindowMs)} ms sample` }),
+      metric("Event loop", `${num(runtime.process.eventLoopUtilizationPercent, 1)}%`, { note: "recent active-loop ratio" }),
+      metric("Resident memory", mb(runtime.process.rssBytes), { note: `heap ${mb(runtime.process.heapUsedBytes)} / ${mb(runtime.process.heapTotalBytes)}` }),
+      metric("Host memory", mb(hostMemoryUsed), { note: `${mb(runtime.host.totalMemoryBytes)} total` }),
+      metric("System load", runtime.host.loadAverage1m === null ? "—" : num(runtime.host.loadAverage1m, 2), { note: "1-minute load average" }),
+      metric("Runtime", `${runtime.nodeVersion} · ${runtime.architecture}`, { note: `${runtime.platform} · process uptime ${num(runtime.process.uptimeSeconds / 60, 1)} min` }),
+    );
+  }
+  const fmtMs = (value) => `${num(value, 1)} ms`;
+  if (!perception) {
+    metrics.append(metric("Perception timing", "unavailable", { note: "adapter did not report a measured scan pass" }));
+    el("performance-hint").textContent = "process sampling only · no adapter timing";
+    return;
+  }
+  metrics.append(
+    metric("Total scan", fmtMs(perception.totalMs), { tone: perception.totalMs > 80 ? "warn" : "good", note: "last observation" }),
+    metric("Local voxel scan", fmtMs(perception.localScanMs), { note: `${perception.localBlocksReturned} returned / ${perception.localBlocksFound} found` }),
+    metric("Strategic scans", fmtMs(perception.strategicScanMs), { note: `${perception.resourceSightings} resource · ${perception.minableSightings} minable` }),
+    metric("Entity scan", fmtMs(perception.entityScanMs), { note: `${perception.entitiesReturned} visible entities` }),
+    metric("Validation", fmtMs(perception.validationMs), { note: "observation schema" }),
+    metric("Coverage sample", `${perception.sampledCells}`, { note: `${perception.unknownCells} unknown cells` }),
+    metric("Client chunks", perception.loadedChunks ?? "unknown", { note: `resource radius ${num(perception.resourceScanRadius)} blocks` }),
+    metric("Scan certainty", perception.resourceScanTruncated ? "truncated" : "complete", {
+      tone: perception.resourceScanTruncated ? "warn" : "good",
+      note: perception.minableScanTruncated === null ? "mineable scan status unknown" : perception.minableScanTruncated ? "mineable scan truncated" : "mineable scan complete",
+    }),
+  );
+  el("performance-hint").textContent = runtime
+    ? `${num(runtime.sampleWindowMs)} ms sampling window · ${clock(runtime.sampledAt)}`
+    : `scan sample · ${clock(snapshot.generatedAt)}`;
+}
+
 function vital(label, value, ratio, tone, className) {
   const box = node("div", className ? `vital ${className}` : "vital");
   if (tone) box.dataset.low = tone;
@@ -390,83 +462,11 @@ function vital(label, value, ratio, tone, className) {
 }
 
 /**
- * Top-down plot of the blocks the world model actually holds. Coordinates are the agent's real
- * observations; nothing here is decorative — an unobserved chunk simply stays empty.
+ * WebGL geometry sourced only from current observed blocks plus wireframe, last-seen memory markers.
+ * Unknown and unloaded terrain is never synthesized.
  */
 function drawMinimap(world) {
-  const canvas = el("minimap");
-  if (!canvas) return;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const width = canvas.width;
-  const height = canvas.height;
-  const blocks = world.blocks ?? [];
-  // Fit the observed window instead of a fixed zoom: a 7x7 scan should fill the panel, while a wide scan
-  // still shows the surroundings. Clamped so a single stray block cannot zoom the map to absurdity.
-  let scale = 18;
-  if (blocks.length > 1) {
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minZ = Infinity;
-    let maxZ = -Infinity;
-    for (const block of blocks) {
-      minX = Math.min(minX, block.x);
-      maxX = Math.max(maxX, block.x);
-      minZ = Math.min(minZ, block.z);
-      maxZ = Math.max(maxZ, block.z);
-    }
-    const spanX = Math.max(1, maxX - minX) + 3;
-    const spanZ = Math.max(1, maxZ - minZ) + 3;
-    scale = Math.max(4, Math.min(28, Math.floor(Math.min(width / spanX, height / spanZ))));
-  }
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "rgba(255,255,255,0.02)";
-  ctx.fillRect(0, 0, width, height);
-  const position = world.position ?? { x: 0, y: 0, z: 0 };
-  const project = (x, z) => [width / 2 + (x - position.x) * scale, height / 2 + (z - position.z) * scale];
-  ctx.globalAlpha = 0.25;
-  ctx.strokeStyle = "rgba(255,255,255,0.06)";
-  const gridStep = scale > 12 ? 2 : 10;
-  for (let step = -Math.ceil(width / 2 / scale); step <= Math.ceil(width / 2 / scale); step += gridStep) {
-    const [gx] = project(step, 0);
-    ctx.beginPath();
-    ctx.moveTo(gx, 0);
-    ctx.lineTo(gx, height);
-    ctx.stroke();
-    const gy = height / 2 + step * scale;
-    ctx.beginPath();
-    ctx.moveTo(0, gy);
-    ctx.lineTo(width, gy);
-    ctx.stroke();
-  }
-  ctx.globalAlpha = 1;
-  for (const block of blocks) {
-    const [x, y] = project(block.x, block.z);
-    if (x < -scale || y < -scale || x > width || y > height) continue;
-    const depth = block.y - position.y;
-    if (depth > 3 || depth < -6) continue;
-    let fill = "rgba(154,172,200,0.55)";
-    if (block.hazard) fill = "rgba(255,102,116,0.95)";
-    else if (block.resource) fill = "rgba(124,196,255,0.95)";
-    else if (block.name === "water") fill = "rgba(84,150,255,0.7)";
-    ctx.fillStyle = fill;
-    ctx.globalAlpha = depth === 0 ? 1 : depth > 0 ? 0.45 : 0.65;
-    const size = Math.max(3, (block.resource || block.hazard ? scale * 0.92 : scale * 0.78) - 1);
-    ctx.fillRect(x - size / 2, y - size / 2, size, size);
-  }
-  ctx.globalAlpha = 1;
-  const [px, py] = project(position.x, position.z);
-  ctx.fillStyle = "#ffffff";
-  ctx.beginPath();
-  ctx.arc(px, py, 3.4, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "rgba(255,255,255,0.45)";
-  ctx.beginPath();
-  ctx.arc(px, py, 7, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.font = "10px ui-monospace, monospace";
-  ctx.fillStyle = "rgba(230,238,255,0.62)";
-  ctx.fillText(`${blocks.length} observed blocks · ${scale}px/block · y ${num(position.y, 0)}`, 8, height - 8);
+  drawWorldView(world);
 }
 
 function renderSkills(snapshot) {
@@ -526,6 +526,56 @@ function renderActions(snapshot) {
     /escape|flee|recover|rest|retreat|defend|regain/i.test(`${action.goalId ?? ""} ${action.skillId ?? ""}`),
   ).length;
   el("actions-hint").textContent = `${(snapshot.recentActions ?? []).length} action(s) kept in memory${recovery ? ` · ${recovery} recovery/defence action(s)` : ""}`;
+}
+
+function eventSummary(event) {
+  const data = event.data ?? {};
+  if (event.eventType === "player.death") {
+    return `Health ${data.health ?? "unknown"} · death count ${data.deathCount ?? "not reported"} · waiting for respawn`;
+  }
+  if (event.eventType === "decision.made") {
+    const selected = data.selected;
+    return typeof selected === "object" && selected !== null
+      ? `${selected.goalId ?? "goal"}${selected.targetKey ? ` · ${selected.targetKey}` : ""}${data.summary ? ` — ${data.summary}` : ""}`
+      : String(data.summary ?? "decision recorded");
+  }
+  if (event.eventType === "task.started") {
+    const task = data.task;
+    return typeof task === "object" && task !== null ? `${task.kind ?? "task"} · ${task.id ?? ""}` : "task loop started";
+  }
+  if (event.eventType === "skill.completed") {
+    return `${data.skillId ?? "skill"} · ${data.status ?? "result unknown"}${data.durationMs != null ? ` · ${num(data.durationMs)} ms` : ""}`;
+  }
+  if (event.eventType === "task.completed") {
+    const failure = data.failure;
+    return `${data.status ?? "task ended"}${typeof failure === "object" && failure !== null ? ` · ${failure.code ?? "failure"}` : ""}`;
+  }
+  if (event.eventType === "task.action") {
+    const action = data.action;
+    return typeof action === "object" && action !== null
+      ? `${action.skillId ?? action.capability ?? "action"} · ${action.status ?? "unknown"}${action.verification ? ` · ${action.verification}` : ""}`
+      : "task action recorded";
+  }
+  if (event.eventType.includes("safety")) return String(data.message ?? data.code ?? "safety policy event");
+  return String(data.summary ?? data.message ?? data.code ?? event.eventType.replaceAll(".", " "));
+}
+
+function renderEvents(snapshot) {
+  const list = el("events");
+  if (!list) return;
+  clear(list);
+  for (const event of (snapshot.recentEvents ?? []).slice(0, 24)) {
+    const item = document.createElement("li");
+    const tone = event.eventType === "player.death" || /failed|denied|refused/.test(event.eventType) ? "bad" : /completed|succeeded/.test(event.eventType) ? "good" : "normal";
+    item.dataset.tone = tone;
+    item.append(node("time", null, clock(event.timestamp)));
+    const detail = node("div", null);
+    detail.append(node("b", null, event.eventType));
+    detail.append(node("p", null, eventSummary(event)));
+    item.append(detail);
+    list.append(item);
+  }
+  if (!list.childElementCount) list.append(node("li", "empty-event", "Waiting for a decision or action trace…"));
 }
 
 function renderOffline(snapshot) {
@@ -589,6 +639,47 @@ function wireControls() {
   }
   const combat = el("combat-toggle");
   combat.addEventListener("change", () => void sendCommand("enableCombat", { enabled: combat.checked }));
+  const taskKind = el("task-kind");
+  const taskCount = el("task-count");
+  const taskCountLabel = document.querySelector("label[for=task-count]");
+  const taskResource = el("task-resource");
+  const taskResourceLabel = document.querySelector("label[for=task-resource]");
+  const configureTaskCount = () => {
+    const secureFood = taskKind.value === "secure-food";
+    const buildShelter = taskKind.value === "build-shelter";
+    taskCount.max = secureFood ? "20" : "64";
+    taskCount.required = !buildShelter;
+    taskCount.parentElement.hidden = buildShelter;
+    taskCount.value = secureFood ? "18" : buildShelter ? "" : "1";
+    if (taskCountLabel) taskCountLabel.textContent = secureFood ? "Target hunger" : "Target count";
+    const usesResource = !secureFood && !buildShelter;
+    taskResource.disabled = !usesResource;
+    taskResource.hidden = !usesResource;
+    if (taskResourceLabel) taskResourceLabel.hidden = !usesResource;
+    if (taskResourceLabel) taskResourceLabel.textContent = taskKind.value === "craft-wooden-pickaxe"
+      ? "Craft target (optional)"
+      : taskKind.value === "mine-stone"
+        ? "Mineable block (optional)"
+        : "Log type (optional)";
+  };
+  taskKind.addEventListener("change", configureTaskCount);
+  configureTaskCount();
+  el("task-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const buildShelter = taskKind.value === "build-shelter";
+    const count = Number(taskCount.value);
+    const max = taskKind.value === "secure-food" ? 20 : 64;
+    if (!buildShelter && (!Number.isInteger(count) || count < 1 || count > max)) {
+      toast(`startTask: target must be a whole number from 1 to ${max}.`, "bad");
+      return;
+    }
+    const resource = taskResource.disabled ? "" : taskResource.value.trim();
+    void sendCommand("startTask", {
+      kind: taskKind.value,
+      ...(resource ? { resource } : {}),
+      ...(!buildShelter ? { count } : {}),
+    });
+  });
   el("budget-form").addEventListener("submit", (event) => {
     event.preventDefault();
     const value = Number(el("budget-input").value);

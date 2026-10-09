@@ -35,6 +35,40 @@ function makeTaskRunner(
   };
 }
 
+test("task loop waits through a confirmed death, recovers after respawn, and then replans", async () => {
+  const fixture = createFakeMinecraftFixture(1337);
+  const deadObservation: MinecraftObservation = {
+    ...fixture,
+    player: { ...fixture.player, health: 0, alive: false, deathCount: 1 },
+  };
+  const { runtime, runner, sink } = makeTaskRunner(deadObservation, { autoRespawnAfterObservations: 2 });
+  const result = await runner.run(DEFAULT_GATHER_LOG_TASK);
+
+  assert.equal(result.status, "succeeded", result.failure?.message);
+  assert.equal(result.metrics.deathsObserved, 1);
+  assert.equal(result.metrics.respawnRecoveries, 1);
+  assert.ok(sink.events.some((event) => event.eventType === "player.death"));
+  assert.equal(result.finalObservation?.state.player.health, 20);
+  assert.equal(result.metrics.resourceCollected, 1);
+  await runtime.shutdown("respawn recovery test complete");
+});
+
+test("awaiting respawn respects the task deadline and does not attempt actions while dead", async () => {
+  const fixture = createFakeMinecraftFixture(1337);
+  const deadObservation: MinecraftObservation = {
+    ...fixture,
+    player: { ...fixture.player, health: 0, alive: false, deathCount: 1 },
+  };
+  const { runtime, runner } = makeTaskRunner(deadObservation);
+  const result = await runner.run({ ...DEFAULT_GATHER_LOG_TASK, maxDurationMs: 200 });
+
+  assert.equal(result.status, "timed_out");
+  assert.equal(result.failure?.code, "TASK_DEADLINE");
+  assert.equal(result.actions.length, 0);
+  assert.equal(result.metrics.respawnRecoveries, 0);
+  await runtime.shutdown("respawn deadline test complete");
+});
+
 test("bounded gather task collects an observed log, replans, and verifies inventory progress", async () => {
   const { runtime, runner, sink } = makeTaskRunner();
   const result = await runner.run(DEFAULT_GATHER_LOG_TASK);

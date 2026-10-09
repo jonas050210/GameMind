@@ -7,9 +7,9 @@ GameMind is a modular, observable game-agent runtime. The current implementation
 ## Current implementation
 
 - Minecraft Java through Mineflayer **4.39.0**, defaulting to protocol **1.20.4** (configurable). Pathfinder **2.4.5**, CollectBlock **1.6.0**, and Mineflayer Tool **1.2.0**.
-- **Observations** carry the player state, inventory and equipment, nearby entities, a capped local cube, a **wide resource scan** (logs, crafting tables, sweet berry bushes with their `age`, up to 24 blocks away), and **dropped items** read from entity metadata. Unknown or unloaded cells are not treated as empty, and truncation is reported.
+- **Observations** carry player state, inventory/equipment, nearby entities, a local cube, wider resource/minable scans, and dropped items from entity metadata. The live adapter defaults to a 5-block local radius/cap 256 and a 32-block wide radius/cap 192 per scan; its radii, caps, entity range and view distance are configurable through `MINECRAFT_*` settings. The offline simulator uses a 5-block local radius and a 24-block wide radius. Loaded chunk columns, scan truncation and (live adapter) measured perception timings are reported. These are client-visible scans, not server-wide queries: unloaded chunks stay unknown, and a saturated scan is never evidence that an unreturned block is absent.
 - **Skills** are strictly validated and allowlisted: look, inspect, conservative navigation, log collection, equipment, wood crafting, food consumption, cautious crafting-table placement, and three survival skills added in this release: **pickup of an observed food or log drop**, **harvest of a ripe sweet berry bush**, and **bounded rest** for natural regeneration. None of them attacks an entity.
-- **World memory** (`src/games/minecraft/world-memory.ts`) keeps resource, berry, and dropped-item sightings across observations. A sighting is removed only when a fully scanned, untruncated volume proves it gone. It also tracks explored coverage cells and recently seen hostiles, with approach detection.
+- **World memory** (`src/games/minecraft/world-memory.ts`) keeps resource/minable sightings, dropped-item and hostile sightings in the current process, plus chunk-aware explored coverage. Persistent snapshots (`src/games/minecraft/persistent-world-memory.ts`) store only world-scoped resource/minable last-seen locations, explored cells, and counters—never moving hostiles or despawnable item drops. Snapshots are schema-validated, expire after seven days by default, and are atomically replaced after a short debounce. `--memory-dir` / `GAMEMIND_MEMORY_DIR` selects storage; `--world-key` / `GAMEMIND_WORLD_KEY` can disambiguate server identities. The default identity is server host + port + dimension, not a cryptographic world/seed ID.
 - **Exploration** (`src/games/minecraft/exploration.ts`) chooses unexplored coverage cells within a bounded radius of the task start, prefers cells with more unknown neighbours, and avoids remembered hostiles. The leg budget and radius are task parameters.
 - **Goal selection** is grouped into three priority bands, and lower bands always win:
   - **Safety (band 0):** flee visible or approaching hostiles, and sidestep after a stall or oscillation.
@@ -22,8 +22,8 @@ GameMind is a modular, observable game-agent runtime. The current implementation
 - **Skills added for progression and shelter:** `mine-block` (tool requirement derived from the block, drop verified through the inventory), `place-block` and `build-shelter` (closed cardinal or full surround), `equip-item`, and `drop-item` to free inventory space. Combat exists only behind three independent opt-ins (adapter config, safety policy, task runner), and `attack-hostile` additionally requires a weapon in hand.
 - **Structured decision traces.** `decision.made` carries the selected goal, every alternative with its score, every rejected candidate with a reason code and detail, the utility bands, the plan, the world-memory knowledge behind the decision, and the safety verdict. `task.action` carries the action record plus the postcondition verification, so a claim of success is always traceable to an observation.
 - **Experience learning** (`src/core/learning/`): one episode per attempted action, persisted as JSONL; failure memory that blocks a target that repeatedly failed without progress; derived policy weights that only *rank* candidates (they can never unlock a capability or skip validation); and a gate that compares a candidate against the baseline before anything is promoted. See [Learning and policy](#learning-and-policy).
-- **Task runner.** Bounded by action count, virtual or wall-clock time, target distance, exploration legs, rest time, and consecutive failures. Budgets are measured per run, so a long-lived process cannot leak action counts from one task into the next. It records exploration, food sources, rest time, verification results, unsafe-start counts, recoveries, plan revisions, and runtime, and writes ordered JSONL traces.
-- **Offline simulator and evaluation.** A deterministic, seeded grid world (`src/testing/simulated-minecraft/`) models walking time, a loaded-chunk boundary, hostiles that chase, hunger and regeneration, drops, ripening berries, stall cells, and scheduled world changes. It advertises the same capabilities and reports the same error codes as the live adapter. Twelve scenarios are judged over seeded layouts (see [Offline evaluation](#offline-evaluation)).
+- **Task runner.** Bounded by action count, virtual or wall-clock time, target distance, exploration legs, rest time, and consecutive failures. On observed death it waits up to 30 seconds (never beyond the task deadline), performs no actions while the player is dead, and resumes only after the adapter reports an alive state; it then observes and replans. Automatic respawn is enabled by default through Mineflayer's health plugin and can be disabled with `MINECRAFT_AUTO_RESPAWN=false`; live server behavior is unverified. Budgets are measured per run. Metrics include death/respawn recovery, and ordered JSONL traces preserve the cause.
+- **Offline simulator and evaluation.** A deterministic, seeded grid world (`src/testing/simulated-minecraft/`) models walking time, a loaded-chunk boundary, hostiles that chase, hunger and regeneration, drops, ripening berries, stall cells, and scheduled world changes. It advertises the same capabilities and reports the same error codes as the live adapter. Twenty scenarios are judged over seeded layouts (see [Offline evaluation](#offline-evaluation)).
 
 This remains a deliberately narrow, rule-based agent. It is not a full survival agent, an RL system, an LLM planner, or a general-purpose GUI. It does not hunt passive animals, go mining below the surface deliberately (it digs blocks it can reach with a tool it holds), build anything beyond a closed shell around the player, handle every recipe or version, or plan across dimensions. Fighting is only reachable when an operator armed combat for that run.
 
@@ -31,7 +31,7 @@ This remains a deliberately narrow, rule-based agent. It is not a full survival 
 
 Existing users should review these. Each is deliberate and covered by tests.
 
-1. **Resource and table blocks are kept first in the local observation.** The 64-block cap used to drop blocks in loop order, which could silently hide logs. Blocks are now ordered by category and then distance.
+1. **Perception defaults are broader but bounded.** The local cube now returns up to 256 ordered blocks, while separate resource/minable scans query up to 32 blocks and return at most 192 results each. Chunk coverage is only marked when the client reports those columns loaded and the scan is not truncated.
 2. **Critical hunger explores before it stops.** With no food in inventory, hunger ≤ 4 used to block immediately. It now explores for a food source (dropped food, ripe berries) first, within the leg budget. Pass `--explore-legs 0` to restore the immediate stop.
 3. **Gather and craft tasks explore by default.** When no log is visible or remembered, the task explores up to 8 legs within 48 blocks of its start before blocking. Pass `--explore-legs 0` to disable.
 4. **Resting is new.** At health ≤ 12 with food ≥ 18 and no visible hostile, the agent rests in bounded chunks (up to 60 s of rest per task).
@@ -45,7 +45,9 @@ Existing users should review these. Each is deliberate and covered by tests.
 12. **Combat is opt-in at three layers.** `--allow-combat` sets the adapter switch, the safety policy opt-in, and the runner's `combatEnabled` context. Without all three, `defend` is refused and the agent flees — and the refusal is visible in the decision trace as `combat is not enabled for this run, so the agent flees instead of attacking`. The Control Center can arm and disarm it between runs.
 13. **A run can be stopped safely.** `MinecraftTaskRunner` honours a cooperative `shouldStop` between actions (never mid-action), which the Control Center's Stop control and `OPERATOR_STOP` reporting use.
 14. **Experience is persisted by default** for CLI task runs (`data/learning`, `--no-learning` to turn off, `--learning-dir` to move). Nothing learned can raise a risk ceiling, widen an allowlist, or bypass the safety broker; it only reorders candidates and avoids targets it already failed on.
-15. **The Control Center serves real runtime state.** It is a `node:http` server started by a run (`--control-center`), reading the runtime, broker, memory, and learner on every request, with an event-stream push. Writes require the per-process token printed into the served page, and a command the host cannot honour returns `501` rather than looking accepted.
+15. **The Control Center is an operations console.** It includes bounded task launch, operator safety controls, live decision/action/event panels, perception timings, and an interactive WebGL block view. The view distinguishes current blocks from wireframe last-seen memory and never fills unknown terrain.
+16. **World knowledge survives live CLI restarts.** Debounced, validated snapshots preserve resource/minable sightings and explored cells only. Hostiles and drops remain transient; default identity is host + port + dimension, with `--world-key` for operator-defined separation.
+17. **Death recovery is explicit and bounded.** The Mineflayer health plugin is configured for automatic respawn by default (`MINECRAFT_AUTO_RESPAWN=false` disables it). After a death observation, the task loop waits for an alive state from the adapter without issuing actions, re-observes before replanning, and ends on disconnect, operator stop, a 30-second wait limit, or the task deadline. This path is covered by offline tests, not a live-server test.
 
 ## Requirements and checks
 
@@ -53,8 +55,8 @@ Existing users should review these. Each is deliberate and covered by tests.
 - For live play: an authorized private or local Minecraft Java server that matches the configured protocol.
 
 ```bash
-npm install              # `npm ci` currently fails on a lockfile drift in this repo
-npm run build            # typecheck (tests included) + copy the Control Center assets
+npm ci                   # reproducible install from package-lock.json
+npm run build            # TypeScript typecheck + copy the Control Center assets
 npm test
 npm run eval:offline     # offline simulated evaluation (no server)
 npm audit                # the dependency audit must report 0 vulnerabilities
@@ -87,13 +89,13 @@ Scenarios and gates:
 - **Safety scenarios** may end blocked or failed, but must start no action under threat, never reach zero health, and never make an unsupported confirmation. They cover no food anywhere, a zombie guarding berries, critical health with no food, and a route with no way around.
 - **Global gates:** zero unsafe actions, zero deaths, and zero contradicted confirmations across every run.
 
-Results from the default run (`npm run eval:offline`, 20 scenarios × 20 seeds = 400 runs in about 4 seconds):
+The default command evaluates 20 scenarios × 20 seeds (400 runs). For the latest expanded check I ran `npm run eval:offline -- --seeds 60`: 20 scenarios × 60 seeds = **1,200 runs in 12.7 seconds**. The table below reports that 60-seed result; all scenario gates passed.
 
 | Scenario | Expectation | Success | Notes |
 | --- | --- | --- | --- |
 | explore-remote-log | success ≥ 90% | 100% | Exploration then collection |
 | explore-craft-pickaxe | success ≥ 80% | 100% | Remote trees, full crafting chain |
-| food-remote-berries | success ≥ 80% | 90% | Exploration, harvest, eat |
+| food-remote-berries | success ≥ 80% | 100% | Exploration, harvest, eat |
 | food-dropped-bread | success ≥ 95% | 100% | Pickup, eat |
 | food-none-reachable | safe | safe | Blocks after bounded exploration |
 | survival-zombie-guards-berries | safe | safe | No harvest under threat |
@@ -101,7 +103,7 @@ Results from the default run (`npm run eval:offline`, 20 scenarios × 20 seeds =
 | survival-critical-no-food | safe | safe | Stops with no actions |
 | recovery-single-hidden-obstacle | success ≥ 85% | 100% | Stall, sidestep, retry |
 | recovery-persistent-stall | safe | safe | Stops within budget |
-| replanning-removed-log | success ≥ 85% | 100% | Replans after a removed log |
+| replanning-removed-log | success ≥ 85% | 98% | Replans after a removed log |
 | survival-eat-before-gather | success ≥ 95% | 100% | Eats at the threshold first |
 | mine-stone-with-pickaxe | success ≥ 90% | 100% | Equips, digs, verifies the drop |
 | mine-stone-needs-pickaxe | success ≥ 85% | 100% | Crafts a pickaxe first, then digs |
@@ -112,7 +114,7 @@ Results from the default run (`npm run eval:offline`, 20 scenarios × 20 seeds =
 | inventory-full-frees-space | success ≥ 85% | 100% | Drops junk, then collects |
 | hazard-lava-edge | safe | safe | Refuses stationary work next to lava |
 
-A 60-seed run (720 runs) gave the same gate outcomes, with 92% for remote berries and 98% for replanning. The misses were blocked runs in which exploration ran out of frontier within its radius before the bush's coverage cell was reached. No run had an unsafe action, a death, or a contradicted confirmation.
+Across all 1,200 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The two misses in `replanning-removed-log` were within its 85% success gate. The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
 
 The suite also measures the learning memory: the same seeded worlds are run twice back to back with one shared experience store, and the repeat run is compared action-for-action.
 
@@ -131,7 +133,7 @@ Policy candidates are additionally compared against the baseline through the gat
 
 ## Control Center
 
-The Control Center is the operator surface for a running agent: connection and agent state, the current goal with its progress, the world observation and inventory, decision traces with the alternatives that lost and why, executed skills with measured durations, refusals and recovery attempts, the safety broker's counters, and the learning plus evaluation results. It is not a mock dashboard: every value is read from the live runtime, broker, world memory and learner at request time, and every control calls a method on those objects.
+The Control Center is the operator surface for a running agent: connection/life state, vitals, inventory/equipment, current goals, decisions and alternatives, action/recovery timelines, safety verdicts, learning results, and measured perception/skill timings. Its interactive WebGL voxel view renders only current observed blocks and explicitly styled last-seen memory markers; it does not fill in unloaded terrain. Panels use the runtime, broker, world memory, trace ring and learner snapshots; with `--sim` or `ui:demo`, those snapshots describe the simulator, not a live server.
 
 ```bash
 npm run ui:demo                     # simulated world, no server needed
@@ -139,7 +141,7 @@ npm run dev -- --task gather-logs --host 127.0.0.1 --control-center
 npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
 ```
 
-`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no network access of its own: the HTML, CSS and client script are served from this package (no CDN, no web fonts). Updates arrive over one server-sent-events stream — the server pushes a full snapshot frame on a heartbeat and a trace event for each recorded action, and the client refetches at most once per event burst rather than polling.
+`--control-center` starts the dashboard on `127.0.0.1:8787` (`--control-port`, `--control-host`) and leaves the process open after the run finishes so the trace, the learning result and the world state stay readable; `Ctrl-C` closes it. With `--control-host 0.0.0.0` it is reachable from another machine on a trusted network. The page needs no external network access: HTML, CSS and JavaScript (including the dependency-free WebGL voxel renderer) are served from this package; there is no CDN or remote font. The observed-world camera can be orbited by dragging or with the arrow keys, zoomed by scrolling or `+`/`-`, and reset with `Home`. Updates arrive over one server-sent-events stream, with snapshot and trace frames coalesced by the client.
 
 Controls that exist because the runtime actually implements them:
 
@@ -155,13 +157,13 @@ Controls that exist because the runtime actually implements them:
 
 The HTTP surface is `GET /api/health`, `GET /api/snapshot`, `GET /api/stream` (SSE) and `POST /api/command`. Writes require the `x-gamemind-token` header, and the token is injected into the served page only — it is not readable from any endpoint. A command the host cannot honour returns `501`, and a host command that reports failure returns `409` with its message, so the UI can never look like it worked when nothing happened.
 
-**What it deliberately does not do:** it holds no state of its own (restart the run and the history starts again — the durable record is `data/traces/*.jsonl`), it keeps only the most recent 400 events in memory for the panels, it exposes no free-form command console, no credential handling, and no way to change the safety policy beyond the two operator knobs above. It authenticates with the per-process token and no TLS: keep it on loopback or a trusted network.
+**What it deliberately does not do:** it keeps only the recent trace window in memory (400 events; the durable trace is `data/traces/*.jsonl`), it does not persist a full terrain map or moving entities, it exposes no free-form command console or credential handling, and it cannot bypass the safety broker. Persisted world memory stores only last-seen resource/minable locations and explored coverage; the default key (server host + port + dimension) cannot distinguish a reset/replaced world at the same endpoint, so use `--world-key` / `GAMEMIND_WORLD_KEY` to give separate worlds distinct identities. The UI authenticates with a per-process token but no TLS: keep it on loopback or a trusted network. Perception timings are the adapter's last scan sample, not a complete hardware benchmark.
 
 ## Learning and policy
 
 ```bash
 npm run policy:status              # what has been recorded, and what it concluded
-npm run dev -- --policy promote    # requires a passing eval:offline report
+npm run dev -- --policy promote    # requires full candidate evidence (20+ seeds, all scenarios)
 npm run dev -- --policy reject     # back to the active (or baseline) policy
 npm run dev -- --task gather-logs --no-learning   # this run records nothing
 ```
@@ -170,7 +172,7 @@ Every attempted action becomes an episode in `data/learning/episodes.jsonl` (ban
 
 1. **Repeatedly failed targets are excluded** in a later run against the same world key (`<scenario>#<seed>` offline, `host:port` on a live server) until enough observations contradict the failure.
 2. **Policy weights are derived** from those statistics — one multiplier per context band, clamped, and only for contexts with enough samples. They reorder candidate goals inside their priority band; a weight can never make a denied capability allowed, skip a postcondition check, or move a goal between bands.
-3. **Promotion is gated.** A derived candidate has no effect while it is only a candidate: the running agent uses the *promoted* policy, or the hand-tuned baseline. `--policy promote` refuses unless the latest `npm run eval:offline` report exists and passed, at least one episode is recorded, the candidate actually weights something, and no confirmation was contradicted. `--policy reject` (or the dashboard button) drops the promoted policy entirely — decisions go back to the hand-tuned weights, there is no stack of previous policies — and records the reason in the state history. An embedding that wants candidates live immediately can construct the learner with `useCandidateWeights: true`; no CLI flag sets it, because a live experiment should be a deliberate call.
+3. **Promotion is gated consistently in the CLI and Control Center.** A derived candidate has no effect while it is only a candidate: the running agent uses the *promoted* policy, or the hand-tuned baseline. Promotion refuses unless the offline report passed, was generated for the exact current candidate, covers every current scenario with at least 20 seeds per scenario, the learner has episodes and at least one statistically supported weighted context, the candidate comparison itself is promotable, and no confirmation was contradicted. The CLI passes the current scenario manifest and the Control Center uses the run host's report path; neither UI nor CLI has a shorter bypass. `--policy reject` (or the dashboard button) drops the promoted policy entirely — decisions go back to the hand-tuned weights, there is no stack of previous policies — and records the reason in the state history. An embedding that wants candidates live immediately can construct the learner with `useCandidateWeights: true`; no CLI flag sets it, because a live experiment should be a deliberate call.
 
 The design keeps the door open for real RL: episodes are the training records, the store is append-only JSONL, and `ExperienceLearner` is the only consumer. There is no gradient training and no LLM in the loop — the "learning" here is measured experience, not model fitting.
 
@@ -204,7 +206,7 @@ npm run dev -- --task mine-stone --resource iron_ore --count 4 --max-actions 40 
   --host 127.0.0.1 --username GameMind --control-center
 ```
 
-Task kinds are `gather-logs`, `mine-stone`, `craft-wooden-pickaxe`, and `secure-food`. Other flags for a live run: `--allow-combat` (arms attacks at the adapter, the safety policy and the planner; without it the agent only flees), `--no-learning` / `--learning-dir PATH`, `--control-center` / `--control-port` / `--control-host`.
+Task kinds are `gather-logs`, `mine-stone`, `craft-wooden-pickaxe`, and `secure-food`. Other flags for a live run: `--allow-combat` (arms attacks at the adapter, safety policy and planner; without it the agent only flees), `--no-learning` / `--learning-dir PATH`, `--memory-dir PATH`, `--world-key KEY`, and `--control-center` / `--control-port` / `--control-host`. The storage defaults can also be set with `GAMEMIND_MEMORY_DIR` and `GAMEMIND_WORLD_KEY`.
 
 Task options: `--count`, `--resource`, `--target-hunger` (secure-food only), `--explore-legs` (0–30, 0 disables exploration), `--explore-radius` (8–96 blocks), `--max-actions` (1–100, default 12), and `--max-duration-ms` (default 120000). Exploration consumes actions and real time: each leg is one navigation that can take tens of seconds, so use `--max-actions 24` and a larger `--max-duration-ms` (for example `300000`) for exploration-heavy runs. Run `npm run dev -- --help` for the full list.
 
@@ -228,6 +230,13 @@ Environment variables may set connection defaults:
 - `MINECRAFT_VERSION` (default `1.20.4`)
 - `MINECRAFT_AUTH` (`offline` by default; or `microsoft`)
 - `MINECRAFT_CONNECT_TIMEOUT_MS` (default `15000`)
+- `MINECRAFT_VIEW_DISTANCE` (`short` by default; `tiny`, `short`, `normal`, or `far`)
+- `MINECRAFT_OBSERVATION_RADIUS` (default `5`, valid range `1–16`)
+- `MINECRAFT_MAX_OBSERVED_BLOCKS` (default `256`, valid range `1–4096`)
+- `MINECRAFT_ENTITY_RADIUS` (default `24`, valid range `1–128`)
+- `MINECRAFT_RESOURCE_SCAN_RADIUS` (default `32`, valid range from the local radius through `128`)
+- `MINECRAFT_RESOURCE_SCAN_LIMIT` (default `192`, valid range `1–512`)
+- `MINECRAFT_AUTO_RESPAWN` (`true` by default; set `false` to disable Mineflayer's automatic respawn request)
 - `GAMEMIND_TRACE_DIR` (default `data/traces`)
 - `GAMEMIND_LEARNING_DIR` (default `data/learning`)
 - `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the dashboard binds this interface)
@@ -236,15 +245,16 @@ For an offline-mode server, keep `MINECRAFT_AUTH=offline`. Use Microsoft authent
 
 ## Known limitations
 
-- **No live verification has been run.** Mineflayer calls for the wide resource scan (`findBlocks`), item drops (`getDroppedItem`), berry `age` (`getProperties`), harvesting (`activateBlock`), pickup, rest, and pathfinder error names are implemented against the installed library types and source, and are unit-tested with a double. Their behaviour on a real 1.20.4 server is an open question listed in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md).
+- **No live Minecraft verification has been run.** The adapter, respawn path, persistent memory, Control Center, and combat behavior are covered by unit tests, Mineflayer doubles, or offline simulation, but none of those proves Java 1.20.4 server or plugin behavior. The Control Center API/assets have HTTP integration coverage, but the WebGL view has not had a visual browser/E2E test. Calls such as `findBlocks`, `getDroppedItem`, berry-property reads, harvesting, pickup, rest, respawn, and pathfinder error handling still need the live checks in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md).
 - **Natural regeneration depends on the server.** Rest is confirmed only by an observed health increase. A server with `naturalRegeneration` off, or with food below 18, will correctly report "not confirmed" and the task will stop.
-- **Exploration uses the loaded world.** The live wide scan sees only loaded chunks. Unloaded areas are unknown, and waypoints across them may fail with `PATH_NOT_FOUND`. Waypoints are navigated at the agent's current height with a 3-D goal, so on steep terrain some waypoints will fail, be excluded, and be replaced by the next frontier cell.
-- **Food sources are limited.** Dropped food, ripe sweet berries, and inventory food. Animals are not hunted. This is a deliberate boundary: attacking entities is combat, which this project does not implement.
-- **No live run has used the Control Center, the experience store, or combat yet.** All three are exercised by deterministic tests against the simulated world and an injected Mineflayer double, and the dashboard is verified against the real runtime in `test/control-center.test.ts` — but no figure in it has been produced by a session on an actual Minecraft server. The specific checks are §10–§13 of [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md).
+- **Exploration uses client-loaded chunks.** The live wide scan cannot see unloaded chunks; coverage is marked only for explicitly reported loaded columns and only for untruncated scans. Unknown areas remain unexplored, and waypoints across them may fail with `PATH_NOT_FOUND`. Waypoints are navigated at the agent's current height with a 3-D goal, so steep terrain may require exclusions and replanning.
+- **Food sources are limited.** Dropped food, ripe sweet berries, and inventory food. Passive animals are not hunted; combat is a separately gated, opt-in defence capability for hostiles, not a food-gathering mechanic.
+- **Persistent world identity is operator-scoped.** The default host + port + dimension key cannot recognize a world reset or replacement at the same address. Stored locations are presented as last seen, but an operator should set a distinct `--world-key` when reusing an endpoint for a different world.
 - **Mining is limited to blocks the local scan can see and the held tool can break.** It walks to a remembered stone-class or ore cell, equips, digs, and verifies the drop; it does not dig downward deliberately, branch mineshafts, place torches, or manage falling into a ravine. Ore beyond `--max-target-distance` is out of scope for a task.
 - **Shelter means a closed shell.** `build-shelter` places blocks from inventory on the open cardinal (or all eight) sides at the player's level. It does not roof, light, or evaluate whether the location is defensible beyond the observed blocks, and it reports `unknown` support rather than guessing about unobserved cells.
 - **Learning is experience statistics, not model learning.** There is no gradient update, no neural network, no replay buffer beyond the episode log, and no online adaptation inside a single run: the memory changes decisions in *later* runs. Weights that were never promoted stay candidates.
-- **The Control Center keeps only the recent window.** 400 events in memory, 24 actions, 10 decisions and 14 failures in a snapshot. The durable record is the JSONL trace; the dashboard is for watching a live run, not for archaeology.
+- **The Control Center keeps only the recent window.** A 400-event trace ring feeds recent action, decision, event and failure panels. The JSONL trace and separate world-memory snapshots are durable; the dashboard itself is for live operations, not long-term trace browsing.
+- **Performance data is scoped and low-overhead.** The Control Center samples Node process CPU, event-loop utilization, RSS/heap, host memory/load on snapshot requests, plus live adapter scan timings and skill durations. It does not profile Minecraft server TPS, GPU, GC pauses, per-core counters, or end-to-end networking; no diagnostic profiler or Minecraft tick hook is installed.
 - **Simulator fidelity.** Walking, hostiles, hunger, and regeneration are simplified; the simulator has no collisions beyond solid cells, no lighting, no mob pathing, and no protocol.
 - **Recovery is bounded, not exhaustive.** A route blocked everywhere, or one whose shortest paths all pass through an unobservable block, ends in a bounded stop.
 
@@ -252,6 +262,6 @@ For an offline-mode server, keep `MINECRAFT_AUTH=offline`. Use Microsoft authent
 
 - `scenarios/minecraft-look-roundtrip.json` is the seeded orientation scenario.
 - `data/traces/<session-id>.jsonl` stores ordered session, observation, decision (with plan, band, alternatives, rejections, memory knowledge and the safety verdict), skill, action, verification, and task events. Sensitive-looking fields are redacted and long strings truncated.
-- `data/learning/episodes.jsonl` plus `state.json` are the experience memory and the promoted policy; both are disposable, gitignored, and safe to delete (the agent reverts to hand-tuned weights).
-- Tests use offline fixtures, the simulator, and an injected Mineflayer double. They verify program logic and mock interactions. They **do not** verify Minecraft server behaviour, protocol compatibility, or plugin behaviour in a live world.
-- `npm test` runs 165 tests: the original suite (three task tests pinned explicitly to the legacy no-exploration setting, and one adapter assertion updated for the new block ordering), world memory, the simulator, decision policy, skill contracts, stuck recovery, food seeking, exploration behaviour, the live-adapter double, an evaluation regression gate, the safety broker (14), Minecraft autonomy skills and combat opt-in (7), decision traces (12), the learning system (8), the policy gate against real evaluation runs (2), and the Control Center over HTTP against a live agent (9).
+- `data/learning/episodes.jsonl` plus `state.json` are the experience memory and promoted policy; `data/world-memory/<world-hash>.json` stores validated resource/minable sightings and explored coverage. These data directories are gitignored and may be deleted to reset memory.
+- Tests use offline fixtures, deterministic simulated worlds, and an injected Mineflayer double. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, or plugin behaviour in a live world.
+- `npm test` runs 178 tests, including loaded-chunk/truncation memory, persistent world snapshot validation/round-trips, death/respawn recovery and deadline bounds, adapter regressions, decision/safety contracts, offline evaluation gates, policy-promotion refusal cases, and the Control Center HTTP/runtime surface. The latest `npm audit --audit-level=low` check found 0 vulnerabilities.

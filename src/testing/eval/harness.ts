@@ -65,6 +65,7 @@ export interface EvaluationReport {
     readonly unsafeActions: number;
     readonly unverifiedConfirmations: number;
     readonly deaths: number;
+    readonly medianActions: number;
   };
   readonly passed: boolean;
 }
@@ -367,6 +368,7 @@ export async function runEvaluationSuite(
     unsafeActions: allRuns.reduce((sum, run) => sum + run.metrics.unsafeActions, 0),
     unverifiedConfirmations: allRuns.reduce((sum, run) => sum + run.metrics.unverifiedConfirmations, 0),
     deaths: allRuns.filter((run) => run.died).length,
+    medianActions: round(median(allRuns.map((run) => run.metrics.actions)), 2),
   };
   return {
     schemaVersion: 1,

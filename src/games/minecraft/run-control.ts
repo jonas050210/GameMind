@@ -1,5 +1,7 @@
 import type { Logger } from "pino";
 import { readFile } from "node:fs/promises";
+import * as os from "node:os";
+import { performance } from "node:perf_hooks";
 import type { SafetyBroker } from "../../core/safety-broker.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
 import type { TraceEvent } from "../../core/trace.js";
@@ -12,6 +14,7 @@ import type { WorldMemory } from "./world-memory.js";
 import type {
   ControlCenterActionView,
   ControlCenterCommands,
+  ControlCenterRuntimePerformance,
   ControlCenterFailureView,
   ControlCenterSkillMetric,
   ControlCenterSnapshot,
@@ -24,6 +27,7 @@ import { miningDropFor } from "./mining.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
 import type { EvaluationSummary } from "../../control-center/types.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
+import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
 export interface CombatGateAdapter {
@@ -54,6 +58,7 @@ export interface ControlCenterSource {
   readonly traceSink: RingBufferTraceSink;
   readonly control: RunControl;
   readonly evaluationReportPath?: string | null;
+  readonly evaluationScenarioIds?: readonly string[];
   readonly worldKey?: string | null;
   readonly offlineNote?: string | null;
   readonly logger: Logger;
@@ -250,6 +255,49 @@ export function createControlCenterSource(source: ControlCenterSource): {
   commands: ControlCenterCommands;
 } {
   const { runtime, memory, learner, safety, traceSink, control } = source;
+  const logicalCpus = Math.max(1, typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length);
+  let priorSampleAt = performance.now();
+  let priorCpu = process.cpuUsage();
+  let priorEventLoop = performance.eventLoopUtilization();
+
+  function sampleRuntimePerformance(): ControlCenterRuntimePerformance {
+    const now = performance.now();
+    const cpu = process.cpuUsage();
+    const eventLoop = performance.eventLoopUtilization();
+    const eventLoopDelta = performance.eventLoopUtilization(priorEventLoop, eventLoop);
+    const sampleWindowMs = Math.max(0, now - priorSampleAt);
+    const cpuTimeMs = ((cpu.user - priorCpu.user) + (cpu.system - priorCpu.system)) / 1_000;
+    const cpuCapacityPercent = sampleWindowMs > 0
+      ? Math.max(0, Math.min(100, cpuTimeMs / (sampleWindowMs * logicalCpus) * 100))
+      : 0;
+    const processMemory = process.memoryUsage();
+    const load = os.loadavg()[0] ?? null;
+    priorSampleAt = now;
+    priorCpu = cpu;
+    priorEventLoop = eventLoop;
+    return {
+      sampledAt: new Date().toISOString(),
+      sampleWindowMs,
+      nodeVersion: process.version,
+      platform: process.platform,
+      architecture: process.arch,
+      logicalCpus,
+      process: {
+        cpuCapacityPercent,
+        eventLoopUtilizationPercent: Math.max(0, Math.min(100, eventLoopDelta.utilization * 100)),
+        rssBytes: processMemory.rss,
+        heapUsedBytes: processMemory.heapUsed,
+        heapTotalBytes: processMemory.heapTotal,
+        externalBytes: processMemory.external,
+        uptimeSeconds: process.uptime(),
+      },
+      host: {
+        totalMemoryBytes: os.totalmem(),
+        freeMemoryBytes: os.freemem(),
+        loadAverage1m: process.platform === "win32" || !Number.isFinite(load) ? null : load,
+      },
+    };
+  }
 
   const noBroker = (): ControlCommandResult => ({
     ok: false,
@@ -354,24 +402,25 @@ export function createControlCenterSource(source: ControlCenterSource): {
     async promotePolicy() {
       if (!learner) return { ok: false, message: "No experience learner is attached to this run." };
       const snapshot = learner.snapshot();
-      if (snapshot.contradictedConfirmations > 0) {
-        return {
-          ok: false,
-          message: `Refusing to promote: ${snapshot.contradictedConfirmations} confirmation(s) were contradicted by the world.`,
-        };
-      }
-      if (snapshot.episodes === 0) return { ok: false, message: "Nothing learned yet; no candidate policy to promote." };
-      if (snapshot.candidatePolicy.contexts === 0) {
-        return {
-          ok: false,
-          message:
-            "The derived candidate is still the baseline: no context reached the sample threshold, so promoting it would change nothing.",
-        };
-      }
-      await learner.promote(learner.candidateWeights, "promoted from the Control Center after the episode-level safety check");
+      const report = await readEvaluationSummary(source.evaluationReportPath ?? null);
+      const problems = policyPromotionRefusalReasons(
+        {
+          episodes: snapshot.episodes,
+          candidateContexts: snapshot.candidatePolicy.contexts,
+          contradictedConfirmations: snapshot.contradictedConfirmations,
+          candidateWeightsId: learner.candidateWeights.id,
+        },
+        report,
+        source.evaluationScenarioIds ?? [],
+      );
+      if (problems.length > 0) return { ok: false, message: `Refusing to promote: ${problems.join("; ")}.` };
+      await learner.promote(
+        learner.candidateWeights,
+        `promoted from the Control Center; evaluation report ${report.generatedAt}`,
+      );
       return {
         ok: true,
-        message: `Promoted ${learner.candidateWeights.id} (${Object.keys(learner.candidateWeights.entries).length} weighted contexts). Run 'npm run eval:offline' for the full gate.`,
+        message: `Promoted ${learner.candidateWeights.id} (${Object.keys(learner.candidateWeights.entries).length} weighted contexts) after a passing full-suite offline comparison.`,
       };
     },
     async rejectPolicy() {
@@ -401,8 +450,34 @@ export function createControlCenterSource(source: ControlCenterSource): {
             ? (miningDropFor(control.task.resourceName) ?? control.task.resourceName)
             : ""
       : "";
+    const observedBlocks = (state?.nearbyBlocks ?? []).slice(0, 260).map((block) => ({
+      x: block.position.x,
+      y: block.position.y,
+      z: block.position.z,
+      name: block.name,
+      hazard: isHazardBlockName(block.name),
+      resource: isResourceBlockName(block.name) || block.name === targetItem,
+      remembered: false,
+    }));
+    const observedBlockKeys = new Set(observedBlocks.map((block) => `${block.x},${block.y},${block.z}`));
+    const rememberedBlocks = [...memory.blockSightings(), ...memory.minableSightings()]
+      .filter((sighting, index, all) => {
+        const key = `${sighting.position.x},${sighting.position.y},${sighting.position.z}`;
+        return !observedBlockKeys.has(key) && all.findIndex((other) => other.key === sighting.key) === index;
+      })
+      .slice(0, 160)
+      .map((sighting) => ({
+        x: sighting.position.x,
+        y: sighting.position.y,
+        z: sighting.position.z,
+        name: sighting.name,
+        hazard: isHazardBlockName(sighting.name),
+        resource: true,
+        remembered: sighting.lastSeenSequence !== world?.sequence,
+      }));
     const base: ControlCenterSnapshot = {
       generatedAt: new Date().toISOString(),
+      performance: sampleRuntimePerformance(),
       connection: {
         adapterStatus: status.adapterStatus,
         gameId: runtime.adapter.gameId,
@@ -447,21 +522,27 @@ export function createControlCenterSource(source: ControlCenterSource): {
         saturation: state?.player.foodSaturation ?? null,
         airTicks: state?.player.oxygenLevel ?? null,
         onGround: state?.player.onGround ?? null,
+        alive: state?.player.alive ?? null,
+        deathCount: state?.player.deathCount ?? null,
         time: state?.time ? { dayTicks: state.time.dayTicks, isNight: state.time.isNight } : null,
+        perception: state?.perception
+          ? {
+              ...state.perception,
+              loadedChunks: state.perception.loadedChunks ?? state.resourceScan.loadedChunks?.length ?? null,
+              resourceScanRadius: state.resourceScan.radius,
+              resourceScanTruncated: state.resourceScan.truncated,
+              minableScanRadius: state.minableScan?.radius ?? null,
+              minableScanTruncated: state.minableScan?.truncated ?? null,
+            }
+          : null,
         entities: (state?.entities ?? []).slice(0, 24).map((entity) => ({
           id: entity.id,
           name: entity.name,
+          position: entity.position,
           distance: entity.distance,
           hostile: isHostileMinecraftEntity(entity.name, entity.type),
         })),
-        blocks: (state?.nearbyBlocks ?? []).slice(0, 260).map((block) => ({
-          x: block.position.x,
-          y: block.position.y,
-          z: block.position.z,
-          name: block.name,
-          hazard: isHazardBlockName(block.name),
-          resource: isResourceBlockName(block.name) || block.name === targetItem,
-        })),
+        blocks: [...observedBlocks, ...rememberedBlocks],
         knownResourceBlocks: memorySummary.resourceBlocks,
         minableBlocks: memorySummary.minableBlocks ?? 0,
         exploredCells: memorySummary.exploredCells,
@@ -544,6 +625,11 @@ export function createControlCenterSource(source: ControlCenterSource): {
       })),
       recentActions: folded.actions,
       recentFailures: folded.failures,
+      recentEvents: traceSink.recent
+        .filter((event) => !["observation.received", "session.heartbeat"].includes(event.eventType))
+        .slice(-30)
+        .reverse()
+        .map(traceView),
       recentDecisions: traceSink
         .filter((event) => event.eventType === "decision.made")
         .slice(-10)
@@ -609,10 +695,14 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
       model: null,
       seedsPerScenario: null,
       scenarios: 0,
+      scenarioIds: [],
       runs: 0,
       successRate: null,
       unsafeActions: null,
       passed: null,
+      policyCandidateId: null,
+      policyPromotable: null,
+      policyGateReasons: [],
       learning: null,
     };
   }
@@ -623,6 +713,10 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
       seedCount?: number;
       scenarios?: unknown[];
       learning?: unknown[];
+      policyComparison?: {
+        candidatePolicyId?: string;
+        decision?: { promote?: boolean; reasons?: unknown[] };
+      } | null;
       totals?: { runs?: number; successRate?: number; unsafeActions?: number };
       passed?: boolean;
     };
@@ -632,10 +726,24 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
       model: typeof parsed.model === "string" ? parsed.model : null,
       seedsPerScenario: typeof parsed.seedCount === "number" ? parsed.seedCount : null,
       scenarios: Array.isArray(parsed.scenarios) ? parsed.scenarios.length : 0,
+      scenarioIds: Array.isArray(parsed.scenarios)
+        ? parsed.scenarios.flatMap((entry) => {
+            if (typeof entry !== "object" || entry === null) return [];
+            const id = (entry as { scenarioId?: unknown }).scenarioId;
+            return typeof id === "string" ? [id] : [];
+          })
+        : [],
       runs: parsed.totals?.runs ?? 0,
       successRate: typeof parsed.totals?.successRate === "number" ? parsed.totals.successRate : null,
       unsafeActions: typeof parsed.totals?.unsafeActions === "number" ? parsed.totals.unsafeActions : null,
       passed: typeof parsed.passed === "boolean" ? parsed.passed : null,
+      policyCandidateId: parsed.policyComparison?.candidatePolicyId ?? null,
+      policyPromotable: typeof parsed.policyComparison?.decision?.promote === "boolean"
+        ? parsed.policyComparison.decision.promote
+        : null,
+      policyGateReasons: Array.isArray(parsed.policyComparison?.decision?.reasons)
+        ? parsed.policyComparison.decision.reasons.filter((reason): reason is string => typeof reason === "string")
+        : [],
       learning: Array.isArray(parsed.learning)
         ? summarizeLearningEvidence(parsed.learning as Record<string, unknown>[])
         : null,
@@ -647,10 +755,14 @@ export async function readEvaluationSummary(file: string | null): Promise<Evalua
       model: null,
       seedsPerScenario: null,
       scenarios: 0,
+      scenarioIds: [],
       runs: 0,
       successRate: null,
       unsafeActions: null,
       passed: null,
+      policyCandidateId: null,
+      policyPromotable: null,
+      policyGateReasons: [],
       learning: null,
     };
   }
