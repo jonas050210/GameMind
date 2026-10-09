@@ -16,6 +16,17 @@
 - Deterministische Offline-Fakes variieren Hunger, Inventar, Logs, Crafting-Tische, Hostiles, blockierte Wege, Aktionsfehler und Budgets. Sie testen Logik und Mock-Verhalten, nicht Mineflayer-/Serverkompatibilität.
 - Kein echter Minecraft-Server stand zum Testen bereit; Live-Kompatibilität und Pluginverhalten in einer echten Welt sind daher weiterhin **nicht verifiziert**.
 
+### Umsetzungsstand der zweiten Phase (Erkundung, Nahrung, Überleben)
+
+- **Wahrnehmung:** Zusätzlich zum lokalen Würfel gibt es einen weiteren Ressourcenscan (Stämme, Werkbänke, Süßbeerenbüsche mit Reifegrad bis 24 Blöcke) und erkannte Gegenstände am Boden. Die Obergrenze des lokalen Würfels bevorzugt Ressourcenblöcke statt die Reihenfolge der Iteration.
+- **Gedächtnis:** Sichtungen werden über Beobachtungen hinweg gehalten und nur entfernt, wenn ein vollständig erfasster, nicht abgeschnittener Bereich deren Fehlen belegt. Erkundete Felder und zuletzt gesehene Feinde werden mitgeführt.
+- **Erkundung:** Begrenzte Routen zu unerkundeten Feldern im Umkreis des Aufgabenstarts; Feinde in der Nähe werden gemieden. Die Anzahl der Erkundungsschritte ist ein Parameter der Aufgabe.
+- **Zielwahl in drei Prioritätsbändern:** Sicherheit (Flucht, Ausweichen nach Blockade), Überleben (Essen, Nahrung aufnehmen, Beeren ernten, Ausruhen bei niedriger Gesundheit) und Fortschritt (Sammeln, Crafting, Annähern an Gemerktes). Innerhalb eines Bandes wird nach Nutzen mit einem kleinen Bonus für das bisherige Ziel gewichtet.
+- **Komposition und Verifikation:** Jede Entscheidung projiziert die verbleibenden Schritte; ausgeführt wird nur der erste. Jede bestätigte Aktion wird gegen die nächste Beobachtung geprüft. Nicht gestützte Bestätigungen zählen als Fehler.
+- **Blockade und Erholung:** Routenblockaden führen zu begrenzten Ausweichmanövern, die achsenparallel sind; wiederholte Versuche ohne Fortschritt schließen das Ziel aus.
+- **Offline-Simulation und Bewertung:** Eine deterministische, geseedete Welt mit zwölf Szenarien und Gate-Prüfungen (keine unsicheren Aktionen, keine Todesfälle, keine widersprüchlichen Bestätigungen). Die Ergebnisse gelten nur für Steuerungslogik, nicht für einen echten Server.
+- **Live-Status:** Weiterhin **nicht verifiziert**. Die Prüfschritte und Befehle stehen in `docs/LIVE_VERIFICATION.md`.
+
 ## Kurzfassung
 
 GameMind sollte nicht als ein einzelnes neuronales Netz verstanden werden, das direkt Pixel in Tastendrücke übersetzt. Für ein langfristig erweiterbares System ist eine **hierarchische, hybride Agentenarchitektur** sinnvoller:

@@ -6,6 +6,12 @@ const vectorSchema = z.object({
   z: z.number().finite(),
 });
 
+const blockPositionSchema = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+  z: z.number().int(),
+});
+
 const orientationSchema = z.object({
   yaw: z.number().finite(),
   pitch: z.number().finite(),
@@ -21,6 +27,28 @@ export const minecraftItemStackSchema = z.object({
 });
 
 export type MinecraftItemStack = z.infer<typeof minecraftItemStackSchema>;
+
+/** A block of a resource class (log, crafting table, sweet berry bush) found by the wide scan. */
+export const minecraftResourceSightingSchema = z.object({
+  name: z.string(),
+  position: blockPositionSchema,
+  distance: z.number().finite().nonnegative(),
+  /** Only included for block classes whose state matters (sweet berry bush `age`). */
+  properties: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+});
+
+export type MinecraftResourceSighting = z.infer<typeof minecraftResourceSightingSchema>;
+
+/** A dropped item entity, identified through Mineflayer's dropped-item metadata. */
+export const minecraftItemDropSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  count: z.number().int().positive(),
+  position: vectorSchema,
+  distance: z.number().finite().nonnegative(),
+});
+
+export type MinecraftItemDrop = z.infer<typeof minecraftItemDropSchema>;
 
 export const minecraftObservationSchema = z.object({
   player: z.object({
@@ -54,20 +82,28 @@ export const minecraftObservationSchema = z.object({
       health: z.number().finite().nullable(),
     }),
   ),
+  /** Local cube around the scan center: every non-air block, nearest and resource blocks first. */
   nearbyBlocks: z.array(
     z.object({
-      position: z.object({
-        x: z.number().int(),
-        y: z.number().int(),
-        z: z.number().int(),
-      }),
+      position: blockPositionSchema,
       name: z.string(),
       type: z.number().int(),
       boundingBox: z.string(),
     }),
   ),
+  /** Resource-class blocks found in a wider radius; absence is only meaningful when not truncated. */
+  resourceSightings: z.array(minecraftResourceSightingSchema),
+  resourceScan: z.object({
+    radius: z.number().finite().positive(),
+    limit: z.number().int().positive(),
+    center: blockPositionSchema,
+    truncated: z.boolean(),
+  }),
+  itemDrops: z.array(minecraftItemDropSchema),
   sampledRegion: z.object({
     radius: z.number().int().positive(),
+    verticalRadius: z.number().int().nonnegative(),
+    center: blockPositionSchema,
     sampledCells: z.number().int().nonnegative(),
     unknownCells: z.number().int().nonnegative(),
     truncated: z.boolean(),
@@ -76,3 +112,4 @@ export const minecraftObservationSchema = z.object({
 
 export type MinecraftObservation = z.infer<typeof minecraftObservationSchema>;
 export type MinecraftVector = z.infer<typeof vectorSchema>;
+export type MinecraftBlockPosition = z.infer<typeof blockPositionSchema>;

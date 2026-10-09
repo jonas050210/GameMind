@@ -12,7 +12,7 @@ import type { MinecraftObservation } from "../games/minecraft/observation.js";
 import { minecraftObservationSchema } from "../games/minecraft/observation.js";
 import { isHostileMinecraftEntity } from "../games/minecraft/threats.js";
 import {
-  minecraftCapabilities,
+  legacyMinecraftCapabilities,
   MINECRAFT_COLLECT_BLOCK_CAPABILITY,
   MINECRAFT_CRAFT_CAPABILITY,
   MINECRAFT_EAT_CAPABILITY,
@@ -115,8 +115,18 @@ export function createFakeMinecraftFixture(seed: number): MinecraftObservation {
         boundingBox: "block",
       },
     ],
+    resourceSightings: [],
+    resourceScan: {
+      radius: 24,
+      limit: 64,
+      center: { x: Math.floor(x + 0.5), y: 64, z: Math.floor(z + 0.5) },
+      truncated: false,
+    },
+    itemDrops: [],
     sampledRegion: {
       radius: 3,
+      verticalRadius: 2,
+      center: { x: Math.floor(x + 0.5), y: 64, z: Math.floor(z + 0.5) },
       sampledCells: 245,
       unknownCells: 0,
       truncated: false,
@@ -253,7 +263,8 @@ function addStack(
 
 export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
   readonly gameId = "minecraft-java";
-  readonly capabilities: readonly CapabilityDefinition[] = minecraftCapabilities;
+  /** The legacy fixture implements only the original capability surface. */
+  readonly capabilities: readonly CapabilityDefinition[] = legacyMinecraftCapabilities;
 
   private statusValue: AdapterStatus = "disconnected";
   private sessionValue: GameSession | null = null;

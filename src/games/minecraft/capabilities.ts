@@ -9,6 +9,21 @@ export const MINECRAFT_EQUIP_CAPABILITY = "minecraft.equip_item";
 export const MINECRAFT_CRAFT_CAPABILITY = "minecraft.craft_item";
 export const MINECRAFT_EAT_CAPABILITY = "minecraft.eat_food";
 export const MINECRAFT_PLACE_TABLE_CAPABILITY = "minecraft.place_crafting_table";
+export const MINECRAFT_PICKUP_ITEM_CAPABILITY = "minecraft.pickup_item";
+export const MINECRAFT_HARVEST_BERRIES_CAPABILITY = "minecraft.harvest_berries";
+export const MINECRAFT_REST_CAPABILITY = "minecraft.rest";
+
+/** Capability names of the original fixture-era surface, kept for legacy fixtures. */
+export const LEGACY_MINECRAFT_CAPABILITY_NAMES = [
+  MINECRAFT_LOOK_CAPABILITY,
+  MINECRAFT_INSPECT_BLOCK_CAPABILITY,
+  MINECRAFT_NAVIGATE_CAPABILITY,
+  MINECRAFT_COLLECT_BLOCK_CAPABILITY,
+  MINECRAFT_EQUIP_CAPABILITY,
+  MINECRAFT_CRAFT_CAPABILITY,
+  MINECRAFT_EAT_CAPABILITY,
+  MINECRAFT_PLACE_TABLE_CAPABILITY,
+] as const;
 
 const xzCoordinate = z.number().finite().int().min(-30_000_000).max(30_000_000);
 const yCoordinate = z.number().finite().int().min(-64).max(512);
@@ -120,6 +135,36 @@ export const minecraftFoodNames = [
   "sweet_berries",
 ] as const;
 
+/** Items a pickup may target: allowlisted food drops and logs (never arbitrary items). */
+export const minecraftPickupNames = [...minecraftFoodNames, ...minecraftLogNames] as const;
+
+export const minecraftPickupItemInputSchema = z
+  .object({
+    x: xzCoordinate,
+    y: yCoordinate,
+    z: xzCoordinate,
+    itemName: z.enum(minecraftPickupNames),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
+export const minecraftHarvestBerriesInputSchema = z
+  .object({
+    x: xzCoordinate,
+    y: yCoordinate,
+    z: xzCoordinate,
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
+export const minecraftRestInputSchema = z
+  .object({
+    durationMs: z.number().int().min(1_000).max(30_000),
+    targetHealth: z.number().int().min(1).max(20).default(16),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
 export const minecraftCraftItemInputSchema = z
   .object({
     item: z.enum(minecraftCraftableItemNames),
@@ -152,6 +197,9 @@ export type MinecraftEquipInput = z.infer<typeof minecraftEquipInputSchema>;
 export type MinecraftCraftItemInput = z.infer<typeof minecraftCraftItemInputSchema>;
 export type MinecraftPlaceTableInput = z.infer<typeof minecraftPlaceTableInputSchema>;
 export type MinecraftEatFoodInput = z.infer<typeof minecraftEatFoodInputSchema>;
+export type MinecraftPickupItemInput = z.infer<typeof minecraftPickupItemInputSchema>;
+export type MinecraftHarvestBerriesInput = z.infer<typeof minecraftHarvestBerriesInputSchema>;
+export type MinecraftRestInput = z.infer<typeof minecraftRestInputSchema>;
 export type MinecraftFoodName = (typeof minecraftFoodNames)[number];
 export type MinecraftLogName = (typeof minecraftLogNames)[number];
 export type MinecraftPlankName = (typeof minecraftPlankNames)[number];
@@ -224,4 +272,35 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     maxTimeoutMs: 35_000,
     risk: "low",
   },
+  {
+    name: MINECRAFT_PICKUP_ITEM_CAPABILITY,
+    description:
+      "Walk to one observed dropped food or log item and confirm that the matching item entered the inventory. Only allowlisted items are accepted; no entity is attacked.",
+    inputSchema: minecraftPickupItemInputSchema,
+    defaultTimeoutMs: 30_000,
+    maxTimeoutMs: 60_000,
+    risk: "medium",
+  },
+  {
+    name: MINECRAFT_HARVEST_BERRIES_CAPABILITY,
+    description:
+      "Walk within reach of one observed sweet berry bush whose age is ripe (2 or 3), right-click it once, and confirm that sweet berries entered the inventory.",
+    inputSchema: minecraftHarvestBerriesInputSchema,
+    defaultTimeoutMs: 30_000,
+    maxTimeoutMs: 60_000,
+    risk: "low",
+  },
+  {
+    name: MINECRAFT_REST_CAPABILITY,
+    description:
+      "Stand still for a bounded time to let natural regeneration work. Stops early on a visible hostile within the danger radius or on any damage; confirms only a health increase.",
+    inputSchema: minecraftRestInputSchema,
+    defaultTimeoutMs: 20_000,
+    maxTimeoutMs: 40_000,
+    risk: "low",
+  },
 ];
+
+export const legacyMinecraftCapabilities: readonly CapabilityDefinition[] = minecraftCapabilities.filter(
+  (capability) => (LEGACY_MINECRAFT_CAPABILITY_NAMES as readonly string[]).includes(capability.name),
+);

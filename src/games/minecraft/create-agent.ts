@@ -12,8 +12,10 @@ export function createMinecraftAgent(
   logger: Logger,
 ) {
   const runtime = new GameMindRuntime(adapter, trace, logger);
+  // Only skills whose capability the adapter advertises are registered; decisions never see the rest.
+  const advertised = new Set(adapter.capabilities.map((capability) => capability.name));
   const skills = new SkillRuntime(
-    minecraftSkills,
+    minecraftSkills.filter((skill) => advertised.has(skill.capability)),
     runtime.actionExecutor,
     trace,
     logger,
