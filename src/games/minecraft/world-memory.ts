@@ -1,5 +1,6 @@
 import type { MinecraftBlockPosition, MinecraftObservation, MinecraftVector } from "./observation.js";
 import { distanceBetween, isResourceBlockName, isRipeBerryBush } from "./block-classes.js";
+import { isMineableBlockName } from "./mining.js";
 import { isMinecraftFoodName } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 
@@ -47,6 +48,8 @@ export interface MemoryUpdate {
 export interface MemorySummary {
   readonly observations: number;
   readonly resourceBlocks: Readonly<Record<string, number>>;
+  /** Remembered mineable blocks. Optional so summaries from before mining support stay valid. */
+  readonly minableBlocks?: number;
   readonly ripeBerryBushes: number;
   readonly foodItems: number;
   readonly exploredCells: number;
@@ -107,6 +110,11 @@ export function markCoverage(
  */
 export class WorldMemory {
   private readonly blocks = new Map<string, BlockSighting>();
+  /**
+   * Mineable stone and ore blocks are kept apart from resource blocks: they come from a different
+   * scan with its own truncation, so "not seen again" means something different for each group.
+   */
+  private readonly mined = new Map<string, BlockSighting>();
   private readonly items = new Map<string, ItemSighting>();
   private readonly hostiles = new Map<string, HostileSighting>();
   private readonly explored = new Set<string>();
@@ -163,8 +171,34 @@ export class WorldMemory {
     }
     for (const [key, sighting] of this.blocks) {
       if (sighting.lastSeenSequence === sequence) continue;
-      if (this.provablyAbsent(sighting.position, state)) {
+      if (this.provablyAbsent(sighting.position, state, "resource")) {
         this.blocks.delete(key);
+        removed += 1;
+      }
+    }
+
+    const presentMined = new Map<string, { name: string; position: MinecraftBlockPosition }>();
+    for (const block of state.nearbyBlocks) {
+      if (!isMineableBlockName(block.name)) continue;
+      presentMined.set(blockKey(block.position), { name: block.name, position: block.position });
+    }
+    for (const sighting of state.minableSightings ?? []) {
+      presentMined.set(blockKey(sighting.position), { name: sighting.name, position: sighting.position });
+    }
+    for (const [key, present] of presentMined) {
+      if (!this.mined.has(key)) added += 1;
+      this.mined.set(key, {
+        key,
+        name: present.name,
+        position: present.position,
+        ripe: null,
+        lastSeenSequence: sequence,
+      });
+    }
+    for (const [key, sighting] of this.mined) {
+      if (sighting.lastSeenSequence === sequence) continue;
+      if (this.provablyAbsent(sighting.position, state, "minable")) {
+        this.mined.delete(key);
         removed += 1;
       }
     }
@@ -218,8 +252,16 @@ export class WorldMemory {
     return { added, removed };
   }
 
-  /** Blocks whose absence is proven by the most recent observation's complete scan volumes. */
-  private provablyAbsent(position: MinecraftBlockPosition, state: MinecraftObservation): boolean {
+  /**
+   * Blocks whose absence is proven by the most recent observation's complete scan volumes. The wide
+   * scan has to be the one that actually looks for this class of block: a stone block missing from a
+   * resource scan proves nothing, because that scan never searched for stone.
+   */
+  private provablyAbsent(
+    position: MinecraftBlockPosition,
+    state: MinecraftObservation,
+    kind: "resource" | "minable",
+  ): boolean {
     const region = state.sampledRegion;
     const inLocalCube =
       region.unknownCells === 0 &&
@@ -228,17 +270,19 @@ export class WorldMemory {
       Math.abs(position.z - region.center.z) <= region.radius &&
       Math.abs(position.y - region.center.y) <= region.verticalRadius;
     if (inLocalCube) return true;
-
-    const scan = state.resourceScan;
-    return (
-      !scan.truncated &&
-      distanceBetween(position, scan.center) <= scan.radius
-    );
+    const scan = kind === "resource" ? state.resourceScan : state.minableScan;
+    if (!scan) return false;
+    return !scan.truncated && distanceBetween(position, scan.center) <= scan.radius;
   }
 
   /** Resource and table blocks, optionally restricted to block names. */
   blockSightings(names?: ReadonlySet<string>): BlockSighting[] {
     return [...this.blocks.values()].filter((sighting) => !names || names.has(sighting.name));
+  }
+
+  /** Remembered mineable blocks (stone, ore, terrain), optionally filtered by block name. */
+  minableSightings(names?: ReadonlySet<string>): BlockSighting[] {
+    return [...this.mined.values()].filter((sighting) => !names || names.has(sighting.name));
   }
 
   itemSightings(names?: ReadonlySet<string>): ItemSighting[] {
@@ -273,6 +317,11 @@ export class WorldMemory {
     return this.items.delete(key);
   }
 
+  /** Drops a remembered mineable block, e.g. after a dig proved it is gone. */
+  forgetMinable(key: string): boolean {
+    return this.mined.delete(key);
+  }
+
   summary(): MemorySummary {
     const resourceBlocks: Record<string, number> = {};
     for (const sighting of this.blocks.values()) {
@@ -285,6 +334,7 @@ export class WorldMemory {
       foodItems: this.foodItemSightings().length,
       exploredCells: this.explored.size,
       trackedHostiles: this.hostiles.size,
+      minableBlocks: this.mined.size,
     };
   }
 }

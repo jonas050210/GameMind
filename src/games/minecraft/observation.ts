@@ -50,6 +50,16 @@ export const minecraftItemDropSchema = z.object({
 
 export type MinecraftItemDrop = z.infer<typeof minecraftItemDropSchema>;
 
+/** Day-cycle information, used to decide when to prepare shelter before dark. */
+export const minecraftTimeInfoSchema = z.object({
+  /** Ticks into the current day cycle (Java Edition: 0 through 23999). */
+  dayTicks: z.number().finite().min(0).max(24_000),
+  day: z.number().int().nonnegative(),
+  isNight: z.boolean(),
+});
+
+export type MinecraftTimeInfo = z.infer<typeof minecraftTimeInfoSchema>;
+
 export const minecraftObservationSchema = z.object({
   player: z.object({
     username: z.string(),
@@ -60,6 +70,7 @@ export const minecraftObservationSchema = z.object({
     health: z.number().finite().nullable(),
     food: z.number().finite().nullable(),
     foodSaturation: z.number().finite().nullable(),
+    /** Air supply in **ticks** (0-300); 300 means full lungs. Null when the adapter cannot read it. */
     oxygenLevel: z.number().finite().nullable(),
     onGround: z.boolean(),
   }),
@@ -99,6 +110,22 @@ export const minecraftObservationSchema = z.object({
     center: blockPositionSchema,
     truncated: z.boolean(),
   }),
+  /**
+   * Mineable stone-class and ore blocks found by a second wide scan. Optional so older adapters and
+   * fixtures stay valid; the planner treats "absent" as "not scanned", never as "nothing to mine".
+   */
+  minableSightings: z.array(minecraftResourceSightingSchema).optional(),
+  minableScan: z
+    .object({
+      radius: z.number().finite().positive(),
+      limit: z.number().int().positive(),
+      center: blockPositionSchema,
+      truncated: z.boolean(),
+      /** True when the scanner could not distinguish the block state, e.g. an unloaded chunk. */
+      approximate: z.boolean().optional(),
+    })
+    .optional(),
+  time: minecraftTimeInfoSchema.optional(),
   itemDrops: z.array(minecraftItemDropSchema),
   sampledRegion: z.object({
     radius: z.number().int().positive(),

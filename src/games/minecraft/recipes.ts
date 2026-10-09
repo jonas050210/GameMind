@@ -14,7 +14,11 @@ export type CraftableMinecraftItem =
   | "wooden_pickaxe"
   | "wooden_axe"
   | "wooden_shovel"
-  | "wooden_sword";
+  | "wooden_sword"
+  | "stone_pickaxe"
+  | "stone_axe"
+  | "stone_shovel"
+  | "stone_sword";
 
 export interface MinecraftRecipePlan {
   readonly outputCount: number;
@@ -26,7 +30,7 @@ export interface MinecraftRecipePlan {
  * Deliberately small recipe knowledge for offline planning. The live adapter
  * still asks Mineflayer's version-specific recipe registry before crafting.
  */
-export const minecraftWoodRecipePlans: Readonly<Partial<Record<CraftableMinecraftItem, MinecraftRecipePlan>>> = {
+export const minecraftRecipePlans: Readonly<Partial<Record<CraftableMinecraftItem, MinecraftRecipePlan>>> = {
   oak_planks: { outputCount: 4, ingredients: { oak_log: 1 }, requiresCraftingTable: false },
   birch_planks: { outputCount: 4, ingredients: { birch_log: 1 }, requiresCraftingTable: false },
   spruce_planks: { outputCount: 4, ingredients: { spruce_log: 1 }, requiresCraftingTable: false },
@@ -58,6 +62,41 @@ export const minecraftWoodRecipePlans: Readonly<Partial<Record<CraftableMinecraf
     ingredients: { any_planks: 2, stick: 1 },
     requiresCraftingTable: true,
   },
+  stone_pickaxe: {
+    outputCount: 1,
+    ingredients: { cobblestone: 3, stick: 2 },
+    requiresCraftingTable: true,
+  },
+  stone_axe: {
+    outputCount: 1,
+    ingredients: { cobblestone: 3, stick: 2 },
+    requiresCraftingTable: true,
+  },
+  stone_shovel: {
+    outputCount: 1,
+    ingredients: { cobblestone: 1, stick: 2 },
+    requiresCraftingTable: true,
+  },
+  stone_sword: {
+    outputCount: 1,
+    ingredients: { cobblestone: 2, stick: 1 },
+    requiresCraftingTable: true,
+  },
+};
+
+/** Kept as an alias: the plan table now covers stone tools as well as wood. */
+export const minecraftWoodRecipePlans = minecraftRecipePlans;
+
+/** Ingredients that are mined rather than crafted, and how many are needed per operation. */
+export const minecraftMinedIngredientNames = ["cobblestone"] as const;
+
+export function isMinedIngredient(name: string): boolean {
+  return (minecraftMinedIngredientNames as readonly string[]).includes(name);
+}
+
+/** Blocks that yield a mined ingredient, so the planner knows what to dig for. */
+export const minedIngredientSources: Readonly<Record<string, readonly string[]>> = {
+  cobblestone: ["stone", "cobblestone", "deepslate", "cobbled_deepslate"],
 };
 
 const plankNames = new Set<string>(minecraftPlankNames);

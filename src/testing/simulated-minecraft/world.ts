@@ -10,6 +10,7 @@
 
 import type { MinecraftObservation } from "../../games/minecraft/observation.js";
 import { isResourceBlockName } from "../../games/minecraft/block-classes.js";
+import { isMineableBlockName } from "../../games/minecraft/mining.js";
 
 export const SIM_TICK_MS = 250;
 /** Walking speed in blocks per second (close to vanilla walking). */
@@ -77,6 +78,14 @@ export interface SimWorldDefinition {
   };
   readonly schedule: readonly SimScheduledEvent[];
   readonly navigationStuckTimeoutMs: number;
+  /** Ticks into the day cycle at the start of the run (Java Edition: night is 13000..22999). */
+  readonly dayTicks?: number;
+  /** Day-cycle ticks advanced per simulated second. 0 freezes the clock (the default). */
+  readonly dayTicksPerSecond?: number;
+  /** Distinct item stacks the player may hold. Reaching it makes pickups and mining fail with INVENTORY_FULL. */
+  readonly maxInventoryStacks?: number;
+  /** Hostile health overrides for scenarios; defaults to the vanilla value for the entity name. */
+  readonly hostileHealth?: Readonly<Record<string, number>>;
 }
 
 export interface SimStack {
@@ -96,6 +105,8 @@ interface SimHostile {
   readonly originX: number;
   readonly originZ: number;
   attackCooldownMs: number;
+  health: number;
+  readonly maxHealth: number;
 }
 
 interface SimItem {
@@ -121,6 +132,23 @@ export class SimulatedActionError extends Error {
     this.name = "SimulatedActionError";
   }
 }
+
+const HOSTILE_HEALTH: Readonly<Record<string, number>> = {
+  zombie: 20,
+  skeleton: 20,
+  spider: 16,
+  creeper: 20,
+  husk: 20,
+  drowned: 20,
+  enderman: 40,
+};
+
+const HOSTILE_DROPS: Readonly<Record<string, Readonly<Record<string, number>>>> = {
+  zombie: { rotten_flesh: 1 },
+  skeleton: { bone: 1 },
+  spider: { string: 1 },
+  creeper: { gunpowder: 1 },
+};
 
 export function simItemType(name: string): number {
   let hash = 0;
@@ -164,6 +192,9 @@ export class SimulatedMinecraftWorld {
   private berryGrowthAccumulatorMs = 0;
   private itemCounter = 0;
   private nextInventorySlot = 9;
+  private readonly dayTicksStart: number;
+  private readonly dayTicksPerSecond: number;
+  readonly maxInventoryStacks: number;
 
   playerX: number;
   playerY: number;
@@ -196,6 +227,24 @@ export class SimulatedMinecraftWorld {
     this.food = definition.player.food;
     for (const stack of definition.player.inventory) this.addToInventory(stack.name, stack.count);
     this.stats.minHealth = this.health;
+    this.dayTicksStart = definition.dayTicks ?? 6_000;
+    this.dayTicksPerSecond = definition.dayTicksPerSecond ?? 0;
+    this.maxInventoryStacks = definition.maxInventoryStacks ?? 36;
+  }
+
+  /** Ticks into the day cycle; `isNight` follows the Java Edition night window. */
+  get dayTicks(): number {
+    const advanced = this.clockMs / 1_000 * this.dayTicksPerSecond;
+    return Math.floor(this.dayTicksStart + advanced) % 24_000;
+  }
+
+  get dayNumber(): number {
+    return Math.floor((this.dayTicksStart + (this.clockMs / 1_000) * this.dayTicksPerSecond) / 24_000);
+  }
+
+  get isNight(): boolean {
+    const ticks = this.dayTicks;
+    return ticks >= 13_000 && ticks < 23_000;
   }
 
   get nowMs(): number {
@@ -422,14 +471,15 @@ export class SimulatedMinecraftWorld {
 
   private pickUpItems(): void {
     for (const [id, item] of this.items) {
-      if (Math.hypot(item.x - this.playerX, item.z - this.playerZ) <= PICKUP_RADIUS) {
-        this.addToInventory(item.name, item.count);
-        this.items.delete(id);
-      }
+      if (Math.hypot(item.x - this.playerX, item.z - this.playerZ) > PICKUP_RADIUS) continue;
+      if (this.isInventoryFull(item.name)) continue; // A full inventory leaves the drop on the ground.
+      this.addToInventory(item.name, item.count);
+      this.items.delete(id);
     }
   }
 
   private addHostile(hostile: SimHostilePlacement): void {
+    const health = this.definition.hostileHealth?.[hostile.name] ?? HOSTILE_HEALTH[hostile.name] ?? 20;
     this.hostiles.set(hostile.id, {
       id: hostile.id,
       name: hostile.name,
@@ -438,7 +488,37 @@ export class SimulatedMinecraftWorld {
       originX: hostile.x + 0.5,
       originZ: hostile.z + 0.5,
       attackCooldownMs: 0,
+      health,
+      maxHealth: health,
     });
+  }
+
+  /** Returns the hostile's health after the damage, or null when the id is unknown. */
+  damageHostile(id: string, amount: number): { health: number; died: boolean } | null {
+    const hostile = this.hostiles.get(id);
+    if (!hostile) return null;
+    hostile.health = Math.max(0, hostile.health - amount);
+    const died = hostile.health <= 0;
+    if (died) {
+      this.hostiles.delete(id);
+      for (const [name, count] of Object.entries(HOSTILE_DROPS[hostile.name] ?? {})) {
+        this.addItem(name, count, Math.floor(hostile.x), Math.floor(hostile.z));
+      }
+    }
+    return { health: hostile.health, died };
+  }
+
+  hostileById(id: string): { id: string; name: string; health: number; maxHealth: number; x: number; z: number } | null {
+    const hostile = this.hostiles.get(id);
+    if (!hostile) return null;
+    return {
+      id: hostile.id,
+      name: hostile.name,
+      health: hostile.health,
+      maxHealth: hostile.maxHealth,
+      x: hostile.x,
+      z: hostile.z,
+    };
   }
 
   addItem(name: string, count: number, x: number, z: number): void {
@@ -454,8 +534,14 @@ export class SimulatedMinecraftWorld {
     return null;
   }
 
-  hostileEntities(): Array<{ id: string; name: string; x: number; z: number }> {
-    return [...this.hostiles.values()].map((hostile) => ({ id: hostile.id, name: hostile.name, x: hostile.x, z: hostile.z }));
+  hostileEntities(): Array<{ id: string; name: string; x: number; z: number; health: number }> {
+    return [...this.hostiles.values()].map((hostile) => ({
+      id: hostile.id,
+      name: hostile.name,
+      x: hostile.x,
+      z: hostile.z,
+      health: hostile.health,
+    }));
   }
 
   hostilesNear(x: number, y: number, z: number, radius: number): boolean {
@@ -465,8 +551,21 @@ export class SimulatedMinecraftWorld {
     });
   }
 
+  /** Solid, mineable block at a cell, or null when it is air/unknown/not solid. */
+  mineableAt(x: number, y: number, z: number): string | null {
+    const block = this.blockAt(x, y, z);
+    if (!block || block.boundingBox !== "block") return null;
+    return block.name;
+  }
+
   countItem(name: string): number {
     return this.inventory.filter((stack) => stack.name === name).reduce((sum, stack) => sum + stack.count, 0);
+  }
+
+  /** True when no new stack can be added: every allowed slot already holds a different item. */
+  isInventoryFull(name?: string): boolean {
+    if (name !== undefined && this.inventory.some((stack) => stack.name === name)) return false;
+    return this.inventory.length >= this.maxInventoryStacks;
   }
 
   addToInventory(name: string, count: number): void {
@@ -474,6 +573,12 @@ export class SimulatedMinecraftWorld {
     if (existing) {
       existing.count += count;
       return;
+    }
+    if (this.inventory.length >= this.maxInventoryStacks) {
+      throw new SimulatedActionError(
+        `Inventory holds ${this.inventory.length} stacks and cannot accept ${name}.`,
+        "INVENTORY_FULL",
+      );
     }
     this.inventory.push({
       slot: this.nextInventorySlot,
@@ -556,6 +661,29 @@ export class SimulatedMinecraftWorld {
     return { blocks: found.slice(0, limit), truncated: found.length > limit };
   }
 
+  /** Mineable stone/ore blocks in range, using the same scan radius as the resource scan. */
+  minableSightings(limit: number): { blocks: MinecraftObservation["minableSightings"]; truncated: boolean } {
+    const found: NonNullable<MinecraftObservation["minableSightings"]> = [];
+    for (const [key, block] of this.blocks) {
+      if (!isMineableBlockName(block.name)) continue;
+      const [x = 0, y = 0, z = 0] = key.split(",").map(Number);
+      if (Math.abs(x) > this.definition.loadedRadius || Math.abs(z) > this.definition.loadedRadius) continue;
+      const distance = Math.hypot(x + 0.5 - this.playerX, y + 0.5 - this.playerY, z + 0.5 - this.playerZ);
+      if (distance > RESOURCE_SCAN_RADIUS) continue;
+      found.push({ name: block.name, position: { x, y, z }, distance });
+    }
+    found.sort((left, right) => left.distance - right.distance || left.position.x - right.position.x);
+    return { blocks: found.slice(0, limit), truncated: found.length > limit };
+  }
+
+  /** Number of hostiles within a radius; combat refuses to engage when more than one is near. */
+  hostileCountNear(x: number, y: number, z: number, radius: number): number {
+    return [...this.hostiles.values()].filter((hostile) => {
+      const distance = Math.hypot(hostile.x - x, this.standingY - y, hostile.z - z);
+      return distance <= radius;
+    }).length;
+  }
+
   entityList(): MinecraftObservation["entities"] {
     const entities: MinecraftObservation["entities"] = [];
     for (const hostile of this.hostiles.values()) {
@@ -567,7 +695,7 @@ export class SimulatedMinecraftWorld {
         type: "hostile",
         position: { x: hostile.x, y: this.standingY, z: hostile.z },
         distance,
-        health: 20,
+        health: hostile.health,
       });
     }
     return entities.sort((left, right) => left.distance - right.distance).slice(0, 64);

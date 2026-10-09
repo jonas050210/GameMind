@@ -3,7 +3,11 @@ import type {
   DecisionContext,
   DecisionModel,
   DecisionRecord,
+  DecisionRejection,
 } from "../../core/decision-model.js";
+import { goalClassOf, distanceBandOf, vitalityBandOf } from "../../core/learning/episode.js";
+import type { PolicyAdvisor } from "../../core/learning/policy-advisor.js";
+import { BASELINE_ADVISOR } from "../../core/learning/policy-advisor.js";
 import {
   minecraftLogNames,
   minecraftPlankNames,
@@ -12,17 +16,37 @@ import {
   distanceBetween,
   isRipeBerryBush,
   isResourceBlockName,
+  observedHazards,
 } from "./block-classes.js";
+import {
+  bestPickaxeTier,
+  canMineWithTier,
+  isMineableBlockName,
+  minecraftMiningRequirements,
+  minecraftPlaceableBlockNames,
+  miningDropFor,
+} from "./mining.js";
+import { bestWeapon, combatIsAllowed } from "./combat.js";
+import { shelterCardinalSolidCount } from "./skill-contracts.js";
+import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
 import type { MinecraftObservation } from "./observation.js";
-import type { CraftItemTask, GatherResourceTask, MinecraftTask } from "./task.js";
+import { craftItemTaskSchema } from "./task.js";
+import type {
+  BuildShelterTask,
+  CraftItemTask,
+  GatherResourceTask,
+  MinecraftTask,
+  MineResourceTask,
+} from "./task.js";
 import type { CraftableMinecraftItem } from "./recipes.js";
 import {
   countItemAndEquipment,
   isMinecraftFoodName,
   isMinecraftLogName,
   minecraftFoodNutrition,
-  minecraftWoodRecipePlans,
+  minecraftRecipePlans,
+  minedIngredientSources,
   plankNameForLog,
 } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
@@ -44,6 +68,17 @@ const SIDESTEP_DISTANCE = 6;
 const MAX_PLAN_STEPS = 12;
 /** Remembered targets up to this far beyond the collection limit are approached before collecting. */
 const APPROACH_EXTRA_RANGE = 32;
+/** A hazard block this close to the player triggers the safety goal of moving away. */
+const HAZARD_FLEE_DISTANCE = 2.5;
+/** Night, low health, or a hostile within this many blocks makes "close the shelter" a survival goal. */
+const SHELTER_TRIGGER_HOSTILE_DISTANCE = 12;
+/** A weapon must beat this damage before attacking is considered better than retreating. */
+const MIN_WEAPON_DAMAGE = 4;
+const MAX_COMBAT_ATTEMPTS_PER_RUN = 3;
+/** Slots a full player inventory occupies; used to decide when to free space. */
+const INVENTORY_FULL_STACKS = 30;
+/** Ticks before full darkness at which shelter is prepared. */
+const NIGHT_APPROACH_TICKS = 12_000;
 
 /** Priority bands: lower bands always win. Progress never outranks a survival or safety need. */
 export const BAND_SAFETY = 0;
@@ -60,6 +95,18 @@ export interface MinecraftDecisionContext extends DecisionContext {
   readonly explorationLegsUsed?: number;
   readonly restMsUsed?: number;
   readonly previousGoalKey?: string | null;
+  /** Learner hook: weights and known failures. Baseline behaviour is unchanged when absent. */
+  readonly advisor?: PolicyAdvisor;
+  /** World identity for learned target memory (scenario id + seed, or server + world). */
+  readonly worldKey?: string | null;
+  /** Operator switch. Combat is never planned without it, independent of the safety policy. */
+  readonly combatEnabled?: boolean;
+  /** Attacks already attempted this run; combat is bounded per run, not per target. */
+  readonly combatAttempts?: number;
+  /** True when the last observation showed no room for another item stack. */
+  readonly inventoryFull?: boolean;
+  /** Rejection sink filled while candidates are filtered, so traces explain what was dropped. */
+  readonly ledger?: RejectionLedger;
   /** Set by the runner after a stall or oscillation to request a sidestep recovery. */
   readonly stuck?: {
     readonly reason: string;
@@ -68,6 +115,56 @@ export interface MinecraftDecisionContext extends DecisionContext {
     /** The goal that could not be reached, when known; sidesteps are chosen to approach it from another side. */
     readonly toward?: { readonly x: number; readonly z: number } | null;
   } | null;
+}
+
+/** Collects the reasons candidates were dropped, so a decision trace explains the rejections. */
+export class RejectionLedger {
+  private readonly entries: DecisionRejection[] = [];
+
+  reject(
+    candidate: DecisionCandidate,
+    reason: DecisionRejection["reason"],
+    detail: string,
+  ): void {
+    if (this.entries.some((entry) => entry.targetKey === candidate.targetKey && entry.reason === reason)) return;
+    this.entries.push({
+      goalId: candidate.goalId,
+      targetKey: candidate.targetKey,
+      priorityBand: candidate.priorityBand,
+      score: candidate.score,
+      reason,
+      detail,
+    });
+  }
+
+  /** Records a rejection for a target that never became a full candidate (skipped during scanning). */
+  note(
+    target: { readonly goalId: string; readonly targetKey: string | null; readonly priorityBand: number; readonly score?: number },
+    reason: DecisionRejection["reason"],
+    detail: string,
+  ): void {
+    this.reject(
+      {
+        goalId: target.goalId,
+        targetKey: target.targetKey,
+        priorityBand: target.priorityBand,
+        score: target.score ?? 0,
+        skillId: null,
+        input: null,
+        rationale: detail,
+      },
+      reason,
+      detail,
+    );
+  }
+
+  get all(): readonly DecisionRejection[] {
+    return this.entries;
+  }
+
+  get size(): number {
+    return this.entries.length;
+  }
 }
 
 export interface MinecraftDecisionRecord extends DecisionRecord {
@@ -337,6 +434,415 @@ function recoveryCandidates(
     .slice(0, 2)
     .map(({ progress: _progress, ...candidate }) => candidate);
 }
+
+
+/** Observed lava/water/fire/cactus within flee distance. Unknown cells never trigger a hazard goal. */
+function hazardCandidate(
+  state: MinecraftObservation,
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  if (!available(context, "minecraft.navigate")) return null;
+  const hazards = observedHazards(state.nearbyBlocks, state.player.position).filter(
+    (hazard) => hazard.distance <= HAZARD_FLEE_DISTANCE,
+  );
+  if (hazards.length === 0) return null;
+  const player = state.player.position;
+  const hazard = hazards[0]!;
+  let awayX = player.x - hazard.position.x;
+  let awayZ = player.z - hazard.position.z;
+  if (Math.hypot(awayX, awayZ) < 0.001) {
+    awayX = 1;
+    awayZ = 0;
+  }
+  const solids = solidKeys(state);
+  const baseAngle = Math.atan2(awayZ, awayX);
+  let best: { x: number; z: number; score: number } | null = null;
+  for (let index = 0; index < 8; index += 1) {
+    const angle = baseAngle + (index * Math.PI) / 4;
+    const x = Math.round(player.x + Math.cos(angle) * 6);
+    const z = Math.round(player.z + Math.sin(angle) * 6);
+    const minHazardDistance = Math.min(
+      ...hazards.map((entry) => Math.hypot(x + 0.5 - (entry.position.x + 0.5), z + 0.5 - (entry.position.z + 0.5))),
+    );
+    const blocked = blockedRouteCount(solids, player, { x: x + 0.5, z: z + 0.5 });
+    const score = minHazardDistance - blocked * 2;
+    if (!best || score > best.score) best = { x, z, score };
+  }
+  if (!best) return null;
+  const targetKey = `hazard:${best.x},${Math.floor(player.y)},${best.z}`;
+  if (isExcluded(context, targetKey)) {
+    context.ledger?.note(
+      { goalId: "avoid-hazard", targetKey, priorityBand: BAND_SAFETY },
+      "excluded_after_failure",
+      "that escape cell was already tried and failed",
+    );
+    return null;
+  }
+  return {
+    goalId: "avoid-hazard",
+    priorityBand: BAND_SAFETY,
+    score: 990 + best.score,
+    skillId: "minecraft.navigate",
+    input: { x: best.x, y: Math.floor(player.y), z: best.z, range: 1 },
+    targetKey,
+    rationale: `A ${hazard.name} block is ${hazard.distance.toFixed(1)} blocks away; move to a cell that keeps distance from it before doing anything else.`,
+  };
+}
+
+/**
+ * Defensive strike. Exists only when the operator enabled combat **and** the shared safety function
+ * approves the specific target, and it never outranks fleeing when several hostiles are close.
+ */
+function defendCandidate(
+  state: MinecraftObservation,
+  task: MinecraftTask,
+  threats: Threats,
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  if (!context.combatEnabled) {
+    if (threats.nearby.length > 0) {
+      context.ledger?.note(
+        { goalId: "defend", targetKey: `hostile:${threats.nearby[0]?.id ?? "unknown"}`, priorityBand: BAND_SAFETY },
+        "no_skill",
+        "combat is not enabled for this run, so the agent flees instead of attacking",
+      );
+    }
+    return null;
+  }
+  if (!available(context, "minecraft.attack-hostile")) return null;
+  const hostile = threats.nearby[0];
+  if (!hostile) return null;
+  if ((context.combatAttempts ?? 0) >= MAX_COMBAT_ATTEMPTS_PER_RUN) {
+    context.ledger?.note(
+      { goalId: "defend", targetKey: `hostile:${hostile.id}`, priorityBand: BAND_SAFETY },
+      "no_budget",
+      `the run already attempted ${MAX_COMBAT_ATTEMPTS_PER_RUN} fight(s)`,
+    );
+    return null;
+  }
+  const weapon = bestWeapon([
+    ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
+    ...state.inventory.map((item) => ({ name: item.name })),
+  ]);
+  const verdict = combatIsAllowed({
+    enabled: true,
+    health: state.player.health,
+    minHealth: 10,
+    retreatHealth: 6,
+    hostileCountNearby: threats.nearby.length,
+    maxEngageableHostiles: 1,
+    weapon: weapon ? { name: weapon.name, damage: weapon.damage } : null,
+    requiredDamage: MIN_WEAPON_DAMAGE,
+    targetDistance: hostile.distance,
+    maxTargetDistance: 4,
+    hitsAlreadyAttempted: 0,
+    maxHits: 4,
+    hostileName: hostile.name,
+    hostileType: hostile.type,
+    hunger: state.player.food,
+  });
+  const targetKey = `hostile:${hostile.id}`;
+  if (!verdict.allowed) {
+    context.ledger?.note(
+      { goalId: "defend", targetKey, priorityBand: BAND_SAFETY },
+      verdict.code === "COMBAT_NO_WEAPON" ? "no_skill" : "threatened",
+      verdict.reason,
+    );
+    return null;
+  }
+  if (isExcluded(context, targetKey)) {
+    context.ledger?.note(
+      { goalId: "defend", targetKey, priorityBand: BAND_SAFETY },
+      "excluded_after_failure",
+      "this entity was already engaged and the engagement failed",
+    );
+    return null;
+  }
+  return {
+    goalId: "defend",
+    priorityBand: BAND_SAFETY,
+    score: 1_000 + task.dangerRadius - hostile.distance,
+    skillId: "minecraft.attack-hostile",
+    input: {
+      entityId: hostile.id,
+      maxHits: 4,
+      dangerRadius: task.dangerRadius,
+      minHealth: 10,
+      retreatHealth: 6,
+      requiredDamage: MIN_WEAPON_DAMAGE,
+    },
+    targetKey,
+    rationale: `Combat is enabled and safe for this target: ${verdict.reason}`,
+  };
+}
+
+/** True when the agent stands inside a closed ring of observed solid blocks. */
+export function isShelteredFromState(state: MinecraftObservation): boolean {
+  return shelterCardinalSolidCount(state) >= SHELTER_CARDINAL_DIRECTIONS.length;
+}
+
+function nightPressure(state: MinecraftObservation): "night" | "approaching" | "day" {
+  const time = state.time;
+  if (!time) return "day";
+  if (time.isNight) return "night";
+  return time.dayTicks >= NIGHT_APPROACH_TICKS && time.dayTicks < MINECRAFT_NIGHT_START_TICKS_FALLBACK
+    ? "approaching"
+    : "day";
+}
+
+const MINECRAFT_NIGHT_START_TICKS_FALLBACK = 13_000;
+
+/**
+ * Shelter as a survival goal: only when it is dark or nearly dark **and** the agent is hurt or being
+ * chased, and only when placeable blocks are actually carried. The plan never claims a shelter it
+ * cannot build.
+ */
+function shelterCandidate(
+  state: MinecraftObservation,
+  task: MinecraftTask,
+  threats: Threats,
+  context: MinecraftDecisionContext,
+  reason: "night" | "hurt" | "task",
+): DecisionCandidate | null {
+  if (!available(context, "minecraft.build-shelter")) return null;
+  if (isShelteredFromState(state)) return null;
+  const placeable = placeableBlockInventory(state);
+  if (placeable.total < 1) {
+    context.ledger?.note(
+      { goalId: "build-shelter", targetKey: "shelter:here", priorityBand: BAND_SURVIVAL },
+      "no_skill",
+      `no placeable blocks are carried (need at least 1 of ${minecraftPlaceableBlockNames.slice(0, 4).join(", ")}, …)`,
+    );
+    return null;
+  }
+  const open = SHELTER_CARDINAL_DIRECTIONS.filter(([dx, dz]) => {
+    const x = Math.floor(state.player.position.x) + dx;
+    const z = Math.floor(state.player.position.z) + dz;
+    const y = Math.floor(state.player.position.y);
+    return !state.nearbyBlocks.some(
+      (block) => block.position.x === x && block.position.y === y && block.position.z === z && block.boundingBox === "block",
+    );
+  }).length;
+  if (open === 0) return null;
+  if (threats.visibleHostiles.some((hostile) => hostile.distance <= task.dangerRadius)) return null;
+  const pressure = nightPressure(state);
+  if (reason === "night" && pressure === "day") return null;
+  const targetKey = `shelter:${Math.floor(state.player.position.x)},${Math.floor(state.player.position.y)},${Math.floor(state.player.position.z)}`;
+  if (isExcluded(context, targetKey)) {
+    context.ledger?.note(
+      { goalId: "build-shelter", targetKey, priorityBand: BAND_SURVIVAL },
+      "excluded_after_failure",
+      "shelter building already failed at this position",
+    );
+    return null;
+  }
+  const health = state.player.health ?? 20;
+  return {
+    goalId: "build-shelter",
+    priorityBand: reason === "task" ? BAND_PROGRESS : BAND_SURVIVAL,
+    score: (reason === "task" ? 420 : 640) + (20 - health) + open * 5,
+    skillId: "minecraft.build-shelter",
+    input: { mode: "cardinal", maxBlocks: Math.min(4, placeable.total), dangerRadius: task.dangerRadius },
+    targetKey,
+    rationale:
+      reason === "hurt"
+        ? `Health is ${health.toFixed(1)}/20 with ${open} open side(s) and ${placeable.total} placeable block(s) carried; close the ring so regeneration is not interrupted.`
+        : reason === "night"
+          ? `${pressure === "night" ? "It is night" : "Night is approaching"} and ${open} side(s) are open; close them with carried blocks before wandering.`
+          : `The task is to close ${open} open side(s) with ${placeable.total} carried block(s).`,
+  };
+}
+
+function placeableBlockInventory(state: MinecraftObservation): { total: number; best: string | null } {
+  let total = 0;
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const item of state.inventory) {
+    if (!(minecraftPlaceableBlockNames as readonly string[]).includes(item.name)) continue;
+    total += item.count;
+    if (item.count > bestCount) {
+      bestCount = item.count;
+      best = item.name;
+    }
+  }
+  return { total, best };
+}
+
+/** Stone-class blocks the agent has seen (observed now or remembered), with their mining feasibility. */
+function mineableTargets(
+  state: MinecraftObservation,
+  memory: WorldMemory,
+  names: ReadonlySet<string>,
+): KnownBlock[] {
+  const byKey = new Map<string, KnownBlock>();
+  const player = state.player.position;
+  const add = (name: string, position: { x: number; y: number; z: number }): void => {
+    if (!names.has(name) || !isMineableBlockName(name)) return;
+    const key = positionKey(position);
+    if (byKey.has(key)) return;
+    byKey.set(key, {
+      key,
+      name,
+      position: { x: position.x, y: position.y, z: position.z },
+      ripe: null,
+      distance: distanceBetween(centerOf(position), player),
+    });
+  };
+  for (const block of state.nearbyBlocks) add(block.name, block.position);
+  for (const sighting of state.minableSightings ?? []) add(sighting.name, sighting.position);
+  for (const sighting of memory.minableSightings(names)) add(sighting.name, sighting.position);
+  return [...byKey.values()].sort((left, right) => left.distance - right.distance || left.key.localeCompare(right.key));
+}
+
+/**
+ * Mining candidates for one target block class. The tool tier is resolved from what is actually
+ * carried: when the agent owns a better pickaxe than the one in hand, equipping it is the cheaper
+ * progress step, and when no carried tool can harvest the block the target is rejected with the
+ * reason instead of being attempted and failed.
+ */
+function mineCandidates(
+  state: MinecraftObservation,
+  memory: WorldMemory,
+  options: {
+    readonly blockNames: ReadonlySet<string>;
+    readonly dropItem: string;
+    readonly dangerRadius: number;
+    readonly maxDistance: number;
+    readonly task: MinecraftTask;
+  },
+  context: MinecraftDecisionContext,
+): { candidates: DecisionCandidate[]; blockedByTool: number; threatened: number; beyond: number; known: number } {
+  const ledger = context.ledger;
+  const candidates: DecisionCandidate[] = [];
+  const tier = bestPickaxeTier([
+    ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
+    ...state.inventory.map((item) => ({ name: item.name })),
+  ]);
+  const blocks = mineableTargets(state, memory, options.blockNames);
+  let blockedByTool = 0;
+  let threatened = 0;
+  let beyond = 0;
+  for (const block of blocks) {
+    const goalId = `mine:${block.name}`;
+    if (isExcluded(context, block.key)) {
+      ledger?.note({ goalId, targetKey: block.key, priorityBand: BAND_PROGRESS }, "excluded_after_failure", "this block was already tried and failed");
+      continue;
+    }
+    if (nearbyDanger(centerOf(block.position), state.entities.filter((entity) => isHostileMinecraftEntity(entity.name, entity.type)), options.dangerRadius)) {
+      threatened += 1;
+      ledger?.note({ goalId, targetKey: block.key, priorityBand: BAND_PROGRESS, score: 0 }, "threatened", "a visible hostile is within the danger radius of the block");
+      continue;
+    }
+    if (block.distance > options.maxDistance) {
+      beyond += 1;
+      const approach = approachCandidate(
+        { name: block.name, key: block.key, position: block.position, distance: block.distance },
+        options.task,
+        { visibleHostiles: [], nearby: [] },
+        context,
+        BAND_PROGRESS,
+        "approach",
+        block.name,
+      );
+      if (approach) candidates.push(approach);
+      continue;
+    }
+    const verdict = canMineWithTier(block.name, tier.tier);
+    if (!verdict.mineable) {
+      blockedByTool += 1;
+      ledger?.note({ goalId, targetKey: block.key, priorityBand: BAND_PROGRESS }, "no_skill", verdict.reason);
+      continue;
+    }
+    candidates.push({
+      goalId,
+      priorityBand: BAND_PROGRESS,
+      score: 480 - block.distance,
+      skillId: "minecraft.mine-block",
+      input: { ...block.position, blockName: block.name, dangerRadius: options.dangerRadius },
+      targetKey: block.key,
+      rationale: `Mine ${block.name} at ${positionKey(block.position)} (${block.distance.toFixed(1)} blocks) for ${options.dropItem}; ${verdict.reason}`,
+    });
+  }
+  return { candidates, blockedByTool, threatened, beyond, known: blocks.length };
+}
+
+/** Equipping a better carried pickaxe is cheaper and safer than a failed dig. */
+function equipToolCandidate(
+  state: MinecraftObservation,
+  options: { readonly needTier: number },
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  if (!available(context, "minecraft.equip-item")) return null;
+  const held = state.equipment.hand?.name ?? null;
+  const heldTier = bestPickaxeTier(held ? [{ name: held }] : []).tier;
+  if (heldTier >= options.needTier) return null;
+  const carried = state.inventory
+    .map((item) => ({ item, tier: bestPickaxeTier([item]).tier }))
+    .filter(({ item, tier }) => tier >= options.needTier && tier > heldTier && isPickaxeName(item.name))
+    .sort((left, right) => right.tier - left.tier || left.item.name.localeCompare(right.item.name))[0];
+  if (!carried) return null;
+  const targetKey = `equip:${carried.item.name}`;
+  if (isExcluded(context, targetKey)) return null;
+  return {
+    goalId: "equip:pickaxe",
+    priorityBand: BAND_PROGRESS,
+    score: 495,
+    skillId: "minecraft.equip-item",
+    input: { item: carried.item.name, destination: "hand" },
+    targetKey,
+    rationale: `Hold ${carried.item.name} (tier ${carried.tier}) so the next dig can actually harvest the block; the hand currently holds ${held ?? "nothing useful"}.`,
+  };
+}
+
+function isPickaxeName(name: string): boolean {
+  return name.endsWith("_pickaxe");
+}
+
+/**
+ * When the inventory cannot accept another stack, dropping allowlisted terrain is the only progress
+ * step that does not risk losing something valuable. The skill itself refuses anything but terrain.
+ */
+function inventoryCandidate(
+  state: MinecraftObservation,
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  if (!available(context, "minecraft.drop-item")) return null;
+  const stacks = new Map<string, number>();
+  for (const item of state.inventory) stacks.set(item.name, (stacks.get(item.name) ?? 0) + item.count);
+  const distinct = stacks.size;
+  const full = context.inventoryFull === true || distinct >= INVENTORY_FULL_STACKS;
+  if (!full) return null;
+  const junk = [...stacks.entries()]
+    .filter(([name]) => (minecraftDroppableJunkList as readonly string[]).includes(name))
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0];
+  if (!junk) {
+    context.ledger?.note(
+      { goalId: "free-inventory", targetKey: "inventory:junk", priorityBand: BAND_PROGRESS },
+      "not_applicable",
+      `the inventory holds ${distinct} stacks but no droppable terrain to give up`,
+    );
+    return null;
+  }
+  return {
+    goalId: "free-inventory",
+    priorityBand: BAND_PROGRESS,
+    score: 470,
+    skillId: "minecraft.drop-item",
+    input: { itemName: junk[0], count: Math.min(16, junk[1]) },
+    targetKey: `drop:${junk[0]}`,
+    rationale: `The inventory is full (${distinct} stacks); drop ${Math.min(16, junk[1])} ${junk[0]} so a needed item can be collected.`,
+  };
+}
+
+const minecraftDroppableJunkList = [
+  "dirt",
+  "sand",
+  "gravel",
+  "granite",
+  "andesite",
+  "diorite",
+  "cobbled_deepslate",
+] as const;
 
 function needsFood(state: MinecraftObservation, task: MinecraftTask): boolean {
   const hunger = state.player.food;
@@ -767,6 +1273,15 @@ function notExcluded(candidate: DecisionCandidate, context: MinecraftDecisionCon
   return candidate.targetKey && context.excludedTargets.has(candidate.targetKey) ? null : candidate;
 }
 
+/**
+ * Mine candidates scan both the live observation and remembered sightings. `knownMinedBlocks` adapts the
+ * block list from {@link craftPlan} into the memory view the miner expects, so a stone block seen a
+ * moment ago is still a valid target even if the current cube no longer lists it.
+ */
+function knownMinedBlocks(state: MinecraftObservation, context: MinecraftDecisionContext): WorldMemory {
+  return context.memory ?? WorldMemory.fromObservation(state, 0);
+}
+
 function craftPlan(
   state: MinecraftObservation,
   known: readonly KnownBlock[],
@@ -776,7 +1291,7 @@ function craftPlan(
 ): { candidate: DecisionCandidate | null; reason: string } {
   const targetCount = itemCount(state, task.targetItem);
   const missingTarget = Math.max(0, task.targetCount - targetCount);
-  const plan = minecraftWoodRecipePlans[task.targetItem];
+  const plan = minecraftRecipePlans[task.targetItem];
   if (!plan) return { candidate: null, reason: `No offline recipe plan is available for '${task.targetItem}'.` };
   const operations = Math.ceil(missingTarget / plan.outputCount);
   if (operations <= 0) return { candidate: null, reason: "Craft target count is already satisfied." };
@@ -813,9 +1328,54 @@ function craftPlan(
   const tableForCraft = closeTable?.position;
   let requiredPlanks = 0;
   let requiredSticks = 0;
+  const requiredMined = new Map<string, number>();
   for (const [ingredient, quantity] of Object.entries(plan.ingredients)) {
     if (ingredient === "any_planks") requiredPlanks += quantity * operations;
     else if (ingredient === "stick") requiredSticks += quantity * operations;
+    else if (minedIngredientSources[ingredient]) {
+      requiredMined.set(ingredient, (requiredMined.get(ingredient) ?? 0) + quantity * operations);
+    }
+  }
+
+  // A mined ingredient (cobblestone for stone tools) is a prerequisite the wood planner cannot craft.
+  for (const [ingredient, quantity] of requiredMined) {
+    if (inventoryCount(state, ingredient) >= quantity) continue;
+    const missing = quantity - inventoryCount(state, ingredient);
+    const blockNames = new Set<string>(minedIngredientSources[ingredient] ?? []);
+    const tier = bestPickaxeTier([
+      ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
+      ...state.inventory.map((item) => ({ name: item.name })),
+    ]).tier;
+    const mined = mineCandidates(
+      state,
+      knownMinedBlocks(state, context),
+      {
+        blockNames,
+        dropItem: ingredient,
+        dangerRadius: task.dangerRadius,
+        maxDistance: task.maxTargetDistance,
+        task,
+      },
+      context,
+    );
+    if (mined.candidates.length > 0) {
+      return {
+        candidate: mined.candidates[0] ?? null,
+        reason: `Mine ${missing} ${ingredient} for ${task.targetItem}; ${mined.candidates[0]?.rationale ?? "a validated block is in range"}.`,
+      };
+    }
+    const equip = tier < 1 ? equipToolCandidate(state, { needTier: 1 }, context) : null;
+    if (equip) return { candidate: equip, reason: `Hold a pickaxe before mining ${missing} ${ingredient} for ${task.targetItem}.` };
+    if (mined.known > 0 && mined.blockedByTool > 0) {
+      return {
+        candidate: null,
+        reason: `The ${ingredient} that is visible cannot be harvested with the best carried pickaxe (tier ${tier}); craft or find a better tool first.`,
+      };
+    }
+    return {
+      candidate: null,
+      reason: `No mineable ${[...blockNames].join(" or ")} block is observed or remembered, so ${missing} ${ingredient} cannot be produced for ${task.targetItem}.`,
+    };
   }
 
   const currentSticks = inventoryCount(state, "stick");
@@ -930,7 +1490,12 @@ export function projectCraftSteps(state: MinecraftObservation, task: CraftItemTa
       if (missing - fromPool > 0) ensure("oak_planks", missing - fromPool, depth + 1);
       return;
     }
-    const recipe = minecraftWoodRecipePlans[item as CraftableMinecraftItem];
+    const sourceBlocks = minedIngredientSources[item];
+    if (sourceBlocks && sourceBlocks.length > 0) {
+      steps.push(`mine ${missing} ${item} (from ${sourceBlocks.join(" or ")})`);
+      return;
+    }
+    const recipe = minecraftRecipePlans[item as CraftableMinecraftItem];
     if (!recipe) return;
     const runs = Math.ceil(missing / recipe.outputCount);
     for (const [ingredient, quantity] of Object.entries(recipe.ingredients)) {
@@ -946,6 +1511,81 @@ export function projectCraftSteps(state: MinecraftObservation, task: CraftItemTa
 
   ensure(task.targetItem, Math.max(0, task.targetCount - itemCount(state, task.targetItem)), 0);
   return steps.slice(0, MAX_PLAN_STEPS);
+}
+
+interface RankedCandidate {
+  readonly candidate: DecisionCandidate;
+  readonly effective: number;
+  readonly notes: readonly string[];
+}
+
+/**
+ * Ranking with the two preference mechanisms the model allows: hysteresis toward the previous goal,
+ * and the learner's advice. Learning is only applied from the survival band upward — a safety goal is
+ * never down-weighted by a statistic — and a learned "known unreachable" verdict can veto a progress
+ * target but never a survival or safety one.
+ */
+function rankCandidates(
+  candidates: readonly DecisionCandidate[],
+  context: MinecraftDecisionContext,
+  state: MinecraftObservation,
+  options: { readonly learnable: boolean; readonly previousGoalKey: string | null },
+): { selected: DecisionCandidate | null; alternatives: DecisionCandidate[] } {
+  const scored: RankedCandidate[] = [];
+  for (const candidate of candidates) {
+    let effective = candidate.score;
+    const notes: string[] = [];
+    if (options.learnable && context.advisor) {
+      const assessment = context.advisor.assess({
+        skillId: candidate.skillId ?? "none",
+        goalClass: goalClassOf(candidate.goalId),
+        distanceBand: distanceBandOf(distanceToCandidate(state, candidate)),
+        vitality: vitalityBandOf(state.player.health, state.player.food),
+        threat: threatBandFor(state),
+        timeOfDay: state.time ? (state.time.isNight ? "night" : "day") : "unknown",
+        targetKey: candidate.targetKey,
+      });
+      if (assessment.blocked && candidate.priorityBand >= BAND_PROGRESS) {
+        context.ledger?.reject(candidate, "policy_penalty", `learned failure memory vetoes this target: ${assessment.blocked.reason}`);
+        continue;
+      }
+      effective = Math.round((effective * assessment.multiplier - assessment.penalty * 100) * 100) / 100;
+      notes.push(...assessment.notes);
+    }
+    if (candidate.targetKey !== null && candidate.targetKey === options.previousGoalKey) {
+      effective += HYSTERESIS_BONUS;
+    }
+    scored.push({ candidate: { ...candidate, score: effective }, effective, notes });
+  }
+  const ranked = scored.sort(
+    (left, right) =>
+      right.effective - left.effective ||
+      (left.candidate.targetKey ?? "").localeCompare(right.candidate.targetKey ?? "") ||
+      left.candidate.goalId.localeCompare(right.candidate.goalId),
+  );
+  for (const entry of ranked.slice(1)) {
+    // Anything that lost the comparison inside the same band is an explained alternative, not a rejection.
+    void entry;
+  }
+  return { selected: ranked[0]?.candidate ?? null, alternatives: ranked.slice(1).map((entry) => entry.candidate) };
+}
+
+function threatBandFor(state: MinecraftObservation): "none" | "visible" | "approaching" {
+  const hostiles = state.entities.filter((entity) => isHostileMinecraftEntity(entity.name, entity.type));
+  if (hostiles.length === 0) return "none";
+  return hostiles.some((entity) => entity.distance <= 4) ? "approaching" : "visible";
+}
+
+function distanceToCandidate(state: MinecraftObservation, candidate: DecisionCandidate): number | null {
+  const input = candidate.input;
+  if (typeof input !== "object" || input === null) return null;
+  const record = input as Record<string, unknown>;
+  if (typeof record.x !== "number" || typeof record.z !== "number") return null;
+  const y = typeof record.y === "number" ? record.y : state.player.position.y;
+  return distanceBetween(
+    { x: record.x + 0.5, y, z: record.z + 0.5 },
+    state.player.position,
+  );
 }
 
 function selectBest(
@@ -967,6 +1607,21 @@ function planFor(selected: DecisionCandidate | null, state: MinecraftObservation
     return steps.length > 0 ? steps : [selected.goalId];
   }
   return [selected.goalId];
+}
+
+function shelterPlanSummary(state: MinecraftObservation): string {
+  const placeable = placeableBlockInventory(state);
+  const open = SHELTER_CARDINAL_DIRECTIONS.filter(([dx, dz]) => {
+    const x = Math.floor(state.player.position.x) + dx;
+    const z = Math.floor(state.player.position.z) + dz;
+    const y = Math.floor(state.player.position.y);
+    return !state.nearbyBlocks.some(
+      (block) => block.position.x === x && block.position.y === y && block.position.z === z && block.boundingBox === "block",
+    );
+  }).length;
+  return placeable.total === 0
+    ? `no placeable blocks are in the inventory and ${open} side(s) are open`
+    : `${open} side(s) are open but none can be validated as an empty cell with an observed solid support block`;
 }
 
 export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObservation, MinecraftTask> {
@@ -997,16 +1652,27 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       plan: planFor(selected, state, task),
       band: selected?.priorityBand ?? null,
       knowledge: memory.summary(),
+      rejected: [...(context.ledger?.all ?? [])],
     });
 
-    // 1. Completion is judged from the observed inventory or hunger, never from the planner's intent.
+    // 1. Completion is judged from the observed world, never from the planner's intent.
     if (task.kind === "secure_food") {
       const hunger = state.player.food ?? 0;
       if (hunger >= task.targetHunger) {
         return record("completed", null, [], `Task condition met: hunger ${hunger}/20 reached the target of ${task.targetHunger}.`);
       }
+    } else if (task.kind === "build_shelter") {
+      const solid = shelterCardinalSolidCount(state);
+      if (solid >= SHELTER_CARDINAL_DIRECTIONS.length) {
+        return record("completed", null, [], `Task condition met: all four cardinal sides around the player are observed solid.`);
+      }
     } else {
-      const targetItem = task.kind === "gather_resource" ? task.resourceName : task.targetItem;
+      const targetItem =
+        task.kind === "gather_resource"
+          ? task.resourceName
+          : task.kind === "craft_item"
+            ? task.targetItem
+            : (miningDropFor(task.resourceName) ?? task.resourceName);
       const currentTargetCount = itemCount(state, targetItem);
       if (currentTargetCount >= task.targetCount) {
         return record("completed", null, [], `Task condition met: inventory/equipment contains ${currentTargetCount}/${task.targetCount} ${targetItem}.`);
@@ -1017,8 +1683,17 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     const health = state.player.health;
     const hunger = state.player.food;
 
-    // 2. Stuck recovery and hostile avoidance outrank everything else.
+    // 2. Hazards, hostiles and stalled routes outrank everything else, and learning never touches them.
+    const hazard = hazardCandidate(state, context);
+    if (hazard) {
+      return record(null, hazard, [], hazard.rationale);
+    }
+
     if (threats.nearby.length > 0) {
+      const defend = defendCandidate(state, task, threats, context);
+      if (defend) {
+        return record(null, defend, [], defend.rationale);
+      }
       const flee = fleeCandidates(state, threats.nearby, context);
       if (flee.length > 0) {
         const choice = selectBest(flee, previousGoalKey);
@@ -1066,7 +1741,25 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     const rest = restCandidate(state, task, threats, context);
     if (rest) survival.push(rest);
 
-    const survivalChoice = selectBest(survival.filter((candidate) => available(context, candidate.skillId ?? "")), previousGoalKey);
+    // Shelter: hurt and exposed, or darkness with open sides. It is a survival goal, not a build project.
+    const healthValue = state.player.health ?? 20;
+    const shelterReason: "hurt" | "night" | null =
+      healthValue <= REST_HEALTH_THRESHOLD && threats.visibleHostiles.length === 0
+        ? "hurt"
+        : nightPressure(state) !== "day" && threats.visibleHostiles.length > 0
+          ? "night"
+          : null;
+    if (shelterReason && task.kind !== "build_shelter") {
+      const shelter = shelterCandidate(state, task, threats, context, shelterReason);
+      if (shelter) survival.push(shelter);
+    }
+
+    const survivalChoice = rankCandidates(
+      survival.filter((candidate) => available(context, candidate.skillId ?? "")),
+      context,
+      state,
+      { learnable: true, previousGoalKey },
+    );
     if (survivalChoice.selected) {
       // The chosen candidate's own rationale names the concrete action; the summary never guesses.
       return record(null, survivalChoice.selected, survivalChoice.alternatives, survivalChoice.selected.rationale);
@@ -1105,9 +1798,27 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       );
     }
 
-    // 5. Progress: gathering, crafting, and exploring for resources.
+    // 5. Progress: gathering, mining, crafting, shelter work, and exploring for resources.
+    const freeInventory = inventoryCandidate(state, context);
+    if (freeInventory) {
+      return record(null, freeInventory, [], freeInventory.rationale);
+    }
     if (task.kind === "gather_resource") {
       return this.decideGather(state, memory, task, threats, context, record);
+    }
+    if (task.kind === "mine_resource") {
+      return this.decideMine(state, memory, task, threats, context, record);
+    }
+    if (task.kind === "build_shelter") {
+      const shelter = shelterCandidate(state, task, threats, context, "task");
+      if (shelter) return record(null, shelter, [], shelter.rationale);
+      const plan = shelterPlanSummary(state);
+      return record(
+        "blocked",
+        null,
+        [],
+        `Cannot close the shelter here: ${plan}. Gather placeable blocks or move to ground with solid support.`,
+      );
     }
     return this.decideCraft(state, memory, task, threats, context, record);
   }
@@ -1149,6 +1860,107 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
             ? `No ${task.resourceName} target is safe and reachable, and exploration is exhausted or unavailable.`
             : `No ${task.resourceName} block is currently known in the observed or remembered world state, and exploration is exhausted or unavailable.`;
     return record("blocked", null, [], summary);
+  }
+
+  /**
+   * Mining progress. Ordered as a prerequisite chain rather than a single goal: hold a tool that can
+   * harvest the block, then dig the nearest validated block, then explore when none is known. A tool
+   * the agent does not own is crafted through the same planner that serves crafting tasks, so a
+   * "mine cobblestone" goal transparently expands into wood → planks → sticks → pickaxe → dig.
+   */
+  private decideMine(
+    state: MinecraftObservation,
+    memory: WorldMemory,
+    task: MineResourceTask,
+    threats: Threats,
+    context: MinecraftDecisionContext,
+    record: (
+      terminalStatus: DecisionRecord["terminalStatus"],
+      selected: DecisionCandidate | null,
+      alternatives: readonly DecisionCandidate[],
+      summary: string,
+    ) => MinecraftDecisionRecord,
+  ): MinecraftDecisionRecord {
+    const drop = miningDropFor(task.resourceName) ?? task.resourceName;
+    const requirement = minecraftMiningRequirements[task.resourceName];
+    const blockNames = new Set<string>([task.resourceName, ...(minedIngredientSources[drop] ?? [])]);
+    const tier = bestPickaxeTier([
+      ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
+      ...state.inventory.map((item) => ({ name: item.name })),
+    ]).tier;
+
+    if (requirement.requiresPickaxe && tier < requirement.minPickaxeTier) {
+      const equip = equipToolCandidate(state, { needTier: requirement.minPickaxeTier }, context);
+      if (equip) return record(null, equip, [], equip.rationale);
+      // No usable pickaxe is carried: fall back to the crafting planner for the missing tool.
+      const toolItem = requirement.minPickaxeTier >= 2 ? "stone_pickaxe" : "wooden_pickaxe";
+      const craftTask = craftItemTaskSchema.parse({
+        id: `${task.id}:tool`,
+        kind: "craft_item",
+        targetItem: toolItem,
+        targetCount: 1,
+        maxActions: task.maxActions,
+        maxDurationMs: task.maxDurationMs,
+        dangerRadius: task.dangerRadius,
+        maxTargetDistance: task.maxTargetDistance,
+        maxConsecutiveFailures: task.maxConsecutiveFailures,
+        maxExplorationLegs: task.maxExplorationLegs,
+        explorationRadius: task.explorationRadius,
+        maxRestMs: task.maxRestMs,
+      });
+      const known = knownBlocks(state, memory, new Set<string>([...minecraftLogNames, "crafting_table", "sweet_berry_bush"]));
+      const plan = craftPlan(state, known, craftTask, threats, context);
+      if (plan.candidate && available(context, plan.candidate.skillId ?? "")) {
+        return record(
+          null,
+          plan.candidate,
+          [],
+          `${task.resourceName} needs a tier-${requirement.minPickaxeTier} pickaxe for ${drop} to drop; ${plan.reason}`,
+        );
+      }
+      return record(
+        "blocked",
+        null,
+        [],
+        `Cannot mine ${task.resourceName}: it needs a tier-${requirement.minPickaxeTier} pickaxe, none is carried, and ${plan.reason}`,
+      );
+    }
+
+    const mined = mineCandidates(
+      state,
+      memory,
+      {
+        blockNames,
+        dropItem: drop,
+        dangerRadius: task.dangerRadius,
+        maxDistance: task.maxTargetDistance,
+        task,
+      },
+      context,
+    ).candidates.filter((candidate) => available(context, candidate.skillId ?? ""));
+    if (mined.length > 0) {
+      const choice = rankCandidates(mined, context, state, {
+        learnable: true,
+        previousGoalKey: context.previousGoalKey ?? null,
+      });
+      return record(
+        null,
+        choice.selected,
+        choice.alternatives,
+        `Mine the nearest validated ${task.resourceName} for ${drop}; the inventory delta is checked before the goal counts.`,
+      );
+    }
+
+    const explore = explorationCandidate(state, memory, task, threats, context, "resource");
+    if (explore) {
+      return record(null, explore, [], `No reachable ${task.resourceName} is known; explore a bounded unexplored area for one.`);
+    }
+
+    const reason =
+      mined.length === 0 && mineableTargets(state, memory, blockNames).length === 0
+        ? `no ${[...blockNames].join(" or ")} block is observed or remembered, and exploration is exhausted`
+        : `${mineCandidates(state, memory, { blockNames, dropItem: drop, dangerRadius: task.dangerRadius, maxDistance: task.maxTargetDistance, task }, context).threatened} target(s) were refused because a hostile is nearby`;
+    return record("blocked", null, [], `Cannot mine ${task.resourceName} right now: ${reason}.`);
   }
 
   private decideCraft(

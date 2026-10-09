@@ -17,6 +17,9 @@ export function simulatedWorld(
     stallCells: [],
     schedule: [],
     navigationStuckTimeoutMs: 10_000,
+    dayTicks: 6_000,
+    dayTicksPerSecond: 0,
+    maxInventoryStacks: 36,
     ...rest,
     player: {
       x: 0,

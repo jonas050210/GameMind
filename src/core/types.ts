@@ -28,13 +28,15 @@ export interface WorldState<TState = unknown> extends GameObservation<TState> {
   readonly receivedAt: string;
 }
 
+export type RiskLevel = "low" | "medium" | "high";
+
 export interface CapabilityDefinition<TInput = unknown> {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: ZodType<TInput>;
   readonly defaultTimeoutMs: number;
   readonly maxTimeoutMs: number;
-  readonly risk: "low" | "medium" | "high";
+  readonly risk: RiskLevel;
 }
 
 export interface AdapterAction {
