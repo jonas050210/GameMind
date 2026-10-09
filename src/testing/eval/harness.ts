@@ -1,5 +1,6 @@
 import pino from "pino";
 import { MemoryTraceSink, TraceRecorder } from "../../core/trace.js";
+import { ExperienceLearner } from "../../core/learning/learner.js";
 import { createMinecraftAgent } from "../../games/minecraft/create-agent.js";
 import { MinecraftTaskDecisionModel } from "../../games/minecraft/decision-model.js";
 import { MinecraftTaskRunner, type MinecraftTaskResult } from "../../games/minecraft/task-runner.js";
@@ -39,6 +40,10 @@ export interface ScenarioAggregate {
   readonly meanRecoveryAttempts: number;
   readonly meanSuccessfulRecoveries: number;
   readonly meanStuckActions: number;
+  readonly meanWastedActions: number;
+  readonly meanSafetyDenials: number;
+  readonly meanMinedBlocks: number;
+  readonly meanCombatActions: number;
   readonly meanPlanRevisions: number;
   readonly meanDamageTaken: number;
   readonly statusCounts: Readonly<Record<string, number>>;
@@ -52,6 +57,8 @@ export interface EvaluationReport {
   readonly model: string;
   readonly seedCount: number;
   readonly scenarios: readonly ScenarioAggregate[];
+  /** Repeat-run efficiency measurements; empty when no learning scenarios were requested. */
+  readonly learning?: readonly LearningComparison[];
   readonly totals: {
     readonly runs: number;
     readonly successRate: number;
@@ -78,13 +85,36 @@ function round(value: number, digits = 3): number {
   return Math.round(value * factor) / factor;
 }
 
-export async function runEvaluationOnce(scenario: EvaluationScenario, seed: number): Promise<EvaluationRun> {
+/**
+ * Optional knobs for one evaluation run. `learner` turns the experience system on: the same seeded
+ * world then remembers its own failures, which is what the repeat-run comparison measures.
+ */
+export interface EvaluationRunOptions {
+  readonly learner?: ExperienceLearner | null;
+  readonly worldKey?: string | null;
+  readonly runId?: string;
+  /** Overrides the scenario's own combat opt-in (used by the policy comparison). */
+  readonly allowCombat?: boolean;
+}
+
+export async function runEvaluationOnce(
+  scenario: EvaluationScenario,
+  seed: number,
+  options: EvaluationRunOptions = {},
+): Promise<EvaluationRun> {
   const logger = pino({ level: "silent" });
   const trace = new TraceRecorder(new MemoryTraceSink(), logger);
   const adapter = new SimulatedMinecraftAdapter({ definition: scenario.world(seed) });
-  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  const allowCombat = options.allowCombat ?? scenario.agent?.allowCombat ?? false;
+  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger, {
+    ...(allowCombat ? { optedInCapabilities: ["minecraft.attack_hostile"] } : {}),
+  });
   const runner = new MinecraftTaskRunner(runtime, skills, new MinecraftTaskDecisionModel(), logger, {
     clock: () => adapter.simulatedNowMs,
+    ...(options.learner ? { learner: options.learner } : {}),
+    ...(options.worldKey ? { worldKey: options.worldKey } : {}),
+    ...(options.runId ? { runId: options.runId } : {}),
+    ...(allowCombat ? { allowCombat: true } : {}),
   });
   const task = scenario.task();
   let result: MinecraftTaskResult;
@@ -160,6 +190,24 @@ export function aggregateScenario(
       detail: `${safe}/${seeds} seeds ended safely.`,
     });
   }
+  const matches = (goal: string, prefixes: readonly string[]): boolean =>
+    prefixes.some((prefix) => goal === prefix || goal.startsWith(prefix));
+  if (scenario.requiredGoals && scenario.requiredGoals.length > 0) {
+    const satisfied = runs.filter((run) => matches(run.actionGoals.join(","), scenario.requiredGoals ?? [])).length;
+    gates.push({
+      name: "required-goal",
+      passed: satisfied === seeds,
+      detail: `${satisfied}/${seeds} seed(s) executed one of ${scenario.requiredGoals.join(", ")}; goals are read from executed actions, not from the plan.`,
+    });
+  }
+  if (scenario.forbiddenGoals && scenario.forbiddenGoals.length > 0) {
+    const violations = runs.filter((run) => matches(run.actionGoals.join(","), scenario.forbiddenGoals ?? [])).length;
+    gates.push({
+      name: "forbidden-goal",
+      passed: violations === 0,
+      detail: `${violations}/${seeds} seed(s) executed a forbidden goal (${scenario.forbiddenGoals.join(", ")}).`,
+    });
+  }
 
   return {
     scenarioId: scenario.id,
@@ -179,6 +227,10 @@ export function aggregateScenario(
     meanRecoveryAttempts: round(mean(runs.map((run) => run.metrics.recoveryAttempts))),
     meanSuccessfulRecoveries: round(mean(runs.map((run) => run.metrics.successfulRecoveries))),
     meanStuckActions: round(mean(runs.map((run) => run.metrics.stuckActions))),
+    meanWastedActions: round(mean(runs.map((run) => run.metrics.wastedActions))),
+    meanSafetyDenials: round(mean(runs.map((run) => run.metrics.safetyDenials))),
+    meanMinedBlocks: round(mean(runs.map((run) => run.metrics.minedBlocks))),
+    meanCombatActions: round(mean(runs.map((run) => run.metrics.combatActions))),
     meanPlanRevisions: round(mean(runs.map((run) => run.metrics.planRevisions))),
     meanDamageTaken: round(mean(runs.map((run) => run.worldStats.damageTaken))),
     statusCounts,
@@ -187,10 +239,108 @@ export function aggregateScenario(
   };
 }
 
+/** One repetition inside a repeat-run comparison; `repetition` 0 is the cold run. */
+export interface LearningRepetition {
+  readonly repetition: number;
+  readonly seed: number;
+  readonly actions: number;
+  readonly wastedActions: number;
+  readonly success: boolean;
+  readonly status: MinecraftTaskResult["status"];
+}
+
+export interface LearningComparison {
+  readonly scenarioId: string;
+  readonly seeds: readonly number[];
+  readonly repetitions: number;
+  readonly cold: { readonly actions: number; readonly wastedActions: number; readonly successRate: number };
+  readonly repeated: { readonly actions: number; readonly wastedActions: number; readonly successRate: number };
+  /** Fraction of wasted actions removed by the remembered failures; 0 means the learner changed nothing. */
+  readonly wastedActionReduction: number;
+  readonly successRateDelta: number;
+  readonly gates: readonly { readonly name: string; readonly passed: boolean; readonly detail: string }[];
+  readonly passed: boolean;
+  readonly repetitionsDetail: readonly LearningRepetition[];
+}
+
+/**
+ * Runs the same seeded worlds back to back with one shared in-memory learner. The question it answers is
+ * narrow and falsifiable: after a world's failures have been experienced once, does the agent spend
+ * fewer actions on them **without** giving up success? Everything else stays identical, so any change is
+ * attributable to the experience memory alone.
+ */
+export async function runLearningComparison(
+  scenario: EvaluationScenario,
+  seeds: readonly number[],
+  repetitions = 2,
+): Promise<LearningComparison> {
+  const detail: LearningRepetition[] = [];
+  for (const seed of seeds) {
+    // One learner per world, so cross-world contamination cannot make the numbers look better.
+    const learner = new ExperienceLearner();
+    for (let repetition = 0; repetition < repetitions; repetition += 1) {
+      const run = await runEvaluationOnce(scenario, seed, {
+        learner,
+        worldKey: `${scenario.id}#${seed}`,
+        runId: `${scenario.id}#${seed}#${repetition}`,
+      });
+      detail.push({
+        repetition,
+        seed,
+        actions: run.metrics.actions,
+        wastedActions: run.metrics.wastedActions,
+        success: run.success,
+        status: run.status,
+      });
+    }
+  }
+  const meanOf = (filter: (entry: LearningRepetition) => boolean, pick: (entry: LearningRepetition) => number): number => {
+    const picked = detail.filter(filter);
+    return picked.length === 0 ? 0 : picked.reduce((sum, entry) => sum + pick(entry), 0) / picked.length;
+  };
+  const coldActions = meanOf((entry) => entry.repetition === 0, (entry) => entry.actions);
+  const repeatedActions = meanOf((entry) => entry.repetition === repetitions - 1, (entry) => entry.actions);
+  const coldWasted = meanOf((entry) => entry.repetition === 0, (entry) => entry.wastedActions);
+  const repeatedWasted = meanOf((entry) => entry.repetition === repetitions - 1, (entry) => entry.wastedActions);
+  const coldSuccess = meanOf((entry) => entry.repetition === 0, (entry) => (entry.success ? 1 : 0));
+  const repeatedSuccess = meanOf((entry) => entry.repetition === repetitions - 1, (entry) => (entry.success ? 1 : 0));
+  const reduction = coldWasted === 0 ? 0 : round((coldWasted - repeatedWasted) / coldWasted);
+  const successDelta = round(repeatedSuccess - coldSuccess);
+  const gates = [
+    {
+      name: "no-success-regression",
+      passed: successDelta >= 0,
+      detail: `success rate ${(coldSuccess * 100).toFixed(0)}% → ${(repeatedSuccess * 100).toFixed(0)}% after repeats`,
+    },
+    {
+      name: "repeated-failures-shrink",
+      passed: repeatedWasted <= coldWasted,
+      detail: `${coldWasted.toFixed(2)} → ${repeatedWasted.toFixed(2)} wasted actions per run (median actions ${coldActions.toFixed(2)} → ${repeatedActions.toFixed(2)})`,
+    },
+  ];
+  return {
+    scenarioId: scenario.id,
+    seeds,
+    repetitions,
+    cold: { actions: round(coldActions, 2), wastedActions: round(coldWasted, 2), successRate: round(coldSuccess) },
+    repeated: {
+      actions: round(repeatedActions, 2),
+      wastedActions: round(repeatedWasted, 2),
+      successRate: round(repeatedSuccess),
+    },
+    wastedActionReduction: reduction,
+    successRateDelta: successDelta,
+    gates,
+    passed: gates.every((gate) => gate.passed),
+    repetitionsDetail: detail,
+  };
+}
+
 export async function runEvaluationSuite(
   scenarios: readonly EvaluationScenario[],
   seeds: readonly number[],
   onProgress?: (scenarioId: string, completed: number, total: number) => void,
+  options: { readonly learningScenarioIds?: readonly string[]; readonly learningRepetitions?: number } = {},
 ): Promise<EvaluationReport> {
   const aggregates: ScenarioAggregate[] = [];
   const allRuns: EvaluationRun[] = [];
@@ -202,6 +352,13 @@ export async function runEvaluationSuite(
     }
     allRuns.push(...runs);
     aggregates.push(aggregateScenario(scenario, runs));
+  }
+  const learningIds = options.learningScenarioIds ?? [];
+  const learning: LearningComparison[] = [];
+  for (const id of learningIds) {
+    const scenario = scenarios.find((candidate) => candidate.id === id);
+    if (!scenario) continue;
+    learning.push(await runLearningComparison(scenario, seeds.slice(0, 6), options.learningRepetitions ?? 2));
   }
   const successes = allRuns.filter((run) => run.success).length;
   const totals = {
@@ -218,7 +375,9 @@ export async function runEvaluationSuite(
     seedCount: seeds.length,
     scenarios: aggregates,
     totals,
-    passed: aggregates.every((aggregate) => aggregate.passed),
+    learning,
+    passed:
+      aggregates.every((aggregate) => aggregate.passed) && learning.every((comparison) => comparison.passed),
   };
 }
 

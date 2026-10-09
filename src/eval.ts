@@ -1,18 +1,24 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { evaluationScenarios, type EvaluationScenario } from "./testing/eval/scenarios.js";
+import {
+  evaluationScenarios,
+  learningEvaluationScenarioIds,
+  type EvaluationScenario,
+} from "./testing/eval/scenarios.js";
 import { evaluationSeeds, runEvaluationSuite, type EvaluationReport } from "./testing/eval/harness.js";
 
 interface EvalOptions {
   readonly seeds: number;
   readonly scenarioId: string | null;
   readonly out: string;
+  readonly learning: boolean;
 }
 
 function parseEvalArgs(args: readonly string[]): EvalOptions {
   let seeds = 20;
   let scenarioId: string | null = null;
   let out = path.join("data", "eval", "offline-report.json");
+  let learning = true;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     const next = args[index + 1];
@@ -34,16 +40,21 @@ function parseEvalArgs(args: readonly string[]): EvalOptions {
       case "--out":
         out = value();
         break;
+      case "--no-learning":
+        learning = false;
+        break;
       case "--help":
       case "-h":
-        console.log("Usage: npm run eval:offline -- [--seeds N] [--scenario ID] [--out PATH]");
+        console.log(
+    "Usage: npm run eval:offline -- [--seeds N] [--scenario ID] [--out PATH] [--no-learning]",
+  );
         process.exit(0);
         break;
       default:
         throw new Error(`Unknown option '${arg}'.`);
     }
   }
-  return { seeds, scenarioId, out };
+  return { seeds, scenarioId, out, learning };
 }
 
 function formatTable(report: EvaluationReport): string {
@@ -73,7 +84,10 @@ async function main(): Promise<void> {
   if (scenarios.length === 0) throw new Error(`Unknown scenario '${options.scenarioId}'.`);
 
   const started = Date.now();
-  const report = await runEvaluationSuite(scenarios, evaluationSeeds(options.seeds));
+  const report = await runEvaluationSuite(scenarios, evaluationSeeds(options.seeds), undefined, {
+    learningScenarioIds: options.learning ? learningEvaluationScenarioIds() : [],
+    learningRepetitions: 2,
+  });
   const elapsedMs = Date.now() - started;
 
   await mkdir(path.dirname(options.out), { recursive: true });
@@ -87,11 +101,39 @@ async function main(): Promise<void> {
     `\n${report.totals.runs} runs over ${report.seedCount} seeds per scenario in ${(elapsedMs / 1000).toFixed(1)} s; ` +
       `unsafe actions ${report.totals.unsafeActions}, unverified confirmations ${report.totals.unverifiedConfirmations}, deaths ${report.totals.deaths}.`,
   );
+  const learning = report.learning ?? [];
+  if (learning.length > 0) {
+    console.log("\nRepeat-run efficiency (same seeded worlds, one shared experience memory):");
+    const learningHeader = ["scenario", "cold act.", "repeat act.", "cold waste", "repeat waste", "success", "gates"];
+    const learningRows = learning.map((comparison) => [
+      comparison.scenarioId,
+      String(comparison.cold.actions),
+      String(comparison.repeated.actions),
+      String(comparison.cold.wastedActions),
+      String(comparison.repeated.wastedActions),
+      `${(comparison.repeated.successRate * 100).toFixed(0)}%`,
+      comparison.passed ? "pass" : "FAIL",
+    ]);
+    const widths = learningHeader.map((column, index) =>
+      Math.max(column.length, ...learningRows.map((row) => (row[index] ?? "").length)),
+    );
+    const line = (cells: readonly string[]): string =>
+      cells.map((cell, index) => cell.padEnd(widths[index] ?? 0)).join("  ");
+    console.log(line(learningHeader));
+    console.log(line(widths.map((width) => "-".repeat(width))));
+    for (const row of learningRows) console.log(line(row));
+  }
   console.log(`Report written to ${options.out}.`);
   if (!report.passed) {
     const failing = report.scenarios.filter((scenario) => !scenario.passed);
     for (const scenario of failing) {
       for (const gate of scenario.gates) if (!gate.passed) console.error(`FAILED ${scenario.scenarioId}: ${gate.name} — ${gate.detail}`);
+    }
+    for (const comparison of report.learning ?? []) {
+      if (comparison.passed) continue;
+      for (const gate of comparison.gates) {
+        if (!gate.passed) console.error(`FAILED learning ${comparison.scenarioId}: ${gate.name} — ${gate.detail}`);
+      }
     }
     process.exitCode = 1;
   }

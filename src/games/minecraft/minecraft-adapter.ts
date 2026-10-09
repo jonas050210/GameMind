@@ -663,6 +663,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         // Mineflayer reports 0..10; the observation contract speaks air ticks like the game logic does.
         oxygenLevel: oxygenTicksFromLevel(bot.oxygenLevel),
         onGround: bot.entity.onGround,
+        // `items()` covers the 27 main-inventory slots; a full one cannot accept a new stack name.
+        inventoryFull: bot.inventory.items().length >= 27,
       },
       inventory: bot.inventory.items().map((item) => ({
         slot: item.slot,

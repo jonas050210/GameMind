@@ -75,8 +75,6 @@ const SHELTER_TRIGGER_HOSTILE_DISTANCE = 12;
 /** A weapon must beat this damage before attacking is considered better than retreating. */
 const MIN_WEAPON_DAMAGE = 4;
 const MAX_COMBAT_ATTEMPTS_PER_RUN = 3;
-/** Slots a full player inventory occupies; used to decide when to free space. */
-const INVENTORY_FULL_STACKS = 30;
 /** Ticks before full darkness at which shelter is prepared. */
 const NIGHT_APPROACH_TICKS = 12_000;
 
@@ -810,8 +808,8 @@ function inventoryCandidate(
   const stacks = new Map<string, number>();
   for (const item of state.inventory) stacks.set(item.name, (stacks.get(item.name) ?? 0) + item.count);
   const distinct = stacks.size;
-  const full = context.inventoryFull === true || distinct >= INVENTORY_FULL_STACKS;
-  if (!full) return null;
+  // The world has to say so: guessing from the stack count would drop items the agent still needs.
+  if (state.player.inventoryFull !== true && context.inventoryFull !== true) return null;
   const junk = [...stacks.entries()]
     .filter(([name]) => (minecraftDroppableJunkList as readonly string[]).includes(name))
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0];
@@ -828,9 +826,11 @@ function inventoryCandidate(
     priorityBand: BAND_PROGRESS,
     score: 470,
     skillId: "minecraft.drop-item",
-    input: { itemName: junk[0], count: Math.min(16, junk[1]) },
+    // The whole stack goes: dropping a partial stack would leave the name in the inventory and the
+    // "full" verdict unchanged, which would loop.
+    input: { itemName: junk[0], count: junk[1] },
     targetKey: `drop:${junk[0]}`,
-    rationale: `The inventory is full (${distinct} stacks); drop ${Math.min(16, junk[1])} ${junk[0]} so a needed item can be collected.`,
+    rationale: `The world reports the inventory is full (${distinct} stacks); drop all ${junk[1]} ${junk[0]} so a needed item can be collected.`,
   };
 }
 
@@ -1041,12 +1041,23 @@ function gatherCandidates(
   const candidates: DecisionCandidate[] = [];
   const currentCount = itemCount(state, task.resourceName);
   for (const block of blocks) {
+    const goalId = `collect:${task.resourceName}`;
     if (context.excludedTargets.has(block.key)) {
       tried += 1;
+      context.ledger?.note(
+        { goalId, targetKey: block.key, priorityBand: BAND_PROGRESS },
+        "excluded_after_failure",
+        "this block was already tried and failed in the current run",
+      );
       continue;
     }
     if (nearbyDanger(centerOf(block.position), threats.visibleHostiles, task.dangerRadius)) {
       threatened += 1;
+      context.ledger?.note(
+        { goalId, targetKey: block.key, priorityBand: BAND_PROGRESS },
+        "threatened",
+        "a visible hostile is within the task danger radius of that block",
+      );
       continue;
     }
     if (block.distance > task.maxTargetDistance) {
@@ -1064,7 +1075,7 @@ function gatherCandidates(
       continue;
     }
     candidates.push({
-      goalId: `collect:${task.resourceName}`,
+      goalId,
       priorityBand: BAND_PROGRESS,
       score: 500 - block.distance,
       skillId: "minecraft.collect-log",
@@ -1535,8 +1546,9 @@ function rankCandidates(
   for (const candidate of candidates) {
     let effective = candidate.score;
     const notes: string[] = [];
-    if (options.learnable && context.advisor) {
-      const assessment = context.advisor.assess({
+    const advisor = context.advisor ?? BASELINE_ADVISOR;
+    if (options.learnable) {
+      const assessment = advisor.assess({
         skillId: candidate.skillId ?? "none",
         goalClass: goalClassOf(candidate.goalId),
         distanceBand: distanceBandOf(distanceToCandidate(state, candidate)),
@@ -1840,7 +1852,10 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       available(context, candidate.skillId ?? ""),
     );
     if (gather.length > 0) {
-      const choice = selectBest(gather, context.previousGoalKey ?? null);
+      const choice = rankCandidates(gather, context, state, {
+        learnable: true,
+        previousGoalKey: context.previousGoalKey ?? null,
+      });
       return record(null, choice.selected, choice.alternatives, "Collect an observed safe log; replan after the action and verify the inventory delta.");
     }
 

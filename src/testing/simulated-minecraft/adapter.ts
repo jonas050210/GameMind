@@ -66,6 +66,10 @@ import {
   type SimWorldDefinition,
 } from "./world.js";
 
+/** Virtual milliseconds a player-tossed item stays uncollectable (Java uses a short pickup delay). */
+const PLAYER_DROP_PICKUP_DELAY_MS = 1_000;
+
+
 const MAX_OBSERVED_BLOCKS = 64;
 const MAX_NAVIGATION_DISTANCE = 48;
 const MAX_RESOURCE_GATHER_DISTANCE = 24;
@@ -285,6 +289,7 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         foodSaturation: 0,
         oxygenLevel: 300,
         onGround: true,
+        inventoryFull: world.inventory.length >= world.maxInventoryStacks,
       },
       inventory: world.inventory.map((stack) => ({ ...stack })),
       equipment: {
@@ -974,13 +979,25 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     }
     check();
     this.world.removeFromInventory(itemName, count);
-    this.world.addItem(itemName, count, Math.floor(this.world.playerX), Math.floor(this.world.playerZ));
-    this.world.advance(120, check);
+    // Thrown toward the player's facing, and held out of reach for a moment so the drop is observable
+    // instead of being collected again inside the same tick.
+    const ahead = this.dropTarget();
+    this.world.addItem(itemName, count, ahead.x, ahead.z, PLAYER_DROP_PICKUP_DELAY_MS);
+    this.world.advance(160, check);
     const after = this.world.countItem(itemName);
     return {
       confirmed: after === before - count,
       confirmation: "simulated_inventory_decrease_and_ground_drop_observed",
       details: { itemName, before, after, dropped: count },
+    };
+  }
+
+  /** Where a tossed item lands: one block ahead of the player's facing. */
+  private dropTarget(): { x: number; z: number } {
+    const yaw = (this.yaw ?? 0) * (Math.PI / 180);
+    return {
+      x: Math.floor(this.world.playerX + Math.sin(yaw)),
+      z: Math.floor(this.world.playerZ + Math.cos(yaw)),
     };
   }
 

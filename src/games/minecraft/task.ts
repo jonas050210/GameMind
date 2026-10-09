@@ -45,7 +45,7 @@ export const secureFoodTaskSchema = z.object({
 export const mineResourceTaskSchema = z.object({
   ...taskLimits,
   id: z.string().min(1).max(96),
-  kind: z.literal("mine_resource"),
+  kind: z.literal("mine_resource").default("mine_resource"),
   resourceName: z.enum(minecraftMineableBlockNames),
   targetCount: z.number().int().min(1).max(64).default(4),
 });
@@ -54,7 +54,7 @@ export const mineResourceTaskSchema = z.object({
 export const buildShelterTaskSchema = z.object({
   ...taskLimits,
   id: z.string().min(1).max(96),
-  kind: z.literal("build_shelter"),
+  kind: z.literal("build_shelter").default("build_shelter"),
   mode: z.enum(["cardinal", "full"]).default("cardinal"),
   maxBlocks: z.number().int().min(1).max(16).default(4),
 });

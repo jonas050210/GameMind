@@ -115,6 +115,12 @@ interface SimItem {
   readonly count: number;
   x: number;
   z: number;
+  /**
+   * Virtual time before the player may collect this drop. Java Edition gives items a short pickup
+   * delay after they leave a player's hand, which is what makes a deliberate drop stick around
+   * instead of being vacuumed straight back into the inventory.
+   */
+  readonly pickupAfterMs: number;
 }
 
 export interface SimBlockView {
@@ -471,6 +477,7 @@ export class SimulatedMinecraftWorld {
 
   private pickUpItems(): void {
     for (const [id, item] of this.items) {
+      if (item.pickupAfterMs > this.nowMs) continue;
       if (Math.hypot(item.x - this.playerX, item.z - this.playerZ) > PICKUP_RADIUS) continue;
       if (this.isInventoryFull(item.name)) continue; // A full inventory leaves the drop on the ground.
       this.addToInventory(item.name, item.count);
@@ -521,9 +528,20 @@ export class SimulatedMinecraftWorld {
     };
   }
 
-  addItem(name: string, count: number, x: number, z: number): void {
+  /**
+   * Spawns a ground item. `pickupDelayMs` is 0 for drops that existed before the run or came from a
+   * dead mob, and non-zero for items the player just threw, mirroring the client-side pickup delay.
+   */
+  addItem(name: string, count: number, x: number, z: number, pickupDelayMs = 0): void {
     this.itemCounter += 1;
-    this.items.set(`item-${this.itemCounter}`, { id: `item-${this.itemCounter}`, name, count, x: x + 0.5, z: z + 0.5 });
+    this.items.set(`item-${this.itemCounter}`, {
+      id: `item-${this.itemCounter}`,
+      name,
+      count,
+      x: x + 0.5,
+      z: z + 0.5,
+      pickupAfterMs: this.nowMs + pickupDelayMs,
+    });
   }
 
   findDropNear(name: string, x: number, z: number, radius: number): SimItem | null {

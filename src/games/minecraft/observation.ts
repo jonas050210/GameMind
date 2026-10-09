@@ -73,6 +73,12 @@ export const minecraftObservationSchema = z.object({
     /** Air supply in **ticks** (0-300); 300 means full lungs. Null when the adapter cannot read it. */
     oxygenLevel: z.number().finite().nullable(),
     onGround: z.boolean(),
+    /**
+     * True when the world reports that no further item can enter the inventory. Only an explicit read-out
+     * from the adapter counts: a planner that merely *guessed* the inventory was full could drop items the
+     * agent still needs.
+     */
+    inventoryFull: z.boolean().optional(),
   }),
   inventory: z.array(minecraftItemStackSchema),
   equipment: z.object({

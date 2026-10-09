@@ -5,9 +5,21 @@ import type { Logger } from "pino";
 import {
   BAND_SAFETY,
   MinecraftTaskDecisionModel,
+  RejectionLedger,
   type MinecraftDecisionContext,
   type MinecraftDecisionRecord,
 } from "./decision-model.js";
+import { ExperienceLearner } from "../../core/learning/learner.js";
+import {
+  distanceBandOf,
+  goalClassOf,
+  threatBandOf,
+  timeOfDayBandOf,
+  vitalityBandOf,
+} from "../../core/learning/episode.js";
+import { miningDropFor } from "./mining.js";
+import { shelterCardinalSolidCount } from "./skill-contracts.js";
+import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
 import type { MinecraftObservation } from "./observation.js";
 import type { MinecraftTask } from "./task.js";
 import { countItemAndEquipment } from "./recipes.js";
@@ -74,6 +86,16 @@ export interface TaskMetrics {
   readonly maxPlanLength: number;
   readonly knownResourceBlocksPeak: number;
   readonly elapsedMs: number;
+  /** Actions the Safety Broker refused before execution; a non-zero count is a policy signal, not a bug. */
+  readonly safetyDenials: number;
+  /** Alternatives the decision model considered and explained but did not select or filter silently. */
+  readonly rejectedAlternatives: number;
+  /** Actions that ended without any observable progress; the efficiency metric learning should reduce. */
+  readonly wastedActions: number;
+  readonly minedBlocks: number;
+  readonly shelterSidesClosed: number;
+  readonly combatActions: number;
+  readonly hungerRecoveryActions: number;
 }
 
 export interface MinecraftTaskResult {
@@ -83,11 +105,35 @@ export interface MinecraftTaskResult {
   readonly metrics: TaskMetrics;
   readonly actions: readonly TaskActionSummary[];
   readonly finalObservation: WorldState<MinecraftObservation> | null;
+  /** Present when a learner is configured: how many episodes this run added and what it concluded. */
+  readonly learning?: LearningRunSummary | null;
+}
+
+export interface LearningRunSummary {
+  readonly runId: string;
+  readonly episodes: number;
+  readonly totalEpisodes: number;
+  readonly runs: number;
+  readonly successes: number;
+  readonly failures: number;
+  readonly blockedTargets: number;
+  readonly advisorId: string;
+  readonly activePolicyId: string | null;
+  readonly candidatePolicyId: string;
+  readonly contexts: number;
 }
 
 export interface MinecraftTaskRunnerOptions {
   /** Task clock in milliseconds. Defaults to wall time; simulations pass virtual game time. */
   readonly clock?: () => number;
+  /** Experience learner that records one episode per attempted action. Absent means no persistence. */
+  readonly learner?: ExperienceLearner | null;
+  /** Identity for learned target memory: scenario id + seed, or server host + world name. */
+  readonly worldKey?: string | null;
+  /** Lets the planner *propose* defence. The safety policy and the adapter still have to agree. */
+  readonly allowCombat?: boolean;
+  /** Unique id for the episode log; derived from the task when omitted. */
+  readonly runId?: string;
 }
 
 /** A target that is attempted this many times without observable progress is excluded. */
@@ -123,7 +169,23 @@ function countItem(state: MinecraftObservation, itemName: string): number {
 function taskTarget(task: MinecraftTask): { item: string; count: number } {
   if (task.kind === "gather_resource") return { item: task.resourceName, count: task.targetCount };
   if (task.kind === "craft_item") return { item: task.targetItem, count: task.targetCount };
+  // A shelter is measured in closed sides, not items; the sentinel name keeps the metric honest.
+  if (task.kind === "build_shelter") {
+    return { item: "minecraft:shelter_sides", count: SHELTER_CARDINAL_DIRECTIONS.length };
+  }
+  if (task.kind === "mine_resource") {
+    return { item: miningDropFor(task.resourceName) ?? task.resourceName, count: task.targetCount };
+  }
   return { item: "minecraft.food", count: 0 };
+}
+
+/** Straight-line distance from the player to the block or cell an action targets. */
+function targetDistance(state: MinecraftObservation, input: unknown): number {
+  if (typeof input !== "object" || input === null) return 0;
+  const record = input as Record<string, unknown>;
+  if (typeof record.x !== "number" || typeof record.z !== "number") return 0;
+  const y = typeof record.y === "number" ? record.y : state.player.position.y;
+  return Math.hypot(record.x + 0.5 - state.player.position.x, y - state.player.position.y, record.z + 0.5 - state.player.position.z);
 }
 
 function itemCounts(state: MinecraftObservation): Map<string, number> {
@@ -242,9 +304,13 @@ export class MinecraftTaskRunner {
     private readonly skills: SkillRuntime<MinecraftObservation>,
     private readonly decisionModel: MinecraftTaskDecisionModel,
     private readonly logger: Logger,
-    options: MinecraftTaskRunnerOptions = {},
+    private readonly options: MinecraftTaskRunnerOptions = {},
   ) {
     this.clock = options.clock ?? (() => Date.now());
+  }
+
+  private get learner(): ExperienceLearner | null {
+    return this.options.learner ?? null;
   }
 
   private withinDeadline<T>(operation: () => Promise<T>, deadline: number, label: string): Promise<T> {
@@ -281,6 +347,19 @@ export class MinecraftTaskRunner {
     const movementHistory: Array<{ x: number; z: number }> = [];
     const memory = new WorldMemory();
     const target = taskTarget(task);
+    const targetCountOf = (state: MinecraftObservation): number =>
+      task.kind === "build_shelter" ? shelterCardinalSolidCount(state) : countItem(state, target.item);
+    const learner = this.learner;
+    const worldKey = this.options.worldKey ?? null;
+    const runId = this.options.runId ?? `${task.id}-${startedClock}`;
+    let learningSummary: LearningRunSummary | null = null;
+    let safetyDenials = 0;
+    let rejectedAlternatives = 0;
+    let wastedActions = 0;
+    let minedBlocks = 0;
+    let combatActions = 0;
+    let hungerRecoveryActions = 0;
+    let combatAttempts = 0;
     let decisions = 0;
     let successfulActions = 0;
     let failedActions = 0;
@@ -342,11 +421,21 @@ export class MinecraftTaskRunner {
 
       const firstState = this.runtime.currentWorldState?.state ?? null;
       if (!firstState) throw new Error("Task started without a valid initial world state.");
-      initialTargetCount = task.kind === "secure_food" ? 0 : countItem(firstState, target.item);
+      initialTargetCount = task.kind === "secure_food" ? 0 : targetCountOf(firstState);
       maximumTargetCount = initialTargetCount;
       minHealth = firstState.player.health;
       initialFood = firstState.player.food;
       origin = { x: firstState.player.position.x, z: firstState.player.position.z };
+
+      // Learning is strictly additive: a broken store may never break a run, so every call is guarded.
+      if (learner) {
+        try {
+          await learner.load();
+          learner.beginRun({ runId, taskId: task.id, worldKey });
+        } catch (error) {
+          this.logger.warn({ err: error }, "Experience learner unavailable; continuing without learning");
+        }
+      }
 
       while (true) {
         if (this.clock() >= deadline) {
@@ -363,6 +452,7 @@ export class MinecraftTaskRunner {
         memory.observe(world.state, world.sequence);
         knownResourceBlocksPeak = Math.max(knownResourceBlocksPeak, memory.blockSightings().length);
 
+        const ledger = new RejectionLedger();
         const context: MinecraftDecisionContext = {
           excludedTargets,
           previousFailureCode: lastFailureCode,
@@ -373,11 +463,17 @@ export class MinecraftTaskRunner {
           restMsUsed,
           previousGoalKey,
           stuck,
+          ledger,
+          ...(this.options.allowCombat ? { combatEnabled: true } : {}),
+          combatAttempts,
+          ...(learner ? { advisor: learner.advisor() } : {}),
+          ...(worldKey ? { worldKey } : {}),
         };
         stuck = null;
         const decision: MinecraftDecisionRecord = this.decisionModel.decide(world.state, task, context, world.sequence);
         decisions += 1;
 
+        rejectedAlternatives += (decision.rejected?.length ?? 0) + decision.alternatives.length;
         const planSignature = JSON.stringify(decision.plan);
         if (planSignature !== lastPlanSignature) {
           if (lastPlanSignature !== "") planRevisions += 1;
@@ -487,8 +583,8 @@ export class MinecraftTaskRunner {
           },
         });
 
-        const beforeCount = before ? countItem(before.state, target.item) : 0;
-        const afterCount = after ? countItem(after.state, target.item) : beforeCount;
+        const beforeCount = before ? targetCountOf(before.state) : 0;
+        const afterCount = after ? targetCountOf(after.state) : beforeCount;
         let observedProgress = task.kind !== "secure_food" && afterCount > beforeCount;
         maximumTargetCount = Math.max(maximumTargetCount, afterCount);
         if (before && after) {
@@ -563,6 +659,74 @@ export class MinecraftTaskRunner {
           awaitingRecovery = true;
         }
         this.invalidateMemoryAfterFailure(memory, selected.targetKey, lastFailureCode, succeeded);
+
+        if (skillResult.action.status === "rejected" && failureCode?.startsWith("SAFETY_")) safetyDenials += 1;
+        if (skill.id === "minecraft.mine-block" && succeeded) minedBlocks += 1;
+        if (skill.id === "minecraft.attack-hostile") combatActions += 1;
+        if (skill.id === "minecraft.eat-food" && succeeded) hungerRecoveryActions += 1;
+        if (!observedProgress) wastedActions += 1;
+        if (skill.id === "minecraft.attack-hostile") combatAttempts += 1;
+
+        // One episode per attempted action. The learner is the only writer, and it never throws.
+        if (learner) {
+          try {
+            const beforeState = before?.state ?? world.state;
+            const afterState = after?.state ?? beforeState;
+            learner.recordEpisode({
+              runId,
+              taskId: task.id,
+              sessionId: world.sessionId,
+              sequence: after?.sequence ?? world.sequence,
+              worldKey,
+              policyVersion: learner.snapshot().activePolicy?.id ?? null,
+              targetKey: selected.targetKey,
+              features: {
+                goalClass: goalClassOf(selected.goalId),
+                skillId: skill.id,
+                band: selected.priorityBand,
+                distance: targetDistance(beforeState, selected.input),
+                distanceBand: distanceBandOf(targetDistance(beforeState, selected.input)),
+                health: beforeState.player.health,
+                hunger: beforeState.player.food,
+                vitality: vitalityBandOf(beforeState.player.health, beforeState.player.food),
+                threat: threatBandOf(
+                  beforeState.entities.filter((entity) => isHostileMinecraftEntity(entity.name, entity.type)).length,
+                  beforeState.entities.some(
+                    (entity) =>
+                      isHostileMinecraftEntity(entity.name, entity.type) &&
+                      entity.distance <= task.dangerRadius,
+                  ),
+                ),
+                timeOfDay: timeOfDayBandOf(beforeState.time?.isNight),
+                targetKind: selected.goalId.split(":")[0] ?? "unknown",
+                actionIndex: actions.length,
+                attemptsOnTarget: attemptsWithoutProgress.get(selected.targetKey ?? "") ?? 0,
+              },
+              outcome: {
+                status: skillResult.action.status,
+                confirmed: skillResult.action.confirmed,
+                verified: verification.verified,
+                progress: observedProgress,
+                failureCode,
+                itemsGained: Math.max(0, afterCount - beforeCount),
+                itemsConsumed: Math.max(0, beforeCount - afterCount),
+                healthDelta:
+                  beforeState.player.health !== null && afterState.player.health !== null
+                    ? afterState.player.health - beforeState.player.health
+                    : 0,
+                foodDelta:
+                  beforeState.player.food !== null && afterState.player.food !== null
+                    ? afterState.player.food - beforeState.player.food
+                    : 0,
+                durationMs: Math.max(0, Math.round(skillResult.action.durationMs)),
+                distanceAfter: after ? targetDistance(afterState, selected.input) : null,
+                safetyDenied: skillResult.action.status === "rejected",
+              },
+            });
+          } catch (error) {
+            this.logger.warn({ err: error }, "Episode recording failed; the run continues unaffected");
+          }
+        }
 
         // A route stall is usually a segment problem: keep the goal, request a sidestep, and retry.
         // Other failures exclude the target at once. Either way repeated attempts are bounded.
@@ -676,7 +840,7 @@ export class MinecraftTaskRunner {
 
     const finalObservation = this.runtime.currentWorldState;
     const finalTargetCount = finalObservation && task.kind !== "secure_food"
-      ? countItem(finalObservation.state, target.item)
+      ? targetCountOf(finalObservation.state)
       : initialTargetCount;
     maximumTargetCount = Math.max(maximumTargetCount, finalTargetCount);
     if (status === "failed" && task.kind !== "secure_food" && finalTargetCount >= target.count) {
@@ -721,7 +885,40 @@ export class MinecraftTaskRunner {
       maxPlanLength,
       knownResourceBlocksPeak,
       elapsedMs: this.clock() - startedClock,
+      safetyDenials,
+      rejectedAlternatives,
+      wastedActions,
+      minedBlocks,
+      shelterSidesClosed: finalObservation && task.kind === "build_shelter"
+        ? shelterCardinalSolidCount(finalObservation.state)
+        : finalObservation
+          ? shelterCardinalSolidCount(finalObservation.state)
+          : 0,
+      combatActions,
+      hungerRecoveryActions,
     };
+    if (learner) {
+      try {
+        const report = await learner.finishRun({
+          note: `${status}${failure ? `:${failure.code}` : ""} · ${task.kind} · ${actions.length} actions`,
+        });
+        learningSummary = {
+          runId: report.runId,
+          episodes: report.episodes,
+          totalEpisodes: report.totalEpisodes,
+          runs: report.runs,
+          successes: report.successes,
+          failures: report.failures,
+          blockedTargets: report.blockedTargets,
+          advisorId: report.advisorId,
+          activePolicyId: report.activePolicyId,
+          candidatePolicyId: report.candidatePolicyId,
+          contexts: report.contexts,
+        };
+      } catch (error) {
+        this.logger.warn({ err: error }, "Could not fold this run into the experience learner");
+      }
+    }
     const result: MinecraftTaskResult = {
       taskId: task.id,
       status,
@@ -729,6 +926,7 @@ export class MinecraftTaskRunner {
       metrics,
       actions,
       finalObservation,
+      learning: learningSummary,
     };
 
     await this.runtime.trace.record({
