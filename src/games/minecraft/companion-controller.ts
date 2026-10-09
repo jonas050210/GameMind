@@ -90,6 +90,7 @@ export class CompanionController {
   private measuredSeparation: number | null = null;
   private followState: FollowRecoveryState = "inactive";
   private missingTargetCycles = 0;
+  private targetLastSeenAt: number | null = null;
   private lastTargetDimension: string | null = null;
 
   constructor(private readonly options: CompanionControllerOptions) {
@@ -106,7 +107,7 @@ export class CompanionController {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
-    this.timer = setInterval(() => void this.tick(), this.options.intervalMs ?? 1_000);
+    this.timer = setInterval(() => void this.tick(), this.observationIntervalMs);
     this.timer.unref();
   }
 
@@ -271,10 +272,14 @@ export class CompanionController {
     this.lastTransitionAt = new Date().toISOString();
     this.explorationLegs = 0;
     if (mode !== "return") this.activeHomepoint = null;
+    // Every transition ends the current target-tracking stint: absence counters and the remembered
+    // target dimension belong to the stint that collected them, never to the next instruction.
+    this.missingTargetCycles = 0;
+    this.targetLastSeenAt = null;
+    this.lastTargetDimension = null;
     if (mode !== "follow" && mode !== "come" && mode !== "afk") {
       this.measuredSeparation = null;
       this.followState = mode === "hold" && (reason.includes("absent") || reason.includes("wandering")) ? "holding-lost" : "inactive";
-      this.missingTargetCycles = 0;
     }
     await this.options.companionMemory.rememberMode(mode, targetPlayer);
   }
@@ -295,6 +300,25 @@ export class CompanionController {
     if (!state || !this.targetPlayer) return null;
     const player = state.entities.find((entity) => entity.type === "player" && entity.name === this.targetPlayer);
     return player ? measuredDistance(state.player.position, player.position) : null;
+  }
+
+  private get observationIntervalMs(): number {
+    return Math.max(1, this.options.intervalMs ?? 1_000);
+  }
+
+  /**
+   * Observation cycles the follow target has been missing for. Timer callbacks that the event loop
+   * delays or skips (CPU contention, slow awaits, GC pauses) must still count as failed observation
+   * cycles, so the time elapsed since the target was last seen — or since the follow instruction was
+   * issued, when it was never seen — is converted into the scheduled cycles it stands for. The larger
+   * of the executed and scheduled counts is the honest absence budget.
+   */
+  private effectiveMissingTargetCycles(): number {
+    const missingSinceMs = this.targetLastSeenAt ?? Date.parse(this.lastTransitionAt);
+    const scheduledCycles = Number.isFinite(missingSinceMs)
+      ? Math.floor((Date.now() - missingSinceMs) / this.observationIntervalMs)
+      : 0;
+    return Math.max(this.missingTargetCycles, scheduledCycles);
   }
 
   private statusText(): string {
@@ -381,17 +405,21 @@ export class CompanionController {
             this.anchor = this.currentLocation();
             await this.transition("hold", null, `Target '${this.targetPlayer}' was last observed in ${this.lastTargetDimension}, but I am in ${state.player.dimension}; holding instead of wandering.`);
             this.lastOutcome = this.reason;
-          } else if (this.missingTargetCycles >= targetMissingCycleLimit) {
-            const missingTarget = this.targetPlayer;
-            this.anchor = this.currentLocation();
-            await this.transition("hold", null, `Target '${missingTarget}' was absent for ${targetMissingCycleLimit} fresh observations; holding the current position. The player may be out of range or disconnected.`);
-            this.lastOutcome = this.reason;
           } else {
-            this.lastOutcome = `Target '${this.targetPlayer}' is absent from fresh observation ${this.missingTargetCycles}/${targetMissingCycleLimit}; waiting without moving.`;
+            const missingCycles = this.effectiveMissingTargetCycles();
+            if (missingCycles >= targetMissingCycleLimit) {
+              const missingTarget = this.targetPlayer;
+              this.anchor = this.currentLocation();
+              await this.transition("hold", null, `Target '${missingTarget}' was absent for ${targetMissingCycleLimit} fresh observations; holding the current position. The player may be out of range or disconnected.`);
+              this.lastOutcome = this.reason;
+            } else {
+              this.lastOutcome = `Target '${this.targetPlayer}' is absent from fresh observation ${missingCycles}/${targetMissingCycleLimit}; waiting without moving.`;
+            }
           }
           return;
         }
         this.missingTargetCycles = 0;
+        this.targetLastSeenAt = Date.now();
         this.lastTargetDimension = state.player.dimension;
         const separation = measuredDistance(state.player.position, player.position);
         this.measuredSeparation = separation;

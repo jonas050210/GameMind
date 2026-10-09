@@ -265,6 +265,28 @@ test("lost follow targets stop movement and recover by holding instead of wander
   assert.match(controller.snapshot().reason, /absent.*holding/i);
 });
 
+test("lost follow targets still recover when event-loop delay prevents observation ticks from running", async () => {
+  const fixture = controllerFixture({ targetDistance: null });
+  const controller = new CompanionController({
+    runtime: fixture.runtime as never, skills: fixture.skills as never, memory: new WorldMemory(),
+    companionMemory: await CompanionMemory.open(null, "lost-player-starved"), logger,
+    runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
+    setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 5,
+  });
+  await controller.submit("#follow Alex", "control-center");
+  controller.start();
+  // Starve the event loop the way CPU contention does: the synchronous busy wait keeps the 5 ms
+  // observation interval from firing on schedule, so far fewer than five ticks run inside the budget.
+  const starvedUntil = Date.now() + 40;
+  while (Date.now() < starvedUntil) { /* deliberate synchronous block */ }
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  controller.stop();
+  assert.equal(fixture.calls.length, 0, "the companion never moves while the target is missing");
+  assert.equal(controller.snapshot().mode, "hold");
+  assert.equal(controller.snapshot().followState, "holding-lost");
+  assert.match(controller.snapshot().reason, /absent.*holding/i);
+});
+
 test("a dimension change during follow stops recovery movement", async () => {
   const fixture = controllerFixture({ targetDistance: 10 });
   const controller = new CompanionController({
