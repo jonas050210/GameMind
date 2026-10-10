@@ -26,7 +26,7 @@ import {
   planShelter,
 } from "../src/games/minecraft/shelter.js";
 import { verifySkillPostcondition } from "../src/games/minecraft/skill-contracts.js";
-import { isHazardBlockName, observedHazards, blockObservationPriority } from "../src/games/minecraft/block-classes.js";
+import { isHazardBlockName, isWaterBlockName, observedHazards, blockObservationPriority } from "../src/games/minecraft/block-classes.js";
 import {
   MINECRAFT_COMBAT_CAPABILITY,
   MINECRAFT_SAFETY_POLICY,
@@ -274,9 +274,9 @@ test("hazard blocks are recognised and ordered ahead of ordinary terrain", () =>
   assert.equal(isHazardBlockName("lava"), true);
   assert.equal(isHazardBlockName("fire"), true);
   assert.equal(isHazardBlockName("magma_block"), true);
-  // Water counts as a hazard because the agent can drown in it; the *escape* rule only fires for
-  // blocks that hurt on contact, which is what `observedHazards` is used for.
-  assert.equal(isHazardBlockName("water"), true);
+  // Water is not a flee-from hazard: the agent swims out of it (the swim reflex), it does not run from it.
+  assert.equal(isHazardBlockName("water"), false);
+  assert.equal(isWaterBlockName("water"), true);
   assert.equal(isHazardBlockName("cobblestone"), false);
   const hazards = observedHazards(
     [block("stone", 1, 64, 0), block("lava", 4, 64, 0), block("fire", 2, 64, 0)],

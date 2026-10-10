@@ -5,7 +5,7 @@ import type { PolicyWeights } from "../core/learning/policy-weights.js";
 import { runEvaluationOnce, evaluationSeeds, type EvaluationRun, type EvaluationRunOptions } from "../testing/eval/harness.js";
 import { evaluationScenarios, type EvaluationScenario } from "../testing/eval/scenarios.js";
 import { assertSeedSplit, TRAINING_SEED_BASE } from "./curriculum.js";
-import { readTrainingState, trainingPaths, writeJsonAtomic, type TrainingEvaluationSummary, type TrainingPaths } from "./state.js";
+import { canonicalDigest, readTrainingState, trainingPaths, writeJsonAtomic, type TrainingEvaluationSummary, type TrainingPaths } from "./state.js";
 import type { EpisodeRunner } from "./trainer.js";
 
 export interface PolicyMeasurement {
@@ -20,6 +20,8 @@ export interface TrainingEvaluationReport {
   readonly schemaVersion: 1;
   readonly generatedAt: string;
   readonly checkpointId: string;
+  /** "verified" when the checkpoint's digest matched; "unverified-legacy" for checkpoints written before digests. */
+  readonly checkpointIntegrity?: "verified" | "unverified-legacy";
   readonly weightsId: string;
   readonly heldOut: {
     readonly evaluationSeeds: readonly number[];
@@ -121,18 +123,32 @@ export async function measurePolicy(
   };
 }
 
-async function loadCheckpoint(paths: TrainingPaths, checkpointId: string | undefined): Promise<{ id: string; weights: PolicyWeights }> {
+export async function loadCheckpoint(
+  paths: TrainingPaths,
+  checkpointId: string | undefined,
+): Promise<{ id: string; weights: PolicyWeights; integrity: "verified" | "unverified-legacy" }> {
   const state = await readTrainingState(paths);
   if (!state) throw new Error(`No training state in ${paths.root}; run "train" first.`);
   const record = checkpointId
     ? state.checkpoints.find((entry) => entry.id === checkpointId)
     : state.checkpoints.at(-1);
   if (!record) throw new Error(checkpointId ? `No checkpoint ${checkpointId}.` : "No checkpoint has been written yet.");
-  const parsed = JSON.parse(await readFile(record.path, "utf8")) as { weights?: PolicyWeights };
+  const parsed = JSON.parse(await readFile(record.path, "utf8")) as {
+    weights?: PolicyWeights;
+    digest?: string;
+    [key: string]: unknown;
+  };
   if (!parsed.weights || typeof parsed.weights.id !== "string" || typeof parsed.weights.entries !== "object") {
     throw new Error(`Checkpoint ${record.id} does not hold a weight table.`);
   }
-  return { id: record.id, weights: parsed.weights };
+  // Checkpoints written before digests existed load as "unverified"; a digest that does not match is refused.
+  const { digest, ...body } = parsed;
+  if (typeof digest === "string" && canonicalDigest(body) !== digest) {
+    throw new Error(
+      `Checkpoint ${record.id} failed its integrity check: its contents no longer match the digest written with it. Refusing to evaluate an edited checkpoint.`,
+    );
+  }
+  return { id: record.id, weights: parsed.weights, integrity: typeof digest === "string" ? "verified" : "unverified-legacy" };
 }
 
 /**
@@ -163,6 +179,7 @@ export async function evaluateCheckpoint(options: EvaluateCheckpointOptions): Pr
     schemaVersion: 1,
     generatedAt,
     checkpointId: checkpoint.id,
+    checkpointIntegrity: checkpoint.integrity,
     weightsId: checkpoint.weights.id,
     heldOut: {
       evaluationSeeds: seeds,

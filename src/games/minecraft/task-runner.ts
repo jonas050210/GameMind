@@ -9,6 +9,7 @@ import {
   type MinecraftDecisionRecord,
 } from "./decision-model.js";
 import { ExperienceLearner } from "../../core/learning/learner.js";
+import { exploreDecision, type ExplorationConfig } from "./training-exploration.js";
 import {
   distanceBandOf,
   goalClassOf,
@@ -28,7 +29,7 @@ import { explorationKeyCenter } from "./exploration.js";
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
-import { REFLEX_THRESHOLDS } from "./reflex.js";
+import { REFLEX_THRESHOLDS, urgentReflexesSince } from "./reflex.js";
 
 /** Failure code of an action the fast loop stopped because an urgent condition appeared. */
 export const REFLEX_INTERRUPT_CODE = "REFLEX_INTERRUPT";
@@ -98,6 +99,8 @@ export interface TaskMetrics {
   readonly rejectedAlternatives: number;
   /** Actions that ended without any observable progress; the efficiency metric learning should reduce. */
   readonly wastedActions: number;
+  /** Decisions switched to an alternative by training-only exploration. Zero outside training. */
+  readonly explorations: number;
   readonly minedBlocks: number;
   readonly shelterSidesClosed: number;
   readonly combatActions: number;
@@ -142,6 +145,8 @@ export interface MinecraftTaskRunnerOptions {
   readonly worldKey?: string | null;
   /** Lets the planner *propose* defence. The safety policy and the adapter still have to agree. */
   readonly allowCombat?: boolean;
+  /** Training only: occasionally try a progress-band alternative so the learner sees counterfactual outcomes. */
+  readonly explore?: ExplorationConfig | null;
   /** Unique id for the episode log; derived from the task when omitted. */
   readonly runId?: string;
   /**
@@ -413,12 +418,14 @@ export class MinecraftTaskRunner {
     let safetyDenials = 0;
     let rejectedAlternatives = 0;
     let wastedActions = 0;
+    let explorations = 0;
     let minedBlocks = 0;
     let combatActions = 0;
     let hungerRecoveryActions = 0;
     let combatAttempts = 0;
     let lastSafetyNote: { allowed: boolean; code: string; message: string } | null = null;
     let decisions = 0;
+    let staleDecisionsDiscarded = 0;
     let successfulActions = 0;
     let failedActions = 0;
     let progressEvents = 0;
@@ -595,8 +602,11 @@ export class MinecraftTaskRunner {
         };
         stuck = null;
         const decideStartedMs = performance.now();
-        const decision: MinecraftDecisionRecord = this.decisionModel.decide(world.state, task, context, world.sequence);
+        const modelDecision: MinecraftDecisionRecord = this.decisionModel.decide(world.state, task, context, world.sequence);
         this.options.metrics?.recordDecision(performance.now() - decideStartedMs);
+        const explored = this.options.explore ? exploreDecision(modelDecision, this.options.explore, world.sequence) : null;
+        const decision: MinecraftDecisionRecord = explored?.decision ?? modelDecision;
+        if (explored?.choice) explorations += 1;
         decisions += 1;
 
         rejectedAlternatives += (decision.rejected?.length ?? 0) + decision.alternatives.length;
@@ -612,7 +622,8 @@ export class MinecraftTaskRunner {
           gameId: world.gameId,
           sessionId: world.sessionId,
           correlationId: actions.at(-1)?.actionId ?? null,
-          data: { ...decision },
+          // A switch made for training is recorded on the decision itself, never applied silently.
+          data: { ...decision, ...(explored?.choice ? { exploration: explored.choice } : {}) },
         });
 
         if (decision.terminalStatus === "completed") {
@@ -655,6 +666,34 @@ export class MinecraftTaskRunner {
         const timeoutBudget = Math.max(1, deadline - this.clock());
         const defaultTimeout = skill.defaultTimeoutMs ?? capability?.defaultTimeoutMs ?? timeoutBudget;
         const timeoutMs = Math.max(1, Math.min(defaultTimeout, timeoutBudget));
+
+        // Stale-decision guard. The decision was made from `world`; an urgent reflex (threat, hazard, drowning, a
+        // fall) may have appeared since. The reflex layer already interrupts a running action, but a decision that
+        // is still being dispatched would delay the reaction by a whole new action. Discard it and decide again on
+        // the newest observation. Once the sequences match, the guard stops firing, so this cannot loop.
+        const latest = this.runtime.currentWorldState;
+        if (latest) {
+          const urgentSinceDecision = urgentReflexesSince(world, latest);
+          if (urgentSinceDecision.length > 0) {
+            staleDecisionsDiscarded += 1;
+            await this.runtime.trace.record({
+              eventType: "decision.discarded_stale",
+              gameId: world.gameId,
+              sessionId: world.sessionId,
+              data: {
+                decisionSequence: world.sequence,
+                latestSequence: latest.sequence,
+                urgentCodes: urgentSinceDecision,
+                selectedSkill: selected.skillId ?? null,
+              },
+            });
+            this.logger.warn(
+              { taskId: task.id, urgentCodes: urgentSinceDecision },
+              "Discarded a decision made before an urgent reflex appeared; re-deciding on the latest observation",
+            );
+            continue;
+          }
+        }
 
         const before = this.runtime.currentWorldState;
         this.options.metrics?.recordActionStart();
@@ -1053,6 +1092,7 @@ export class MinecraftTaskRunner {
       safetyDenials,
       rejectedAlternatives,
       wastedActions,
+      explorations,
       minedBlocks,
       shelterSidesClosed: finalObservation && task.kind === "build_shelter"
         ? shelterCardinalSolidCount(finalObservation.state)

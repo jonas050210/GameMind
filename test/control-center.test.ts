@@ -224,11 +224,12 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.equal(before.world.sessionFacts?.gameMode.value, "survival");
     assert.equal(before.world.sessionFacts?.gameMode.evidence, "verified");
     assert.equal(before.world.perception, null, "the simulator does not invent live adapter timing data");
-    assert.ok(before.world.blocks.every((block) => Number.isFinite(block.x) && Number.isFinite(block.y) && Number.isFinite(block.z)));
-    assert.ok(before.world.blocks.every((block) => block.identifier === `minecraft:${block.name}`));
-    assert.ok(before.world.blocks.every((block) => block.distance === null || Number.isFinite(block.distance)));
-    assert.ok(before.world.blocks.every((block) => ["visible", "occluded", "unknown"].includes(block.visibility)));
-    assert.ok(before.world.blocks.every((block) => ["local", "strategic", "memory"].includes(block.observationKind)));
+    // Block and entity coordinates, the terrain census, and the agent's own position are not published: the
+    // Control Center shows status, and those were low-level data the operator views never needed.
+    for (const key of ["blocks", "terrain", "position"]) {
+      assert.equal(key in before.world, false, `world.${key} must not be in the status payload`);
+    }
+    assert.ok((before.world.entities ?? []).every((entity) => !("position" in entity)), "entities carry no coordinates");
 
     const result = await fixture.runTask(taskFromControlCenterRequest({ kind: "gather-logs", count: 1 }));
     assert.equal(result.status, "succeeded", `the gather task should succeed in this world: ${JSON.stringify(result.failure)}`);
@@ -294,12 +295,7 @@ test("world map distinguishes current wide-scan sightings from older memory", as
     );
 
     const currentSnapshot = await fixture.snapshots();
-    const currentMarker = currentSnapshot.world.blocks.find(
-      (block) => block.x === position.x && block.y === position.y && block.z === position.z,
-    );
-    assert.ok(currentMarker, "a block seen in the current strategic scan is shown on the map");
-    assert.equal(currentMarker.remembered, false, "a current wide-scan sighting is not styled as stale memory");
-
+    assert.equal("blocks" in currentSnapshot.world, false, "a current sighting is not published as a block coordinate");
     const nextObservation = await fixture.runtime.observe();
     fixture.host.memory.observe(
       {
@@ -309,11 +305,7 @@ test("world map distinguishes current wide-scan sightings from older memory", as
       nextObservation.sequence,
     );
     const laterSnapshot = await fixture.snapshots();
-    const rememberedMarker = laterSnapshot.world.blocks.find(
-      (block) => block.x === position.x && block.y === position.y && block.z === position.z,
-    );
-    assert.ok(rememberedMarker, "an incomplete later scan must not erase the last known block");
-    assert.equal(rememberedMarker.remembered, true, "a sighting from an earlier observation is marked as memory");
+    assert.equal("blocks" in laterSnapshot.world, false, "memory markers are not published as block coordinates either");
   } finally {
     await fixture.close();
   }
@@ -451,10 +443,7 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     const page = await fetch(`${base}/`);
     assert.equal(page.status, 200);
     const html = await page.text();
-    assert.match(html, /<canvas id="minimap"/);
-    assert.match(html, /[Ii]nteractive 3D voxel view/);
-    assert.match(html, /id="minimap"[^>]+tabindex="0"/);
-    assert.match(html, /aria-describedby="map-controls"/);
+    assert.doesNotMatch(html, /minimap|voxel|map-controls/i, "the 3D voxel view is removed and must not come back");
     assert.match(html, /aria-live="polite"/);
     assert.match(html, /id="task-form"/);
     assert.match(html, /id="boot-data"/);
@@ -473,13 +462,10 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
       "polling must back off while the tab is hidden, so an unwatched page costs the agent nothing",
     );
     assert.ok(clientScript.includes("aria-valuenow"), "the action-budget progress bar must expose its live value");
-    for (const asset of ["styles.css", "app.js", "world-view.js", "index.html"]) {
+    for (const asset of ["styles.css", "app.js", "index.html"]) {
       const response = await fetch(`${base}/${asset}`);
       assert.equal(response.status, 200, `${asset} must be served from the package, not a CDN`);
       const body = await response.text();
-      if (asset === "world-view.js") {
-        assert.ok(body.includes('event.key === "ArrowLeft"') && body.includes('event.key === "Home"'), "the voxel view must have keyboard orbit and reset controls");
-      }
       assert.ok(
         !/https?:\/\/(?!127\.0\.0\.1|localhost|www\.w3\.org)/.test(body),
         `${asset} must not reference external origins: the dashboard runs with no network access`,
@@ -810,7 +796,7 @@ test("training refuses an out-of-range time budget at the endpoint, and the page
 
     const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
     const html = await (await fetch(base)).text();
-    for (const id of ["training-headless", "training-minutes", "training-max-episodes", "render-notice", "roadmap-items", "roadmap-refresh", "training-reward"]) {
+    for (const id of ["training-headless", "training-minutes", "training-max-episodes", "roadmap-items", "roadmap-refresh", "training-reward"]) {
       assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
     }
     const policy = await fetch(`${base}/policy.js`);

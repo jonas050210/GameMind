@@ -13,7 +13,6 @@ const resourceNames = new Set<string>(minecraftResourceBlockNames);
 /** Blocks that are kept in the observation even when the local cube must be truncated. */
 const hazardBlockNames = new Set<string>([
   "lava",
-  "water",
   "fire",
   "soul_fire",
   "magma_block",
@@ -34,6 +33,15 @@ export function isRelevantTerrainBlockName(name: string): boolean {
 /** Sweet berry bushes yield berries only when their `age` reaches this value (Java 1.20). */
 export const MINECRAFT_RIPE_BERRY_AGE = 2;
 
+/**
+ * Water is a liquid to swim through, not a hazard to flee from. Only drowning (air running out with the head
+ * submerged) is dangerous, and that is handled by the in-water reflex. Keeping it out of the hazard set stops the
+ * agent from fleeing a lake it can simply swim out of.
+ */
+export function isWaterBlockName(name: string): boolean {
+  return name === "water" || name === "flowing_water";
+}
+
 export function isResourceBlockName(name: string): boolean {
   return resourceNames.has(name);
 }
@@ -49,7 +57,7 @@ export function isInterestingBlockName(name: string): boolean {
  */
 export function blockObservationPriority(name: string): 2 | 1 | 0 {
   if (isInterestingBlockName(name)) return 2;
-  if (isMineableBlockName(name) || isRelevantTerrainBlockName(name)) return 1;
+  if (isMineableBlockName(name) || isRelevantTerrainBlockName(name) || isWaterBlockName(name)) return 1;
   return 0;
 }
 

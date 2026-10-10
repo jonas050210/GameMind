@@ -4,7 +4,6 @@
   served by the same process that owns the agent, and every value on screen comes from GET /api/snapshot.
 */
 
-import { drawWorldView, setWorldViewSuspended } from "./world-view.js";
 import {
   HEADLESS_STORAGE_KEY,
   ROADMAP_ACTIONS_WITH_NOTE,
@@ -772,7 +771,7 @@ function renderProgression(snapshot) {
       item.append(
         node("span", "progression-status", icon),
         node("span", "progression-title", lm.label),
-        node("span", "progression-desc", `(${lm.position.x}, ${lm.position.y}, ${lm.position.z}) · ${lm.type}`),
+        node("span", "progression-desc", lm.type),
       );
       lmList.append(item);
     }
@@ -1030,7 +1029,6 @@ function renderWorld(snapshot) {
   vitals.append(
     vital("Health", health === null ? "not reported" : `${num(health, 1)} / 20`, health === null ? null : Math.max(0, Math.min(1, health / 20)), health === null ? "warn" : health < 8 ? "bad" : health < 14 ? "warn" : null),
     vital("Hunger", food === null ? "not reported" : `${num(food)} / 20`, food === null ? null : Math.max(0, Math.min(1, food / 20)), food === null ? "warn" : food < 6 ? "bad" : food < 12 ? "warn" : null),
-    vital("Position", world.position ? `${num(world.position.x, 0)} ${num(world.position.y, 0)} ${num(world.position.z, 0)}` : "—", null, null, "mono"),
     vital(
       "Time",
       world.time
@@ -1065,61 +1063,6 @@ function renderWorld(snapshot) {
       freshnessLine.title = `last session change (${facts.lastChange.kind}): ${facts.lastChange.detail} at ${facts.lastChange.at}`;
     }
   }
-  const rememberedCount = (world.blocks ?? []).filter((block) => block.remembered).length;
-  const visibleCount = (world.blocks ?? []).filter((block) => !block.remembered).length;
-  const mapMeta = el("map-meta");
-  if (mapMeta) mapMeta.textContent = stale
-    ? `${rememberedCount} remembered · ${visibleCount} live · no current observation`
-    : `${visibleCount} current · ${rememberedCount} last seen · ${world.perception?.loadedChunks ?? "?"} loaded chunks`;
-  const inventory = el("inventory");
-  clear(inventory);
-  const items = world.inventory ?? [];
-  if (!items.length) inventory.append(node("span", "item empty", "empty"));
-  for (const entry of items.slice(0, 40)) {
-    const item = node("span", "item");
-    item.append(node("b", null, `×${entry.count}`), document.createTextNode(` ${entry.name}`));
-    item.title = `slot ${entry.slot}`;
-    inventory.append(item);
-  }
-  const equipment = el("equipment");
-  clear(equipment);
-  const gear = world.equipment ?? {};
-  const slots = Object.entries(gear).filter(([, value]) => value);
-  if (!slots.length) equipment.append(node("span", "item empty", "nothing equipped"));
-  for (const [slot, name] of slots) equipment.append(node("span", "item", `${slot}: ${name}`));
-  const observationsBody = el("observations")?.tBodies?.[0];
-  if (observationsBody) {
-    observationsBody.replaceChildren();
-    const relevant = (block) => block.resource || block.hazard || /(^|_)(oak|birch)_log$|_leaves$|^(grass_block|dirt|coarse_dirt|rooted_dirt|stone|cobblestone)$/.test(block.name ?? "");
-    const blocks = [...(world.blocks ?? [])]
-      .sort((left, right) => Number(relevant(right)) - Number(relevant(left)) || (left.distance ?? Infinity) - (right.distance ?? Infinity))
-      .slice(0, 18);
-    for (const block of blocks) {
-      const row = document.createElement("tr");
-      if (block.remembered) row.dataset.stale = "true";
-      if (block.hazard) row.dataset.hazard = "true";
-      const identifier = block.identifier ?? (block.name ? `minecraft:${block.name}` : "unknown");
-      const evidence = block.remembered
-        ? "stale memory"
-        : `${block.observationKind ?? "observation"} · obs #${freshness?.sequence ?? "?"}`;
-      row.append(
-        node("td", "mono block-id", identifier),
-        node("td", "num", `${block.x}, ${block.y}, ${block.z}`),
-        node("td", "num", block.distance == null ? "unknown" : `${num(block.distance, 1)} m`),
-        node("td", block.visibility === "visible" ? "ok" : block.visibility === "occluded" ? "warn" : "muted", block.visibility ?? "unknown"),
-        node("td", block.remembered ? "warn" : "ok", evidence),
-      );
-      observationsBody.append(row);
-    }
-    if (!blocks.length) observationsBody.append(emptyRow(5, "No blocks are available from the current observation."));
-    const observationMeta = el("observation-meta");
-    if (observationMeta) {
-      const terrain = world.terrain;
-      observationMeta.textContent = terrain
-        ? `${blocks.length} shown · ${terrain.observedColumns} terrain columns · ${terrain.waterColumns} water · ${terrain.obstacleColumns} obstacles · ${terrain.unknownCells} unknown cells${terrain.truncated ? " · truncated" : ""}`
-        : `${blocks.length} shown · ${world.blocks?.length ?? 0} reported · terrain model unavailable`;
-    }
-  }
   const threats = (world.entities ?? []).filter((entry) => entry.hostile);
   const hostiles = el("hostiles");
   clear(hostiles);
@@ -1128,7 +1071,6 @@ function renderWorld(snapshot) {
   } else {
     hostiles.append(node("span", "item empty", (world.entities ?? []).length ? "no hostiles in view" : "no entities observed"));
   }
-  drawMinimap(world, { stale: stale === true, provenance: provenance?.source ?? "world-memory" }, snapshot);
 }
 
 /** Renders one session fact as `value · evidence`; an unknown value is spelled out, never guessed. */
@@ -1410,7 +1352,7 @@ function renderPerformance(snapshot) {
   }
   metrics.append(
     metric("Total scan", fmtMs(perception.totalMs), { tone: perception.totalMs > 80 ? "warn" : "good", note: "last observation" }),
-    metric("Local voxel scan", fmtMs(perception.localScanMs), { note: `${perception.localBlocksReturned} returned / ${perception.localBlocksFound} found` }),
+    metric("Nearby block scan", fmtMs(perception.localScanMs), { note: `${perception.localBlocksReturned} returned / ${perception.localBlocksFound} found` }),
     metric("Strategic scans", fmtMs(perception.strategicScanMs), { note: `${perception.resourceSightings} resource · ${perception.minableSightings} minable` }),
     metric("Entity scan", fmtMs(perception.entityScanMs), { note: `${perception.entitiesReturned} visible entities` }),
     metric("Validation", fmtMs(perception.validationMs), { note: "observation schema" }),
@@ -1438,26 +1380,6 @@ function vital(label, value, ratio, tone, className) {
     box.append(bar);
   }
   return box;
-}
-
-/**
- * WebGL geometry sourced only from current observed blocks plus wireframe, last-seen memory markers.
- * Unknown and unloaded terrain is never synthesized.
- */
-function drawMinimap(world, options, snapshot = state.snapshot) {
-  const canvas = el("minimap");
-  const suspended = renderingSuspended(snapshot, state.headless);
-  el("render-notice").hidden = !suspended;
-  setWorldViewSuspended(suspended);
-  if (suspended) {
-    // Headless: no WebGL work at all while training runs. The last frame is kept but marked as not live.
-    if (canvas) {
-      canvas.dataset.live = "0";
-      canvas.dataset.renderer = "suspended";
-    }
-    return;
-  }
-  drawWorldView(world, options ?? { stale: true, provenance: "world-memory" });
 }
 
 /* ------------------------------------------------------------------ improvement roadmap */

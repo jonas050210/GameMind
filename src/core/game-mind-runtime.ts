@@ -27,6 +27,12 @@ export interface GameMindRuntimeOptions<TState = unknown> {
    * dangerous observations without knowing anything about Minecraft.
    */
   readonly safetyContext?: (state: TState, meta: SafetyObservationMeta) => SafetyWorldContextInput;
+  /**
+   * Compact, bounded description of an observation for the durable trace. The full state is kept in memory by
+   * the world model; writing all of it to disk every tick was the largest per-second cost of the loop. Without a
+   * summarizer the trace records only the sequence and timestamps.
+   */
+  readonly observationSummary?: (state: TState) => Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -168,18 +174,35 @@ export class GameMindRuntime<TState = unknown> {
     const observation: GameObservation<TState> = await this.adapter.observe();
     const state = this.worldModel.apply(observation);
     this.publishSafetyContext(state);
-    await this.trace.record({
-      eventType: "observation.received",
-      gameId: state.gameId,
-      sessionId: state.sessionId,
-      data: {
-        sequence: state.sequence,
-        observedAt: state.observedAt,
-        receivedAt: state.receivedAt,
-        state: state.state,
-      },
-    });
+    // Telemetry, not a decision input: queued in order, never awaited, so the next tick does not wait for disk.
+    void this.trace
+      .record(
+        {
+          eventType: "observation.received",
+          gameId: state.gameId,
+          sessionId: state.sessionId,
+          data: {
+            sequence: state.sequence,
+            observedAt: state.observedAt,
+            receivedAt: state.receivedAt,
+            summary: this.summarizeObservation(state.state),
+          },
+        },
+        { durable: false },
+      )
+      .catch(() => undefined);
     return state;
+  }
+
+  private summarizeObservation(state: TState): Readonly<Record<string, unknown>> {
+    const summarize = this.options.observationSummary;
+    if (!summarize) return {};
+    try {
+      return summarize(state);
+    } catch (error) {
+      this.logger.warn({ err: error }, "Observation summary failed; the trace records the sequence only");
+      return {};
+    }
   }
 
   /** Pushes the current world context into the broker so its checks see live numbers. */

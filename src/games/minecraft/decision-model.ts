@@ -26,7 +26,7 @@ import {
   minecraftPlaceableBlockNames,
   miningDropFor,
 } from "./mining.js";
-import { bestWeapon, combatIsAllowed } from "./combat.js";
+import { COMBAT_APPROACH_MAX_BLOCKS, bestWeapon, combatIsAllowed } from "./combat.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
 import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
@@ -550,6 +550,31 @@ function recoveryCandidates(
 
 
 /** Observed lava/water/fire/cactus within flee distance. Unknown cells never trigger a hazard goal. */
+/**
+ * Leaving water is a survival response, not a flight from a hazard. Submerged with air running out is the most urgent
+ * case in the safety band; a body in water with the head clear is still worth leaving before anything else.
+ */
+function swimCandidate(state: MinecraftObservation, context: MinecraftDecisionContext): DecisionCandidate | null {
+  if (!available(context, "minecraft.swim-to-surface")) return null;
+  const headUnder = state.player.headInWater === true;
+  const bodyIn = state.player.inWater === true;
+  if (!headUnder && !bodyIn) return null;
+  const air = state.player.oxygenLevel;
+  const urgent = headUnder && (air === null || air < 240);
+  const targetKey = "water:surface";
+  return {
+    goalId: "leave-water",
+    priorityBand: BAND_SAFETY,
+    score: urgent ? 2_000 : 900,
+    skillId: "minecraft.swim-to-surface",
+    input: { maxDistance: 8 },
+    targetKey,
+    rationale: headUnder
+      ? `Head is under water${air === null ? "" : ` with ${Math.round(air)} air ticks`}; swimming to the surface comes before anything else.`
+      : "Body is in water; leaving it comes before gathering or fleeing.",
+  };
+}
+
 function hazardCandidate(
   state: MinecraftObservation,
   context: MinecraftDecisionContext,
@@ -606,6 +631,55 @@ function hazardCandidate(
  * Defensive strike. Exists only when the operator enabled combat **and** the shared safety function
  * approves the specific target, and it never outranks fleeing when several hostiles are close.
  */
+/** Crafting range the craft executor accepts is larger; this stays well inside it so the attempt is not wasted. */
+const WEAPON_TABLE_RANGE_BLOCKS = 3.5;
+
+/**
+ * A wooden sword from materials already in the inventory, crafted at a table already in reach. Offered only when every
+ * requirement holds now: a sword is 2 planks and 1 stick, with the table observed within range. Nothing is fetched here,
+ * so a missing requirement is reported, not planned around.
+ */
+function weaponPreparationCandidate(
+  state: MinecraftObservation,
+  hostile: MinecraftObservation["entities"][number],
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  const key = `hostile:${hostile.id}`;
+  const note = (reason: string) =>
+    context.ledger?.note({ goalId: "defend", targetKey: key, priorityBand: BAND_SAFETY }, "no_skill", reason);
+  if (!available(context, "minecraft.craft-item")) {
+    note("no weapon, and no craft skill is available to make one");
+    return null;
+  }
+  const planks = totalPlanks(state);
+  const sticks = inventoryCount(state, "stick");
+  if (planks < 2 || sticks < 1) {
+    note(`no weapon; a wooden sword needs 2 planks and 1 stick (have ${planks} planks, ${sticks} sticks)`);
+    return null;
+  }
+  const table = state.nearbyBlocks
+    .filter((block) => block.name === "crafting_table")
+    .map((block) => ({ block, distance: distanceBetween(block.position, state.player.position) }))
+    .sort((left, right) => left.distance - right.distance)[0];
+  if (!table || table.distance > WEAPON_TABLE_RANGE_BLOCKS) {
+    note("no weapon; crafting a wooden sword needs a crafting table within 3.5 blocks, none is in reach");
+    return null;
+  }
+  const { x, y, z } = table.block.position;
+  const crafted = notExcluded(craftCandidate("wooden_sword", inventoryCount(state, "wooden_sword") + 1, { x, y, z }), context);
+  if (!crafted) {
+    note("weapon crafting already failed for this run; the agent flees");
+    return null;
+  }
+  return {
+    ...crafted,
+    goalId: "prepare-weapon",
+    priorityBand: BAND_SAFETY,
+    score: 1900,
+    rationale: `Unarmed with ${hostile.name} ${hostile.distance.toFixed(1)} blocks away: craft a wooden sword at the table in reach before engaging.`,
+  };
+}
+
 function defendCandidate(
   state: MinecraftObservation,
   task: MinecraftTask,
@@ -625,6 +699,16 @@ function defendCandidate(
   if (!available(context, "minecraft.attack-hostile")) return null;
   const hostile = threats.nearby[0];
   if (!hostile) return null;
+  const hasWeapon = bestWeapon([
+    ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
+    ...state.inventory.map((item) => ({ name: item.name })),
+  ]) !== null;
+  if (!hasWeapon) {
+    // Unarmed with a hostile close: preparing a weapon in place beats fleeing from it, when the materials and a
+    // table are already here. Otherwise the agent flees, and the ledger says exactly what was missing.
+    const preparation = weaponPreparationCandidate(state, hostile, context);
+    if (preparation) return preparation;
+  }
   if ((context.combatAttempts ?? 0) >= MAX_COMBAT_ATTEMPTS_PER_RUN) {
     context.ledger?.note(
       { goalId: "defend", targetKey: `hostile:${hostile.id}`, priorityBand: BAND_SAFETY },
@@ -647,7 +731,7 @@ function defendCandidate(
     weapon: weapon ? { name: weapon.name, damage: weapon.damage } : null,
     requiredDamage: MIN_WEAPON_DAMAGE,
     targetDistance: hostile.distance,
-    maxTargetDistance: 4,
+    maxTargetDistance: COMBAT_APPROACH_MAX_BLOCKS,
     hitsAlreadyAttempted: 0,
     maxHits: 4,
     hostileName: hostile.name,
@@ -2068,6 +2152,10 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     const hunger = state.player.food;
 
     // 2. Hazards, hostiles and stalled routes outrank everything else, and learning never touches them.
+    const swim = swimCandidate(state, context);
+    if (swim) {
+      return record(null, swim, [], swim.rationale);
+    }
     const hazard = hazardCandidate(state, context);
     if (hazard) {
       noteProgressOvertaken("escaping the hazard within reach comes before any task goal");

@@ -115,7 +115,6 @@ export interface ControlCenterGoal {
 }
 
 export interface ControlCenterWorld {
-  readonly position: { readonly x: number; readonly y: number; readonly z: number } | null;
   readonly dimension: string | null;
   readonly gameMode: string | null;
   readonly health: number | null;
@@ -131,16 +130,6 @@ export interface ControlCenterWorld {
     readonly day: number | null;
     /** Which live field the night judgement came from, so a fallback is never read as a measurement. */
     readonly source: string | null;
-  } | null;
-  /** Current-observation terrain census; never reconstructed from stale memory. */
-  readonly terrain: {
-    readonly observedColumns: number;
-    readonly obstacleColumns: number;
-    readonly hazardColumns: number;
-    readonly waterColumns: number;
-    readonly unknownCells: number;
-    readonly sampledCells: number;
-    readonly truncated: boolean;
   } | null;
   readonly perception: {
     readonly totalMs: number;
@@ -164,31 +153,8 @@ export interface ControlCenterWorld {
   readonly entities: readonly {
     readonly id: string;
     readonly name: string;
-    readonly position: { readonly x: number; readonly y: number; readonly z: number };
     readonly distance: number;
     readonly hostile: boolean;
-  }[];
-  readonly blocks: readonly {
-    readonly x: number;
-    readonly y: number;
-    readonly z: number;
-    readonly name: string;
-    /** Namespaced identifier shown to operators; derived from the observed canonical block name. */
-    readonly identifier: string;
-    readonly type: number | null;
-    readonly boundingBox: string | null;
-    readonly distance: number | null;
-    /** `visible`/`occluded` are Mineflayer line-of-sight results; `unknown` is never upgraded to visible. */
-    readonly visibility: "visible" | "occluded" | "unknown";
-    readonly hazard: boolean;
-    /** Highlighted on the map: a resource block, or the block the current task is about. */
-    readonly resource: boolean;
-    /** True only for a prior-observation memory marker; false for blocks seen in this observation's local or strategic scan. */
-    readonly remembered?: boolean;
-    /** Where this block came from: the current observation or the world model's memory of an older one. */
-    readonly source?: "observation" | "memory";
-    readonly observationKind: "local" | "strategic" | "memory";
-    readonly observedAt: string | null;
   }[];
   /**
    * How the world panel's data relates to the live session. `live-observation` means every field below

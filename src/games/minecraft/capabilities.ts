@@ -17,6 +17,7 @@ export const MINECRAFT_PLACE_TABLE_CAPABILITY = "minecraft.place_crafting_table"
 export const MINECRAFT_PICKUP_ITEM_CAPABILITY = "minecraft.pickup_item";
 export const MINECRAFT_HARVEST_BERRIES_CAPABILITY = "minecraft.harvest_berries";
 export const MINECRAFT_REST_CAPABILITY = "minecraft.rest";
+export const MINECRAFT_SWIM_TO_SURFACE_CAPABILITY = "minecraft.swim_to_surface";
 export const MINECRAFT_MINE_BLOCK_CAPABILITY = "minecraft.mine_block";
 export const MINECRAFT_PLACE_BLOCK_CAPABILITY = "minecraft.place_block";
 export const MINECRAFT_BUILD_SHELTER_CAPABILITY = "minecraft.build_shelter";
@@ -191,6 +192,15 @@ export const minecraftHarvestBerriesInputSchema = z
     dangerRadius: z.number().finite().min(2).max(16).default(6),
   })
   .strict();
+
+/** Swim toward the nearest standable shore within `maxDistance` blocks, rising until the head is out of water. */
+export const minecraftSwimToSurfaceInputSchema = z
+  .object({
+    maxDistance: z.number().int().min(1).max(16).default(8),
+  })
+  .strict();
+
+export type MinecraftSwimToSurfaceInput = z.infer<typeof minecraftSwimToSurfaceInputSchema>;
 
 export const minecraftRestInputSchema = z
   .object({
@@ -374,6 +384,15 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     inputSchema: minecraftHarvestBerriesInputSchema,
     defaultTimeoutMs: 30_000,
     maxTimeoutMs: 60_000,
+    risk: "low",
+  },
+  {
+    name: MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
+    description:
+      "Leave water: rise and swim toward the nearest standable shore within the given distance until the head is out of water. Confirmed only by observed state, never by the command alone.",
+    inputSchema: minecraftSwimToSurfaceInputSchema,
+    defaultTimeoutMs: 12_000,
+    maxTimeoutMs: 20_000,
     risk: "low",
   },
   {

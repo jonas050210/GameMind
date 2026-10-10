@@ -1,5 +1,5 @@
 import type { MinecraftObservation } from "./observation.js";
-import { isHazardBlockName } from "./block-classes.js";
+import { isHazardBlockName, isWaterBlockName } from "./block-classes.js";
 
 export interface RouteAssessment {
   readonly sampledColumns: number;
@@ -55,7 +55,9 @@ export class LocalTerrainModel {
         water: false,
       };
       column.names.add(block.name);
-      const hazard = isHazardBlockName(block.name);
+      // Water is a route hazard for planning (a path through a lake costs more and is not preferred). It is not a
+      // reason to flee: the swim reflex handles the agent once it is in the water.
+      const hazard = isHazardBlockName(block.name) || isWaterBlockName(block.name);
       // Fluids can be represented with version-dependent bounding boxes. They are route hazards, not
       // solid obstacles; counting both would exaggerate the same evidence.
       if (!hazard && block.boundingBox === "block" && block.position.y >= this.playerY && block.position.y <= this.playerY + 1) {

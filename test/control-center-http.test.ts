@@ -48,7 +48,7 @@ test("the served page receives the control token and no unreplaced placeholder",
     assert.doesNotMatch(html, /__CONTROL_TOKEN__|__BANNER__|__TITLE__/);
     assert.ok(html.includes(handle.token), "the token is injected for the page's own POSTs");
     assert.match(html, /<script type="module" src="\.\/app\.js">/);
-    const assets = await Promise.all(["app.js", "world-view.js", "styles.css"].map((name) => fetch(`${handle.url}${name}`)));
+    const assets = await Promise.all(["app.js", "styles.css"].map((name) => fetch(`${handle.url}${name}`)));
     for (const asset of assets) assert.equal(asset.status, 200);
   } finally {
     await handle.stop("test complete");

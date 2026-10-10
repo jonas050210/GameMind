@@ -3,6 +3,7 @@ import { observedHazards } from "./block-classes.js";
 import { heldItems } from "./inventory-accounting.js";
 import { isMinecraftFoodName } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { DROWNING_ACTION_BLOCK_AIR_TICKS, DROWNING_SURFACE_AIR_TICKS } from "../../core/survival-thresholds.js";
 
 /**
  * Reflexes are the fast, pure layer of the agent. They read one fresh observation (and optionally the one
@@ -22,7 +23,13 @@ export const REFLEX_THRESHOLDS = {
   hostileNearDistance: 8,
   hazardUrgentDistance: 2,
   /** Air ticks (0..300, full = 300). Below this the agent is drowning or about to. */
-  drowningAirTicks: 60,
+  /** Land reflex: same threshold the safety broker uses to refuse stationary actions (one source, see survival-thresholds). */
+  drowningAirTicks: DROWNING_ACTION_BLOCK_AIR_TICKS,
+  /**
+   * Air ticks below which a submerged head is urgent: a full breath is 300 and air drains one tick at a time
+   * underwater, so 200 leaves about ten seconds to reach the surface.
+   */
+  submergedUrgentAirTicks: DROWNING_SURFACE_AIR_TICKS,
   /** A fall of this many blocks between two fresh observations, without standing on the ground. */
   fallDropBlocks: 3,
   /** Observations older than this cannot justify an action decision. */
@@ -39,6 +46,7 @@ export const REFLEX_CODES = [
   "HOSTILE_CLOSE",
   "HOSTILE_NEAR",
   "HAZARD_NEAR",
+  "IN_WATER",
   "DROWNING",
   "FALLING",
   "MOVEMENT_STALLED",
@@ -153,11 +161,34 @@ export function assessReflex(
     });
   }
 
-  if (state.player.oxygenLevel !== null && state.player.oxygenLevel < REFLEX_THRESHOLDS.drowningAirTicks) {
+  if (state.player.oxygenLevel !== null && state.player.oxygenLevel <= REFLEX_THRESHOLDS.drowningAirTicks) {
     add({
       code: "DROWNING",
       severity: "urgent",
       detail: `Air is ${Math.round(state.player.oxygenLevel)}/300 ticks.`,
+      distance: null,
+    });
+  }
+
+  // Water is a state the agent is in, not a hazard next to it. Surfacing is the response; fleeing is not.
+  const headInWater = state.player.headInWater === true;
+  const air = state.player.oxygenLevel;
+  if (headInWater && (air === null || air <= REFLEX_THRESHOLDS.submergedUrgentAirTicks)) {
+    add({
+      code: "DROWNING",
+      severity: "urgent",
+      detail: air === null
+        ? "Head is under water and the air supply is not reported; surface now."
+        : `Head is under water with ${Math.round(air)}/300 air ticks left; surface now.`,
+      distance: null,
+    });
+  } else if (state.player.inWater === true || headInWater) {
+    add({
+      code: "IN_WATER",
+      severity: "notice",
+      detail: headInWater
+        ? `Head is under water with ${air === null ? "unknown" : Math.round(air)} air ticks.`
+        : "Body is in water.",
       distance: null,
     });
   }
@@ -197,6 +228,31 @@ export function assessReflex(
 }
 
 /** Urgent reason codes that appear now but were not urgent in the previous assessment (edge trigger). */
+/** A world snapshot a decision was computed from, and the snapshot as it is now. */
+export interface ObservedSnapshot {
+  readonly state: MinecraftObservation;
+  readonly sequence: number;
+  readonly observedAt: string;
+}
+
+/**
+ * Urgent reflexes present in `latest` that the decision's own basis did not have. A non-empty result means a decision
+ * made from `decision` must not be dispatched as it is: the world changed in a way that demands an immediate response.
+ * Pure, so the stale-decision guard in the task runner can be tested without a running agent.
+ */
+export function urgentReflexesSince(decision: ObservedSnapshot, latest: ObservedSnapshot): readonly ReflexCode[] {
+  if (latest.sequence === decision.sequence) return [];
+  const basis = assessReflex(decision.state, null, {
+    observationSequence: decision.sequence,
+    observedAt: decision.observedAt,
+  });
+  const now = assessReflex(latest.state, decision.state, {
+    observationSequence: latest.sequence,
+    observedAt: latest.observedAt,
+  });
+  return newlyUrgent(now, basis);
+}
+
 export function newlyUrgent(current: ReflexAssessment, previous: ReflexAssessment | null): readonly ReflexCode[] {
   const before = new Set(previous?.urgentCodes ?? []);
   return current.urgentCodes.filter((code) => !before.has(code));

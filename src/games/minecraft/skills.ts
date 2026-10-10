@@ -7,6 +7,8 @@ import {
   MINECRAFT_PICKUP_ITEM_CAPABILITY,
   MINECRAFT_PLACE_TABLE_CAPABILITY,
   MINECRAFT_REST_CAPABILITY,
+  MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
+  minecraftSwimToSurfaceInputSchema,
   MINECRAFT_MINE_BLOCK_CAPABILITY,
   MINECRAFT_PLACE_BLOCK_CAPABILITY,
   MINECRAFT_BUILD_SHELTER_CAPABILITY,
@@ -94,6 +96,12 @@ export const minecraftSkills: readonly SkillDefinition[] = [
     description: "Harvest one observed ripe sweet berry bush (age 2 or 3) and confirm that berries entered the inventory.",
     capability: MINECRAFT_HARVEST_BERRIES_CAPABILITY,
     inputSchema: minecraftHarvestBerriesInputSchema,
+  },
+  {
+    id: "minecraft.swim-to-surface",
+    description: "Leave water by swimming to the nearest shore and rising until the head is out of water. Used for drowning and water exit.",
+    capability: MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
+    inputSchema: minecraftSwimToSurfaceInputSchema,
   },
   {
     id: "minecraft.rest",

@@ -7,7 +7,7 @@ import { MemoryTraceSink, TraceRecorder } from "../src/core/trace.js";
 import type { AdapterAction, CapabilityDefinition } from "../src/core/types.js";
 import { REFLEX_CODES } from "../src/games/minecraft/reflex.js";
 import { REFLEX_PROTECTED_CAPABILITIES } from "../src/games/minecraft/attach-control-center.js";
-import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY, MINECRAFT_EAT_CAPABILITY, MINECRAFT_INSPECT_BLOCK_CAPABILITY, MINECRAFT_LOOK_CAPABILITY } from "../src/games/minecraft/capabilities.js";
+import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY, MINECRAFT_EAT_CAPABILITY, MINECRAFT_INSPECT_BLOCK_CAPABILITY, MINECRAFT_LOOK_CAPABILITY, MINECRAFT_SWIM_TO_SURFACE_CAPABILITY } from "../src/games/minecraft/capabilities.js";
 
 /**
  * An adapter whose action runs until it is aborted or a long deadline passes. It stands in for a movement that
@@ -56,12 +56,14 @@ function capability(name: string): CapabilityDefinition {
   };
 }
 
-test("reflex protection: eating, attacking, looking and inspecting are never interrupted by a reflex", () => {
+test("reflex protection: eating, attacking, looking, inspecting and swimming out of water are never interrupted by a reflex", () => {
+  // Swimming out of water is protected too: a hostile on the shore must not stop the agent from breathing.
   assert.deepEqual([...REFLEX_PROTECTED_CAPABILITIES].sort(), [
     MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
     MINECRAFT_EAT_CAPABILITY,
     MINECRAFT_INSPECT_BLOCK_CAPABILITY,
     MINECRAFT_LOOK_CAPABILITY,
+    MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
   ].sort());
   assert.ok(REFLEX_CODES.includes("CRITICAL_HEALTH"));
 });
