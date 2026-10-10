@@ -65,6 +65,7 @@ import {
   SimulatedMinecraftWorld,
   type SimWorldDefinition,
 } from "./world.js";
+import { standingReaches } from "../../games/minecraft/reach.js";
 
 /** Virtual milliseconds a player-tossed item stays uncollectable (Java uses a short pickup delay). */
 const PLAYER_DROP_PICKUP_DELAY_MS = 1_000;
@@ -396,10 +397,13 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
 
   /** Path to any standable cell within `range` of the target, using the world's BFS. */
   private pathNear(target: { x: number; y: number; z: number }, range: number) {
-    return this.world.findPath(
-      (x, z) =>
-        Math.hypot(x + 0.5 - (target.x + 0.5), z + 0.5 - (target.z + 0.5)) <= range &&
-        Math.abs(this.world.standingY - target.y) <= 2,
+    return this.world.findPath((x, z) =>
+      standingReaches(
+        this.world.standingY,
+        target,
+        Math.hypot(x + 0.5 - (target.x + 0.5), z + 0.5 - (target.z + 0.5)),
+        range,
+      ),
     );
   }
 
@@ -433,7 +437,8 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     const to = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
     const horizontalDistance = Math.hypot(to.x - (x + 0.5), to.z - (z + 0.5));
     const verticalDistance = Math.abs(to.y - y);
-    const confirmed = horizontalDistance <= range + 1.25 && verticalDistance <= 2;
+    const confirmed =
+      horizontalDistance <= range + 1.25 && standingReaches(to.y, { x, y, z }, horizontalDistance, range + 1.25);
     return {
       confirmed,
       confirmation: "simulated_goal_reached_and_position_checked",

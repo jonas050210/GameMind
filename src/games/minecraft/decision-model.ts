@@ -74,7 +74,9 @@ const APPROACH_EXTRA_RANGE = 32;
 /** Keep the player close enough for the ordinary local observation to refresh a remembered bush. */
 const BERRY_RECHECK_LOCAL_RADIUS = 6;
 /** The adapter's default navigation limit; do not send a recheck farther than that. */
-const MAX_NAVIGATION_DISTANCE = 48;
+export const MAX_NAVIGATION_DISTANCE = 48;
+/** Leave a margin under the navigator limit, so a stepped goal is always accepted. */
+const NAVIGATION_STEP = MAX_NAVIGATION_DISTANCE - 4;
 /** A hazard block this close to the player triggers the safety goal of moving away. */
 const HAZARD_FLEE_DISTANCE = 2.5;
 /** Night, low health, or a hostile within this many blocks makes "close the shelter" a survival goal. */
@@ -888,8 +890,7 @@ function mineCandidates(
         context,
         BAND_PROGRESS,
         "approach",
-        block.name,
-      );
+        block.name, state.player.position);
       if (approach) candidates.push(approach);
       continue;
     }
@@ -1112,8 +1113,7 @@ function foodSourceCandidates(
           context,
           BAND_SURVIVAL,
           "approach:item",
-          `dropped ${item.name}`,
-        );
+          `dropped ${item.name}`, state.player.position);
         if (approach) candidates.push(approach);
         continue;
       }
@@ -1178,8 +1178,7 @@ function foodSourceCandidates(
           context,
           BAND_SURVIVAL,
           "approach:berry",
-          "ripe sweet berry bush",
-        );
+          "ripe sweet berry bush", state.player.position);
         if (approach) candidates.push(approach);
         continue;
       }
@@ -1374,7 +1373,7 @@ function gatherCandidates(
           priorityBand: BAND_PROGRESS,
           score: 525 - block.distance - route.risk,
           skillId: inspect ? "minecraft.inspect-block" : "minecraft.navigate",
-          input: inspect ? { ...block.position } : { ...block.position, range: 3 },
+          input: inspect ? { ...block.position } : { ...navigableGoal(state.player.position, block.position), range: 3 },
           targetKey: refreshKey,
           rationale: `World memory last saw ${task.resourceName} at ${block.key}, but the current observation does not confirm it. ${inspect ? "Inspect the exact block" : "Approach the remembered position"} before attempting collection. Current direct-corridor evidence: ${route.summary} (${route.confidence}).`,
         });
@@ -1390,8 +1389,7 @@ function gatherCandidates(
         context,
         BAND_PROGRESS,
         "approach",
-        task.resourceName,
-      );
+        task.resourceName, state.player.position);
       if (approach) {
         const route = terrain.assessRoute({ x: block.position.x + 0.5, z: block.position.z + 0.5 });
         candidates.push({
@@ -1437,6 +1435,25 @@ function nearbySafeLogs(
  * (within a bounded radius of the task origin) is the progress step; the collection then runs when
  * the target is in range and has been re-observed.
  */
+/**
+ * The navigator refuses a goal farther than MAX_NAVIGATION_DISTANCE from the bot. A farther target is approached
+ * in steps: the goal becomes a point on the straight line toward it, at the bot's own height. The next decision
+ * continues from there, so progress is kept without asking for an unreachable goal.
+ */
+export function navigableGoal(
+  from: { readonly x: number; readonly y: number; readonly z: number },
+  to: { readonly x: number; readonly y: number; readonly z: number },
+): { x: number; y: number; z: number } {
+  const distance = Math.hypot(to.x - from.x, to.y - from.y, to.z - from.z);
+  if (distance <= NAVIGATION_STEP) return { x: to.x, y: to.y, z: to.z };
+  const fraction = NAVIGATION_STEP / distance;
+  return {
+    x: Math.round(from.x + (to.x - from.x) * fraction),
+    y: Math.floor(from.y),
+    z: Math.round(from.z + (to.z - from.z) * fraction),
+  };
+}
+
 function approachCandidate(
   target: { readonly name: string; readonly key: string; readonly position: { x: number; y: number; z: number }; readonly distance: number },
   task: MinecraftTask,
@@ -1445,6 +1462,7 @@ function approachCandidate(
   band: number,
   goalPrefix: string,
   rationaleSubject: string,
+  from: { readonly x: number; readonly y: number; readonly z: number },
 ): DecisionCandidate | null {
   if (target.distance <= task.maxTargetDistance || target.distance > task.maxTargetDistance + APPROACH_EXTRA_RANGE) return null;
   if (nearbyDanger(centerOf(target.position), threats.visibleHostiles, task.dangerRadius)) return null;
@@ -1457,7 +1475,7 @@ function approachCandidate(
     priorityBand: band,
     score: 350 - target.distance,
     skillId: "minecraft.navigate",
-    input: { x: target.position.x, y: target.position.y, z: target.position.z, range: 3 },
+    input: { ...navigableGoal(from, target.position), range: 3 },
     targetKey,
     rationale: `The remembered ${rationaleSubject} is ${target.distance.toFixed(1)} blocks away, beyond the ${task.maxTargetDistance}-block collection limit; approach it before collecting.`,
   };
@@ -1572,8 +1590,7 @@ function plankProductionCandidate(
         context,
         BAND_PROGRESS,
         "approach",
-        `${block.name} needed for planks`,
-      );
+        `${block.name} needed for planks`, state.player.position);
       if (approach) return approach;
     }
   }
