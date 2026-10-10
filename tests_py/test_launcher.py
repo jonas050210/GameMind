@@ -463,5 +463,53 @@ class MainFlow(unittest.TestCase):
         self.assertIn("Control Center port 8787 is already in use", "\n".join(lines))
 
 
+class OptionalToolsTest(unittest.TestCase):
+    def _run(self, outputs):
+        def fake_run(argv, **kwargs):
+            key = argv[0].rsplit("/", 1)[-1]
+            text = outputs.get(key)
+            if text is None:
+                raise OSError("missing")
+            return mock.Mock(returncode=text[0], stdout=text[1], stderr=text[2])
+        return fake_run
+
+    def test_missing_tools_are_reported_but_never_block(self):
+        tools = checks.check_optional_tools("Linux", which=lambda name: None, run=self._run({}))
+        self.assertEqual([t.name for t in tools], ["Java", "Docker"])
+        self.assertTrue(all(not t.found for t in tools))
+        self.assertIn("not found", tools[1].render())
+
+    def test_java_version_is_read_from_stderr(self):
+        which = {"java": "/usr/bin/java", "docker": None}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"java": (0, "", 'openjdk version "21.0.2" 2024-01-16\n')}),
+        )
+        self.assertTrue(tools[0].found)
+        self.assertIn("21.0.2", tools[0].version)
+
+    def test_docker_installed_but_engine_down_says_so(self):
+        which = {"docker": "/usr/bin/docker"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"docker": (1, "", "Cannot connect to the Docker daemon")}),
+        )
+        docker = tools[1]
+        self.assertFalse(docker.found)
+        self.assertIn("engine does not answer", docker.hint)
+
+    def test_docker_with_running_engine_is_found(self):
+        which = {"docker": "/usr/bin/docker"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"docker": (0, "27.3.1\n", "")}),
+        )
+        self.assertTrue(tools[1].found)
+        self.assertIn("27.3.1", tools[1].version)
+
+
 if __name__ == "__main__":
     unittest.main()

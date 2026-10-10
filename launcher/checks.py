@@ -182,3 +182,89 @@ def choose_control_port(
         if is_free(host, candidate):
             return candidate, None
     return None, Problem("NO_FREE_PORT", f"No free port between {preferred} and {preferred + span} on {host}.", "Pass --control-port 0 to let the system pick one.")
+
+
+@dataclass(frozen=True)
+class Tool:
+    """An optional tool. Missing tools never stop GameMind; they only limit what can be started from the page."""
+
+    name: str
+    found: bool
+    version: Optional[str]
+    needed_for: str
+    hint: str
+
+    def render(self) -> str:
+        if self.found:
+            return f"{self.name}: {self.version or 'found'}"
+        return f"{self.name}: not found ({self.needed_for}). {self.hint}"
+
+
+def _first_line(text: str) -> Optional[str]:
+    for line in (text or "").splitlines():
+        if line.strip():
+            return line.strip()[:120]
+    return None
+
+
+def check_optional_tools(
+    system: str,
+    which: Callable[[str], Optional[str]] = shutil.which,
+    run: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+) -> list[Tool]:
+    """Java (only needed by a Minecraft client or server on this machine) and Docker (needed for the offline test server).
+
+    Each probe has a short timeout, so a broken install cannot hang the launcher.
+    """
+    windows = system.lower() == "windows"
+    tools: list[Tool] = []
+
+    java = find_executable(["java.exe", "java"] if windows else ["java"], which)
+    java_version: Optional[str] = None
+    if java:
+        try:
+            result = run([java, "-version"], capture_output=True, text=True, timeout=10, check=False)
+            java_version = _first_line(result.stderr or result.stdout or "")
+        except (OSError, subprocess.SubprocessError):
+            java_version = None
+    tools.append(
+        Tool(
+            "Java",
+            found=bool(java),
+            version=java_version,
+            needed_for="a Minecraft server you run yourself",
+            hint="Only needed if you run a Minecraft server on this machine; install Temurin 21 from adoptium.net.",
+        )
+    )
+
+    docker = find_executable(["docker.exe", "docker"] if windows else ["docker"], which)
+    docker_version: Optional[str] = None
+    daemon_ok = False
+    if docker:
+        try:
+            result = run([docker, "version", "--format", "{{.Server.Version}}"], capture_output=True, text=True, timeout=10, check=False)
+            daemon_ok = result.returncode == 0 and bool((result.stdout or "").strip())
+            docker_version = f"server {result.stdout.strip()}" if daemon_ok else None
+        except (OSError, subprocess.SubprocessError):
+            daemon_ok = False
+    if docker and not daemon_ok:
+        tools.append(
+            Tool(
+                "Docker",
+                found=False,
+                version=None,
+                needed_for="the offline test server",
+                hint="Docker is installed but its engine does not answer. Start Docker Desktop (or the docker service in WSL) and try again.",
+            )
+        )
+    else:
+        tools.append(
+            Tool(
+                "Docker",
+                found=bool(docker),
+                version=docker_version,
+                needed_for="the offline test server",
+                hint="Install Docker Desktop with WSL integration, then start it.",
+            )
+        )
+    return tools

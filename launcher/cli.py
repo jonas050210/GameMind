@@ -172,6 +172,7 @@ def main(
     problems += dependency_problems
 
     mount_warning = checks.check_windows_mount(root, plat.wsl)
+    optional_tools = checks.check_optional_tools(system)
     data_dir = root / "data"
     running = checks.existing_instance(data_dir)
 
@@ -191,6 +192,8 @@ def main(
             out(f"Running:      GameMind is already running (process {running.get('pid')}) at {running.get('url') or 'an unknown address'}")
         if mount_warning:
             out(f"Warning:      {mount_warning}")
+        for tool in optional_tools:
+            out(f"Optional:     {tool.render()}")
         for problem in problems:
             out(f"Problem:      {problem.render()}")
         out("Environment OK." if not problems else f"{len(problems)} problem(s) found.")
@@ -223,6 +226,9 @@ def main(
                 out(f"Note: nothing answers at {decision.host}:{port} right now ({status}). GameMind will still start and explain the failure; start Minecraft (or open the world to LAN) and connect from the page.")
     if mount_warning:
         out(f"Note: {mount_warning}")
+    for tool in optional_tools:
+        if not tool.found:
+            out(f"Note: {tool.render()}")
 
     command = process.build_command(node, root, agent_arguments(args, control_port, host))
     if args.verbose:
