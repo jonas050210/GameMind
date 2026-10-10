@@ -7,7 +7,10 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { MinecraftTaskDecisionModel } from "../src/games/minecraft/decision-model.js";
+import { buildShelterTaskSchema, gatherResourceTaskSchema } from "../src/games/minecraft/task.js";
 import type { FakeElement } from "./support/fake-dom.js";
+import { block, observationAt } from "./support/observations.js";
 import { bootPage, loadUi, stubServer, type BootedPage, type StubServer } from "./support/ui-harness.js";
 import { capturedData, clone } from "./support/ui-fixtures.js";
 
@@ -614,6 +617,74 @@ async function openTraining(stub: StubServer, run: (booted: BootedPage) => Promi
     await run(booted);
   });
 }
+
+// ---- decisions ------------------------------------------------------------------------------------------------
+
+const decisionSkills = new Set([
+  "minecraft.navigate", "minecraft.collect-log", "minecraft.mine-block", "minecraft.place-block", "minecraft.build-shelter",
+  "minecraft.eat-food", "minecraft.pickup-item", "minecraft.rest", "minecraft.orient", "minecraft.inspect-block",
+]);
+
+interface DecisionData {
+  summary: string;
+  blockingCode?: string | null;
+  selected: { goalId: string; targetKey: string | null; input: unknown; rationale: string } | null;
+  alternatives: Array<{ targetKey: string | null }>;
+  rejected: Array<{ reason: string; detail: string; targetKey: string | null }>;
+}
+
+/** A decision from the real decision model, shaped as the snapshot carries it (the trace event's view). */
+function realDecision(state: Parameters<MinecraftTaskDecisionModel["decide"]>[0], task: Parameters<MinecraftTaskDecisionModel["decide"]>[1]): { event: Record<string, unknown>; data: DecisionData } {
+  const record = new MinecraftTaskDecisionModel().decide(state, task, { excludedTargets: new Set<string>(), previousFailureCode: null, availableSkills: decisionSkills }, 1);
+  const data = JSON.parse(JSON.stringify(record)) as DecisionData;
+  return { event: { traceId: "trace-1", eventType: "decision.made", timestamp: new Date().toISOString(), correlationId: null, data }, data };
+}
+
+test("the Tasks tab explains the latest decision: what was chosen, what was rejected and why, and no block coordinates", async () => {
+  const lava = observationAt({ x: 0.5, y: 64, z: 0.5 }, { nearbyBlocks: [block("lava", 1, 64, 0), block("grass_block", 0, 63, 0), block("oak_log", 5, 64, 0)] });
+  const { event, data } = realDecision(lava, gatherResourceTaskSchema.parse({ id: "t", resourceName: "oak_log", targetCount: 1, maxActions: 10 }));
+  assert.equal(data.selected?.goalId, "avoid-hazard", "the fixture is the real model's answer, not a hand-written one");
+  const overtaken = data.rejected.find((entry) => entry.reason === "lower_band");
+  assert.ok(overtaken, "the real record explains the goal it put aside");
+  await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = [event]; }), async ({ page }) => {
+    const text = page.visibleText("tasks-decision");
+    assert.match(text, /Latest decision/);
+    assert.ok(text.includes(data.summary), "the model's own summary is shown");
+    assert.match(text, /avoid-hazard/);
+    assert.match(text, /Safety \(band 0\)/);
+    assert.ok(text.includes(data.selected?.rationale ?? "missing"), "the reason it chose this is shown verbatim");
+    assert.match(text, /Rejected candidates \(1\)/);
+    assert.match(text, /lower band/);
+    assert.ok(text.includes(overtaken.detail), "the reason each candidate was dropped is the model's own detail text");
+    assert.match(text, /survival · single-source/, "the game mode the decision was made under is shown with its evidence");
+    assert.ok(!text.includes(data.selected?.targetKey ?? "missing"), "a target key holds block coordinates and is not shown");
+    assert.ok(!/"x"|"z"|\bx:|-4,64,5/.test(text), "a candidate's input is not dumped onto the page");
+  });
+});
+
+test("a decision that stopped the task shows its blocking code and reason, and a verdict the record lacks reads unknown", async () => {
+  const bare = observationAt({ x: 0.5, y: 64, z: 0.5 }, { nearbyBlocks: [block("grass_block", 0, 63, 0)], inventory: [] });
+  const { event, data } = realDecision(bare, buildShelterTaskSchema.parse({ id: "t-shelter", maxBlocks: 4, maxActions: 10 }));
+  assert.equal(data.selected, null);
+  assert.equal(data.blockingCode, "TASK_BLOCKED_SHELTER");
+  await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = [event]; }), async ({ page }) => {
+    const text = page.visibleText("tasks-decision");
+    assert.ok(text.includes("TASK_BLOCKED_SHELTER"), "the blocking code is a badge on the card");
+    assert.ok(text.includes(data.summary));
+    assert.match(text, /None: the model stopped without choosing/);
+    assert.ok(text.includes(data.rejected[0]?.detail ?? "missing"), "why the only candidate was dropped");
+    assert.match(text, /Safety verdict\s*unknown/, "no verdict was recorded, and the page does not make one up");
+    assert.ok(!/Exploration switch/.test(text), "a row that does not apply is left out rather than shown as unknown");
+  });
+});
+
+test("with no decision recorded the card says so instead of showing an empty table", async () => {
+  await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = []; }), async ({ page }) => {
+    const text = page.visibleText("tasks-decision");
+    assert.match(text, /No decision recorded yet/);
+    assert.ok(!/Alternatives considered|Rejected candidates/.test(text));
+  });
+});
 
 test("training defaults to resume, and a fresh start explains what it archives and waits for a confirmation", async () => {
   const stub = server(undefined, {

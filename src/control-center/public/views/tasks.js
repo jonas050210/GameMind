@@ -29,6 +29,91 @@ function active(snapshot, now) {
   );
 }
 
+const BAND_NAMES = ["Safety", "Survival", "Progress"];
+
+function bandText(band) {
+  return typeof band === "number" ? `${BAND_NAMES[band] ?? "Band"} (band ${band})` : null;
+}
+
+/** What the session reported about one fact when the decision was made, with the evidence behind it. */
+function factText(fact) {
+  if (!fact || typeof fact !== "object") return null;
+  return `${fact.value ?? "unknown"} · ${fact.evidence ?? "no evidence recorded"}`;
+}
+
+/**
+ * The newest decision the agent recorded, with what it weighed and why it dropped the rest. The fields are the decision
+ * record itself (the one written to the trace), not a summary made for this page. A candidate's `input` and `targetKey` are
+ * left out on purpose: they hold block coordinates, and the page does not publish those.
+ */
+function decision(snapshot, now) {
+  const latest = Array.isArray(snapshot.recentDecisions) ? snapshot.recentDecisions[0] : null;
+  const data = latest?.data;
+  if (!data || typeof data !== "object") {
+    return card(
+      { title: "Latest decision" },
+      empty("No decision recorded yet", "Each time the agent chooses its next step the choice is recorded here with the alternatives it weighed. Nothing is shown until a task or autonomy has made one."),
+    );
+  }
+  const selected = data.selected ?? null;
+  const alternatives = Array.isArray(data.alternatives) ? data.alternatives : [];
+  const rejected = Array.isArray(data.rejected) ? data.rejected : [];
+  const when = latest.timestamp ? fmtAgo(latest.timestamp, now) : null;
+  return card(
+    {
+      title: "Latest decision",
+      subtitle: [data.modelId, data.observationSequence !== undefined && data.observationSequence !== null ? `observation #${fmtNumber(data.observationSequence)}` : null, when].filter(Boolean).join(" · "),
+      actions: data.blockingCode ? badge(data.blockingCode, "warn") : null,
+    },
+    h("p", { class: "task-title" }, data.summary ?? "No summary was recorded for this decision."),
+    kv([
+      ["Chosen goal", selected ? selected.goalId : "None: the model stopped without choosing"],
+      ["Skill", selected?.skillId ?? null],
+      ["Priority band", bandText(selected?.priorityBand ?? data.band)],
+      ["Why", selected?.rationale ?? null],
+      ["Plan", Array.isArray(data.plan) && data.plan.length ? data.plan.join(" → ") : null],
+      ["Safety verdict", data.safety ? `${data.safety.allowed ? "allowed" : "refused"} · ${data.safety.code}: ${data.safety.message}` : null],
+      ["Game mode seen", factText(data.session?.gameMode)],
+      ["Dimension seen", factText(data.session?.dimension)],
+      // Only a decision that was a training switch has this row; for every other decision "unknown" would be wrong.
+      ...(data.exploration ? [["Exploration switch", "This choice was a recorded exploration switch made for training, not the model's first choice"]] : []),
+    ]),
+    alternatives.length
+      ? h(
+          "details",
+          null,
+          h("summary", null, `Alternatives considered (${fmtNumber(alternatives.length)})`),
+          table({
+            dense: true,
+            columns: [
+              { label: "Goal", cell: (a) => a.goalId },
+              { label: "Band", cell: (a) => bandText(a.priorityBand) ?? unknown("Not recorded.") },
+              { label: "Score", align: "right", cell: (a) => (typeof a.score === "number" ? fmtNumber(a.score, 2) : unknown("Not recorded.")) },
+              { label: "Why it was a candidate", cell: (a) => a.rationale ?? unknown("Not recorded.") },
+            ],
+            rows: alternatives.map((entry, index) => ({ key: `alt-${index}`, value: entry })),
+          }),
+        )
+      : h("p", { class: "muted small" }, "No other candidate was left to weigh."),
+    rejected.length
+      ? h(
+          "details",
+          null,
+          h("summary", null, `Rejected candidates (${fmtNumber(rejected.length)})`),
+          table({
+            dense: true,
+            columns: [
+              { label: "Goal", cell: (r) => r.goalId },
+              { label: "Reason", cell: (r) => humanise(r.reason) },
+              { label: "Detail", cell: (r) => r.detail ?? unknown("Not recorded.") },
+            ],
+            rows: rejected.map((entry, index) => ({ key: `rej-${index}`, value: entry })),
+          }),
+        )
+      : null,
+  );
+}
+
 function queue(snapshot) {
   const scheduler = snapshot.scheduler;
   const explanation = queueExplanation(snapshot);
@@ -105,6 +190,7 @@ export function renderTasks(ctx) {
     "tasks-active": active(snapshot, now),
     "tasks-queue": queue(snapshot),
     "objective-panel": objective(snapshot, now),
+    "tasks-decision": decision(snapshot, now),
     "tasks-history": historyCard(snapshot),
     "tasks-progression": progression(snapshot),
   };
