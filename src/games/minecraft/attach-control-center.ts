@@ -29,7 +29,6 @@ import { minecraftMineableBlockNames } from "./mining.js";
 import type { MinecraftTaskResult, MinecraftTaskRunnerOptions } from "./task-runner.js";
 import { createControlCenterSource, type RunControl } from "./run-control.js";
 import { ProgressTracker } from "./progress-tracker.js";
-import { LandmarkMemory } from "./landmark-memory.js";
 import { CompanionMemory } from "./companion-memory.js";
 import { CompanionController } from "./companion-controller.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
@@ -168,7 +167,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   };
   const memory = options.memory ?? new WorldMemory();
   const progressTracker = new ProgressTracker();
-  const landmarkMemory = new LandmarkMemory();
   const evaluationReportPath = options.evaluationReportPath ?? resolve("data/eval/offline-report.json");
   const evaluationScenarioIds = options.evaluationScenarioIds ?? [];
   // The dashboard polls the snapshot, so the host has nothing to push when state changes; `worldSource`
@@ -212,7 +210,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   function recordLandmarksFromObservation(state: import("./observation.js").MinecraftObservation, sequence: number): void {
     // Record resource-vein landmarks from minable sightings
     for (const sighting of state.minableSightings ?? []) {
-      landmarkMemory.record({
+      memory.landmarks.record({
         type: "resource-vein",
         position: sighting.position,
         label: `${sighting.name} deposit`,
@@ -222,7 +220,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     }
     // Record resource-vein landmarks from resource sightings (logs, etc.)
     for (const sighting of state.resourceSightings) {
-      landmarkMemory.record({
+      memory.landmarks.record({
         type: "resource-vein",
         position: sighting.position,
         label: `${sighting.name} source`,
@@ -233,7 +231,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     // Record danger-zone landmarks from observed hazards
     for (const block of state.nearbyBlocks) {
       if (block.name === "lava" || block.name === "magma_block" || block.name === "campfire") {
-        landmarkMemory.record({
+        memory.landmarks.record({
           type: "danger-zone",
           position: block.position,
           label: `${block.name} hazard`,
@@ -245,7 +243,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     // Record danger-zone landmarks from hostile entities
     for (const entity of state.entities) {
       if (entity.type === "hostile") {
-        landmarkMemory.record({
+        memory.landmarks.record({
           type: "danger-zone",
           position: { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) },
           label: `${entity.name} threat`,
@@ -319,7 +317,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     companion,
     taskFor: taskFromControlCenterRequest,
     progressTracker,
-    landmarkMemory,
+    landmarkMemory: memory.landmarks,
     ...(options.decorate ? { decorate: options.decorate } : {}),
     onStart: async (task) => {
       if (!control.task) {

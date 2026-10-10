@@ -4,6 +4,7 @@ import { distanceBetween, isResourceBlockName, isRipeBerryBush } from "./block-c
 import { isMineableBlockName } from "./mining.js";
 import { isMinecraftFoodName } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { LandmarkMemory, type Landmark } from "./landmark-memory.js";
 
 /** Side length of a coverage cell in blocks. Coverage is tracked on a coarse grid, not per block. */
 export const EXPLORATION_CELL_SIZE = 8;
@@ -55,17 +56,20 @@ export interface MemorySummary {
   readonly foodItems: number;
   readonly exploredCells: number;
   readonly trackedHostiles: number;
+  /** Number of persistent landmarks; optional so summaries from before landmark support stay valid. */
+  readonly landmarks?: number;
 }
 
 /** Persistent, world-scoped knowledge. Moving hostiles and transient item drops are deliberately excluded. */
 export interface WorldMemorySnapshot {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly worldKey: string;
   readonly savedAt: string;
   readonly observations: number;
   readonly blocks: readonly BlockSighting[];
   readonly minable: readonly BlockSighting[];
   readonly exploredCells: readonly string[];
+  readonly landmarks: readonly Landmark[];
 }
 
 const persistentBlockSightingSchema = z.object({
@@ -75,14 +79,30 @@ const persistentBlockSightingSchema = z.object({
   ripe: z.boolean().nullable(),
   lastSeenSequence: z.number().int(),
 });
+const persistentLandmarkSchema = z.object({
+  id: z.string(),
+  type: z.enum(["village", "shelter", "cave", "resource-vein", "danger-zone", "resource-cache"]),
+  position: z.object({ x: z.number().int(), y: z.number().int(), z: z.number().int() }),
+  label: z.string(),
+  createdAt: z.string(),
+  lastConfirmedSequence: z.number().int(),
+  metadata: z.object({
+    resourceName: z.string().optional(),
+    quantity: z.number().optional(),
+    depth: z.string().optional(),
+    hazardType: z.string().optional(),
+  }).optional(),
+});
+// Schema accepts v1 (schemaVersion 1, no landmarks) and v2 (schemaVersion 2, with landmarks).
 const worldMemorySnapshotSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
   worldKey: z.string().min(1),
   savedAt: z.string().datetime(),
   observations: z.number().int().nonnegative(),
   blocks: z.array(persistentBlockSightingSchema).max(8_192),
   minable: z.array(persistentBlockSightingSchema).max(8_192),
   exploredCells: z.array(z.string().regex(/^-?\d+,-?\d+$/)).max(100_000),
+  landmarks: z.array(persistentLandmarkSchema).max(1_024).optional(),
 });
 
 export function blockKey(position: MinecraftBlockPosition): string {
@@ -173,6 +193,8 @@ export class WorldMemory {
   private readonly items = new Map<string, ItemSighting>();
   private readonly hostiles = new Map<string, HostileSighting>();
   private readonly explored = new Set<string>();
+  /** Persistent landmarks: villages, shelters, resource veins, danger zones. Survive restarts. */
+  readonly landmarks = new LandmarkMemory();
   private observationCount = 0;
   private lastSequence = Number.NEGATIVE_INFINITY;
 
@@ -395,13 +417,14 @@ export class WorldMemory {
   /** Returns a compact snapshot for durable storage; transient hostiles and item drops are excluded. */
   exportSnapshot(worldKey: string, savedAt = new Date().toISOString()): WorldMemorySnapshot {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       worldKey,
       savedAt,
       observations: this.observationCount,
       blocks: [...this.blocks.values()].slice(-8_192),
       minable: [...this.mined.values()].slice(-8_192),
       exploredCells: [...this.explored].slice(-100_000),
+      landmarks: this.landmarks.all.slice(-1_024),
     };
   }
 
@@ -437,6 +460,26 @@ export class WorldMemory {
       this.mined.set(sighting.key, { ...sighting, lastSeenSequence: -1 });
     }
     for (const cell of parsed.data.exploredCells) this.explored.add(cell);
+
+    // Restore landmarks (v2 only; v1 snapshots have no landmarks and start fresh)
+    // Use the LandmarkMemory.fromJSON method for safe deserialization
+    if (parsed.data.landmarks) {
+      const landmarkData = { landmarks: parsed.data.landmarks };
+      const restored = LandmarkMemory.fromJSON(landmarkData);
+      // Discard stale danger-zone landmarks older than maxAgeMs; keep everything else
+      const cutoff = Date.now() - maxAgeMs;
+      for (const lm of restored.all) {
+        if (lm.type === "danger-zone" && Date.parse(lm.createdAt) < cutoff) continue;
+        this.landmarks.record({
+          type: lm.type,
+          position: lm.position,
+          label: lm.label,
+          sequence: lm.lastConfirmedSequence,
+          ...(lm.metadata ? { metadata: lm.metadata } : {}),
+        });
+      }
+    }
+
     return true;
   }
 
@@ -453,6 +496,7 @@ export class WorldMemory {
       exploredCells: this.explored.size,
       trackedHostiles: this.hostiles.size,
       minableBlocks: this.mined.size,
+      landmarks: this.landmarks.size,
     };
   }
 }
