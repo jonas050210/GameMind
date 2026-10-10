@@ -169,7 +169,8 @@ test("separation: the training code path never loads the Minecraft client, the l
       }
     }
   }
-  const relative = [...seen].map((file) => file.slice(sourceRoot.length + 1));
+  // `path.resolve`/`path.join` use backslashes on Windows; compare module names with one stable separator.
+  const relative = [...seen].map((file) => file.slice(sourceRoot.length + 1).replaceAll("\\", "/"));
   for (const forbidden of [
     "control-center/",
     "minecraft-adapter",

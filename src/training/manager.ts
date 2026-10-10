@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, openSync, mkdirSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { setPriority } from "node:os";
 import { readFile } from "node:fs/promises";
@@ -60,9 +60,27 @@ function tsxLoaderUrl(): string {
   }
 }
 
+function childPreloadPath(): string {
+  const here = fileURLToPath(import.meta.url);
+  return join(dirname(here), `child-preload${extname(here)}`);
+}
+
 function childArguments(entry: string): string[] {
-  // Under tsx (development) the TypeScript entry needs the loader; the compiled build runs plain JS.
-  return extname(entry) === ".ts" ? ["--import", tsxLoaderUrl(), entry] : [entry];
+  // The preload is TypeScript during development and JavaScript in a compiled build. Load tsx whenever
+  // either the preload or the requested entry needs it, then let Node load the actual entry normally.
+  const preload = childPreloadPath();
+  const needsTsx = extname(preload) === ".ts" || extname(entry) === ".ts";
+  return [
+    ...(needsTsx ? ["--import", tsxLoaderUrl()] : []),
+    "--import",
+    pathToFileURL(preload).href,
+    entry,
+  ];
+}
+
+interface ChildRunMetadata {
+  readonly logOffset: number;
+  readonly terminationMarker: string;
 }
 
 export class TrainingManager {
@@ -70,7 +88,9 @@ export class TrainingManager {
   private evaluator: ChildProcess | null = null;
   /** Why the most recent trainer failed to start or exited non-zero, when its state file has no error. */
   private launchError: string | null = null;
-  private readonly logOffsets = new WeakMap<ChildProcess, number>();
+  private runSequence = 0;
+  private readonly runMetadata = new WeakMap<ChildProcess, ChildRunMetadata>();
+  private readonly launchFailures = new WeakSet<ChildProcess>();
   private readonly paths: TrainingPaths;
 
   constructor(private readonly options: TrainingManagerOptions) {
@@ -85,16 +105,20 @@ export class TrainingManager {
 
   private spawnCli(args: string[], logFile: string): ChildProcess {
     mkdirSync(dirname(logFile), { recursive: true });
-    // The log is shared by every run, so the child's own output starts at this offset.
+    // The log is shared by every run, so the child's own output starts at this offset. The marker is unique
+    // to this child and lets the Windows preload preserve a self-termination signal that Node otherwise
+    // reports as the indistinguishable exit code 1.
     const offset = statSync(logFile, { throwIfNoEntry: false })?.size ?? 0;
+    const terminationMarker = `${logFile}.${process.pid}.${Date.now()}-${this.runSequence++}.termination`;
+    rmSync(terminationMarker, { force: true });
     const fd = openSync(logFile, "a");
     try {
       const child = spawn(process.execPath, [...childArguments(this.entry), ...args], {
         stdio: ["ignore", fd, fd],
-        env: process.env,
+        env: { ...process.env, GAMEMIND_TERMINATION_MARKER: terminationMarker },
         cwd: process.cwd(),
       });
-      this.logOffsets.set(child, offset);
+      this.runMetadata.set(child, { logOffset: offset, terminationMarker });
       // Training is background work. A lower scheduling priority keeps the live observation and safety loops
       // ahead of it when the machine is busy. Best effort: some platforms refuse the change, and that is fine.
       if (child.pid !== undefined) {
@@ -105,6 +129,9 @@ export class TrainingManager {
         }
       }
       return child;
+    } catch (error) {
+      rmSync(terminationMarker, { force: true });
+      throw error;
     } finally {
       closeSync(fd);
     }
@@ -142,12 +169,19 @@ export class TrainingManager {
     this.launchError = null;
     const child = this.spawnCli(args, this.paths.log);
     this.trainer = child;
-    child.on("exit", (code, signal) => {
+    child.on("exit", () => {
       if (this.trainer === child) this.trainer = null;
-      void this.noteUnexpectedExit(child, code, signal);
+    });
+    // `close` follows `exit` after the child's stdio handles are closed. Reading the shared log here avoids
+    // racing a final Windows file write while still scoping the excerpt to this child's starting offset.
+    child.on("close", (code, signal) => {
+      if (!this.launchFailures.has(child)) void this.noteUnexpectedExit(child, code, signal);
+      else this.discardRunMetadata(child);
     });
     child.on("error", (error) => {
       if (this.trainer === child) this.trainer = null;
+      this.launchFailures.add(child);
+      this.discardRunMetadata(child);
       this.launchError = `The training process could not start: ${error.message}`;
     });
     return {
@@ -194,8 +228,9 @@ export class TrainingManager {
     if (checkpointId) args.push("--checkpoint", checkpointId);
     const child = this.spawnCli(args, this.paths.log);
     this.evaluator = child;
-    child.on("exit", () => {
+    child.on("close", () => {
       if (this.evaluator === child) this.evaluator = null;
+      this.discardRunMetadata(child);
     });
     return { ok: true, message: "Evaluation started; the verdict appears here when it finishes." };
   }
@@ -224,17 +259,42 @@ export class TrainingManager {
    * A trainer that exits non-zero is reported with the last lines of its own log, so a crash at start-up
    * is never shown as "idle". A stop or pause the operator asked for is not an error and is not recorded.
    */
+  private discardRunMetadata(child: ChildProcess): void {
+    const metadata = this.runMetadata.get(child);
+    this.runMetadata.delete(child);
+    if (metadata) rmSync(metadata.terminationMarker, { force: true });
+  }
+
   private async noteUnexpectedExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
-    // Stop and pause are cooperative (a control file), so an operator stop exits 0 and is not recorded here.
-    if (code === 0) return;
-    // Only lines written by this child. A killed process writes no final line, so an unscoped tail would show an earlier run.
-    const offset = this.logOffsets.get(child) ?? 0;
-    this.logOffsets.delete(child);
-    const tail = await readFile(this.paths.log)
-      .then((bytes) => bytes.subarray(offset).toString("utf8").split("\n").filter((line) => line.trim() !== "").slice(-3).join(" | "))
-      .catch(() => "");
-    const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-    this.launchError = `The training process stopped with ${reason}.${tail ? ` Last log lines: ${tail.slice(0, 600)}` : ""}`;
+    const metadata = this.runMetadata.get(child);
+    this.runMetadata.delete(child);
+    try {
+      // Stop and pause are cooperative (a control file), so an operator stop exits 0 and is not recorded here.
+      if (code === 0) return;
+
+      // Only lines written by this child. A killed process writes no final line, so an unscoped tail would show an earlier run.
+      const [tail, recordedSignal] = await Promise.all([
+        metadata
+          ? readFile(this.paths.log)
+              .then((bytes) => bytes.subarray(metadata.logOffset).toString("utf8").split("\n").filter((line) => line.trim() !== "").slice(-3).join(" | "))
+              .catch(() => "")
+          : Promise.resolve(""),
+        metadata
+          ? readFile(metadata.terminationMarker, "utf8")
+              .then((value) => value.trim().split("\n")[0] === "SIGKILL" ? "SIGKILL" as const : null)
+              .catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      // On Windows Node maps a JavaScript self-SIGKILL to exit code 1 and signal null. The preload's marker
+      // recovers the signal without treating every genuine exit code 1 as a kill. Keep the raw code in the
+      // message too, since Windows has no general way to distinguish an external TerminateProcess call.
+      const effectiveSignal = signal ?? recordedSignal;
+      const windowsCode = recordedSignal && signal === null && code !== null ? ` (Windows reported exit code ${code})` : "";
+      const reason = effectiveSignal ? `signal ${effectiveSignal}${windowsCode}` : `exit code ${code}`;
+      this.launchError = `The training process stopped with ${reason}.${tail ? ` Last log lines: ${tail.slice(0, 600)}` : ""}`;
+    } finally {
+      if (metadata) rmSync(metadata.terminationMarker, { force: true });
+    }
   }
 
   async snapshot(): Promise<ControlCenterTraining> {
