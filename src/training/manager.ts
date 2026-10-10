@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { closeSync, openSync, mkdirSync } from "node:fs";
+import { closeSync, openSync, mkdirSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { setPriority } from "node:os";
 import { readFile } from "node:fs/promises";
@@ -70,6 +70,7 @@ export class TrainingManager {
   private evaluator: ChildProcess | null = null;
   /** Why the most recent trainer failed to start or exited non-zero, when its state file has no error. */
   private launchError: string | null = null;
+  private readonly logOffsets = new WeakMap<ChildProcess, number>();
   private readonly paths: TrainingPaths;
 
   constructor(private readonly options: TrainingManagerOptions) {
@@ -84,6 +85,8 @@ export class TrainingManager {
 
   private spawnCli(args: string[], logFile: string): ChildProcess {
     mkdirSync(dirname(logFile), { recursive: true });
+    // The log is shared by every run, so the child's own output starts at this offset.
+    const offset = statSync(logFile, { throwIfNoEntry: false })?.size ?? 0;
     const fd = openSync(logFile, "a");
     try {
       const child = spawn(process.execPath, [...childArguments(this.entry), ...args], {
@@ -91,6 +94,7 @@ export class TrainingManager {
         env: process.env,
         cwd: process.cwd(),
       });
+      this.logOffsets.set(child, offset);
       // Training is background work. A lower scheduling priority keeps the live observation and safety loops
       // ahead of it when the machine is busy. Best effort: some platforms refuse the change, and that is fine.
       if (child.pid !== undefined) {
@@ -223,8 +227,11 @@ export class TrainingManager {
   private async noteUnexpectedExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
     // Stop and pause are cooperative (a control file), so an operator stop exits 0 and is not recorded here.
     if (code === 0) return;
-    const tail = await readFile(this.paths.log, "utf8")
-      .then((text) => text.split("\n").filter((line) => line.trim() !== "").slice(-3).join(" | "))
+    // Only lines written by this child. A killed process writes no final line, so an unscoped tail would show an earlier run.
+    const offset = this.logOffsets.get(child) ?? 0;
+    this.logOffsets.delete(child);
+    const tail = await readFile(this.paths.log)
+      .then((bytes) => bytes.subarray(offset).toString("utf8").split("\n").filter((line) => line.trim() !== "").slice(-3).join(" | "))
       .catch(() => "");
     const reason = signal ? `signal ${signal}` : `exit code ${code}`;
     this.launchError = `The training process stopped with ${reason}.${tail ? ` Last log lines: ${tail.slice(0, 600)}` : ""}`;

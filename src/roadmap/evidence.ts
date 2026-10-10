@@ -1,5 +1,6 @@
 import { createReadStream } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
+import { episodeProvenanceOf, type EpisodeProvenance } from "../core/learning/episode.js";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { readTrainingState, trainingPaths } from "../training/state.js";
@@ -48,6 +49,8 @@ export interface TrainingEvidence {
 export interface EpisodeEvidence {
   readonly measuredAt: string | null;
   readonly total: number;
+  /** Rows by provenance class (simulator, training, live, unlabelled). Absent in evidence built before the field existed. */
+  readonly byProvenance?: Readonly<Record<string, number>>;
   readonly failureCodes: Readonly<Record<string, number>>;
   readonly skills: Readonly<Record<string, { attempts: number; successes: number }>>;
   readonly sources: readonly string[];
@@ -203,6 +206,7 @@ async function loadEpisodes(files: readonly string[]): Promise<{ evidence: Episo
   let total = 0;
   let latest: string | null = null;
   const used: string[] = [];
+  const byProvenance: Record<string, number> = {};
   for (const file of files) {
     let found = false;
     try {
@@ -218,6 +222,13 @@ async function loadEpisodes(files: readonly string[]): Promise<{ evidence: Episo
         }
         if (!isRecord(episode) || !isRecord(episode.outcome) || !isRecord(episode.features)) continue;
         total += 1;
+        const provenance = episodeProvenanceOf({
+          provenance: typeof episode.provenance === "string" ? (episode.provenance as EpisodeProvenance) : undefined,
+          runId: typeof episode.runId === "string" ? episode.runId : "",
+          worldKey: typeof episode.worldKey === "string" ? episode.worldKey : null,
+          sessionId: typeof episode.sessionId === "string" ? episode.sessionId : null,
+        }).provenance;
+        byProvenance[provenance] = (byProvenance[provenance] ?? 0) + 1;
         const outcome = episode.outcome;
         const features = episode.features;
         const code = typeof outcome.failureCode === "string" ? outcome.failureCode : null;
@@ -237,7 +248,7 @@ async function loadEpisodes(files: readonly string[]): Promise<{ evidence: Episo
   }
   if (used.length === 0) return { evidence: null, sources };
   return {
-    evidence: { measuredAt: latest, total, failureCodes, skills, sources: used },
+    evidence: { measuredAt: latest, total, byProvenance, failureCodes, skills, sources: used },
     sources,
   };
 }

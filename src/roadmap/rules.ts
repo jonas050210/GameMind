@@ -1,6 +1,16 @@
 import type { EvidenceBundle } from "./evidence.js";
 import type { RoadmapCandidate, RoadmapCategory, RoadmapEvidence } from "./model.js";
 
+/** Source mix of the episode evidence, so a reader can see how much of a number is simulator data. */
+function provenanceMix(episodes: { readonly total: number; readonly byProvenance?: Readonly<Record<string, number>> }): string {
+  if (!episodes.byProvenance) return "source mix not recorded";
+  const parts = Object.entries(episodes.byProvenance)
+    .sort((a, b) => b[1] - a[1])
+    .map(([kind, count]) => `${kind} ${count}`);
+  return parts.join(", ");
+}
+
+
 /**
  * Turns evidence into roadmap candidates. Each rule has a fixed threshold, so a finding appears only when the
  * recorded numbers cross it. Related findings share a fingerprint and are grouped into one item.
@@ -231,7 +241,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
         explanation:
           "This failure code is recorded repeatedly in episodes. The episode records hold the action and target features, but the cause is not identified from the count alone.",
         evidence: [
-          { source: "episode store", metric: "episodes with this code", value: `${count} of ${episodes.total} (${pct(count / episodes.total)})`, measuredAt: episodes.measuredAt },
+          { source: `episode store (${provenanceMix(episodes)})`, metric: "episodes with this code", value: `${count} of ${episodes.total} (${pct(count / episodes.total)})`, measuredAt: episodes.measuredAt },
         ],
         expectedBenefit: "Fewer episodes end in this failure, which raises training throughput and clarifies the policy's signal.",
         effort: 2,
@@ -257,7 +267,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
         explanation:
           "This skill's recorded success rate is below the threshold. The failures are real episodes, but the cause is not identified yet.",
         evidence: [
-          { source: "episode store", metric: "successes", value: `${stats.successes} of ${stats.attempts}`, measuredAt: episodes.measuredAt },
+          { source: `episode store (${provenanceMix(episodes)})`, metric: "successes", value: `${stats.successes} of ${stats.attempts}`, measuredAt: episodes.measuredAt },
         ],
         expectedBenefit: "Higher skill success lowers wasted actions and makes the planner's expected outcomes more reliable.",
         effort: 2,

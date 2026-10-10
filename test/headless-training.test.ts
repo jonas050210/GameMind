@@ -216,6 +216,26 @@ test("a trainer that crashes at start-up is reported with its exit code and log,
   });
 });
 
+test("a killed trainer's error excerpt holds only its own log lines, not an earlier run's", async () => {
+  await withRoot(async (root) => {
+    const paths = trainingPaths(root);
+    await mkdir(dirname(paths.log), { recursive: true });
+    await writeFile(paths.log, "OLD RUN: the previous trainer finished\n");
+    const entry = join(root, "killed.mjs");
+    await writeFile(entry, "console.log('NEW RUN: started');\nprocess.kill(process.pid, 'SIGKILL');\n");
+    const manager = new TrainingManager({ root, entry });
+    assert.equal((await manager.start({})).ok, true);
+    const view = await waitFor(async () => {
+      const current = await manager.snapshot();
+      return current.lastError ? current : null;
+    });
+    assert.ok(view, "the kill appears in the snapshot");
+    assert.match(view!.lastError ?? "", /signal SIGKILL/);
+    assert.match(view!.lastError ?? "", /NEW RUN: started/);
+    assert.doesNotMatch(view!.lastError ?? "", /OLD RUN/, "lines from an earlier run are not blamed on this one");
+  });
+});
+
 test("the trainer loads its TypeScript loader from this package, so it starts from any working directory", async () => {
   await withRoot(async (root) => {
     const entry = join(root, "ok.ts");

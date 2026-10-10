@@ -1521,8 +1521,13 @@ async function loadSnapshot(force) {
   }
 }
 
+/** Until this time, the page polls at the running cadence after a training command (see desiredPollDelay). */
+let trainingSettlingUntil = 0;
+const TRAINING_COMMANDS = new Set(["startTraining", "pauseTraining", "resumeTraining", "stopTraining"]);
+
 async function sendCommand(type, payload) {
   if (state.busy) return;
+  if (TRAINING_COMMANDS.has(type)) trainingSettlingUntil = Date.now() + 10_000;
   state.busy = true;
   render();
   toast(`${type}: waiting for the agent…`);
@@ -1707,6 +1712,9 @@ function wireControls() {
 /** How hard the page should look at the agent right now. */
 function desiredPollDelay(snapshot) {
   if (typeof document !== "undefined" && document.hidden) return POLL_HIDDEN_MS;
+  // A training command returns before the trainer process has written its own state, and a live trainer changes
+  // the buttons on every episode. Poll at the running cadence while either applies, so the controls follow the process.
+  if (Date.now() < trainingSettlingUntil || snapshot?.training?.processAlive) return POLL_RUNNING_MS;
   const agent = snapshot?.agent ?? null;
   if (!agent) return POLL_IDLE_MS;
   if (agent.state === "running" || agent.state === "stopping" || state.busy) return POLL_RUNNING_MS;

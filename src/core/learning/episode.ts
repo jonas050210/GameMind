@@ -48,6 +48,20 @@ export const episodeOutcomeSchema = z.object({
   safetyDenied: z.boolean(),
 });
 
+/**
+ * Where an episode came from. New rows carry it explicitly. Rows written before the field existed are
+ * classified by `episodeProvenanceOf` from their identifiers, and report themselves as inferred.
+ */
+export const EPISODE_PROVENANCE = [
+  "simulator-demo",
+  "simulator-eval",
+  "training",
+  "live",
+  "simulator-unlabelled",
+  "unlabelled",
+] as const;
+export type EpisodeProvenance = (typeof EPISODE_PROVENANCE)[number];
+
 export const episodeSchema = z.object({
   schemaVersion: z.literal(1),
   episodeId: z.string().min(1).max(96),
@@ -67,6 +81,8 @@ export const episodeSchema = z.object({
    * cross-run "I already tried that exact rock" memory sound rather than superstitious.
    */
   worldKey: z.string().max(120).nullable(),
+  /** Explicit provenance; absent on rows written before it existed. */
+  provenance: z.enum(EPISODE_PROVENANCE).optional(),
 });
 
 export type EpisodeFeatures = z.infer<typeof episodeFeaturesSchema>;
@@ -146,4 +162,21 @@ export function goalClassOf(goalId: string): string {
 
 export function isEpisode(value: unknown): value is Episode {
   return episodeSchema.safeParse(value).success;
+}
+
+/**
+ * Provenance of any episode. An explicit field wins. Legacy rows are inferred from identifiers only:
+ * training rows carry the `train-` run prefix or the `train:` world key; other simulator rows (sim- session)
+ * cannot be told apart between the CLI demo and the learning comparison, so they stay "simulator-unlabelled".
+ */
+export function episodeProvenanceOf(episode: Pick<Episode, "provenance" | "runId" | "worldKey" | "sessionId">): {
+  readonly provenance: EpisodeProvenance;
+  readonly inferred: boolean;
+} {
+  if (episode.provenance) return { provenance: episode.provenance, inferred: false };
+  if (episode.runId.startsWith("train-") || (episode.worldKey ?? "").startsWith("train:")) {
+    return { provenance: "training", inferred: true };
+  }
+  if ((episode.sessionId ?? "").startsWith("sim-")) return { provenance: "simulator-unlabelled", inferred: true };
+  return { provenance: "unlabelled", inferred: true };
 }

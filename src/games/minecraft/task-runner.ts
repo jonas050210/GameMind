@@ -24,6 +24,8 @@ import type { MinecraftTask } from "./task.js";
 import { countItemAndEquipment } from "./recipes.js";
 import { verifySkillPostcondition } from "./skill-contracts.js";
 import { WorldMemory } from "./world-memory.js";
+import { explorationKeyCenter } from "./exploration.js";
+import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
 import { REFLEX_THRESHOLDS } from "./reflex.js";
@@ -147,6 +149,8 @@ export interface MinecraftTaskRunnerOptions {
    * Control Center) passes one so knowledge and forgotten targets survive between tasks.
    */
   readonly memory?: WorldMemory;
+  /** Where this run's episodes come from (simulator demo, evaluation, training or live). */
+  readonly provenance?: EpisodeProvenance;
   /** Called once per completed action with the same summary the result carries; used for live UI updates. */
   readonly onAction?: (action: TaskActionSummary) => void;
   /**
@@ -160,6 +164,8 @@ export interface MinecraftTaskRunnerOptions {
 
 /** A target that is attempted this many times without observable progress is excluded. */
 const MAX_ATTEMPTS_WITHOUT_PROGRESS = 3;
+/** Codes that say the target itself cannot be reached from where the agent stood. */
+const REFUSED_TARGET_CODES = new Set(["PATH_NOT_FOUND", "NAVIGATION_TARGET_TOO_FAR"]);
 const OSCILLATION_WINDOW = 6;
 const OSCILLATION_RADIUS = 3;
 const MOVEMENT_SKILLS = new Set([
@@ -568,6 +574,9 @@ export class MinecraftTaskRunner {
           const verdict = broker.snapshot().recentVerdicts[0];
           if (verdict) lastSafetyNote = { allowed: verdict.allowed, code: verdict.code, message: verdict.message };
         }
+        for (const refused of memory.refusedTargetKeys({ x: world.state.player.position.x, z: world.state.player.position.z })) {
+          excludedTargets.add(refused);
+        }
         const context: MinecraftDecisionContext = {
           excludedTargets,
           previousFailureCode: lastFailureCode,
@@ -794,7 +803,13 @@ export class MinecraftTaskRunner {
           lastFailureCode = failureCode;
           awaitingRecovery = true;
         }
-        this.invalidateMemoryAfterFailure(memory, selected.targetKey, lastFailureCode, succeeded);
+        this.invalidateMemoryAfterFailure(
+          memory,
+          selected.targetKey,
+          lastFailureCode,
+          succeeded,
+          (after ?? before)?.state.player.position ?? null,
+        );
 
         if (skillResult.action.status === "rejected" && failureCode?.startsWith("SAFETY_")) safetyDenials += 1;
         if (skill.id === "minecraft.mine-block" && succeeded) minedBlocks += 1;
@@ -814,6 +829,7 @@ export class MinecraftTaskRunner {
               sessionId: world.sessionId,
               sequence: after?.sequence ?? world.sequence,
               worldKey,
+              provenance: this.options.provenance ?? "unlabelled",
               policyVersion: learner.snapshot().activePolicy?.id ?? null,
               targetKey: selected.targetKey,
               features: {
@@ -1108,8 +1124,16 @@ export class MinecraftTaskRunner {
     targetKey: string | null,
     failureCode: string | null,
     succeeded: boolean,
+    agentPosition: { readonly x: number; readonly z: number } | null,
   ): void {
     if (succeeded || !targetKey || !failureCode) return;
+    // A refused path is a fact about the world from where the agent stood: remember it across subgoals so
+    // the next subgoal does not pick the same unreachable target again.
+    // "Too far" is refused from this position too: the agent may move closer, which the recheck distance allows.
+    if (REFUSED_TARGET_CODES.has(failureCode) && agentPosition) {
+      const frontier = failureCode === "PATH_NOT_FOUND" ? explorationKeyCenter(targetKey) : null;
+      memory.markRefused(targetKey, agentPosition, frontier ?? undefined);
+    }
     if (failureCode === "RESOURCE_TARGET_CHANGED" || failureCode === "CRAFTING_TABLE_CHANGED" || failureCode === "BERRY_NOT_RIPE") {
       const key = targetKey.replace(/^(berry|craft-table):/, "");
       memory.forgetBlock(key);

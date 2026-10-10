@@ -6,6 +6,7 @@ import {
   episodeContextKey,
   episodeFailureKey,
   episodeSchema,
+  type EpisodeProvenance,
   type Episode,
   type EpisodeFeatures,
   type EpisodeOutcome,
@@ -44,6 +45,8 @@ export interface EpisodeDraft {
   readonly policyVersion: string | null;
   readonly targetKey: string | null;
   readonly features: EpisodeFeatures;
+  /** Where the episode came from; defaults to "unlabelled" for callers that do not say. */
+  readonly provenance?: EpisodeProvenance | undefined;
   readonly outcome: EpisodeOutcome;
 }
 
@@ -279,6 +282,7 @@ export class ExperienceLearner {
         timestamp: new Date().toISOString(),
         policyVersion: draft.policyVersion,
         worldKey: draft.worldKey,
+        provenance: draft.provenance ?? "unlabelled",
         targetKey: draft.targetKey,
         features: draft.features,
         outcome: draft.outcome,

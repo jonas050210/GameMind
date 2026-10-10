@@ -18,6 +18,8 @@ import { AutonomyController } from "../games/minecraft/autonomy-controller.js";
 import { ProgressTracker } from "../games/minecraft/progress-tracker.js";
 import { SimulatedMinecraftAdapter } from "./simulated-minecraft/adapter.js";
 import { simulatedWorld, berryBushAt, treeAt } from "./simulated-minecraft/scenarios.js";
+import { evaluationScenarios } from "./eval/scenarios.js";
+import { WorldMemory } from "../games/minecraft/world-memory.js";
 import type { SimWorldDefinition } from "./simulated-minecraft/world.js";
 
 export interface AutonomyProfileTaskRecord {
@@ -37,6 +39,10 @@ export interface AutonomyProfileReport {
   readonly virtualSeconds: number;
   readonly tasks: readonly AutonomyProfileTaskRecord[];
   readonly totalActions: number;
+  /** Every failed action in the run, counted by failure code (not only each task's final failure). */
+  readonly actionFailureCodes?: Readonly<Record<string, number>>;
+  /** Each failed action with its skill and target key, in order; shows which targets were refused or too far. */
+  readonly failedActions?: readonly { readonly code: string; readonly skillId: string; readonly targetKey: string | null }[];
   readonly zeroActionTasks: number;
   readonly idleVirtualSeconds: number;
   readonly finalFood: number | null;
@@ -66,7 +72,10 @@ export function profileWorld(scenario: string, seed: number): SimWorldDefinition
       player: { food: 20 },
     });
   }
-  throw new Error(`Unknown profile scenario '${scenario}'. Use berries or berries-fed.`);
+  // Any offline evaluation scenario can be profiled through the production autonomous cycle, e.g. explore-remote-log.
+  const evaluated = evaluationScenarios().find((candidate) => candidate.id === scenario);
+  if (evaluated) return evaluated.world(seed);
+  throw new Error(`Unknown profile scenario '${scenario}'. Use berries, berries-fed or an evaluation scenario id.`);
 }
 
 /** Runs the production autonomous cycle for a fixed virtual duration and reports what the agent did. */
@@ -82,8 +91,11 @@ export async function profileAutonomy(options: {
   const trace = new TraceRecorder(new MemoryTraceSink(), logger);
   const adapter = new SimulatedMinecraftAdapter({ definition: profileWorld(options.scenario, options.seed) });
   const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  // One world memory for the whole profile, as the production host shares it across subgoals.
+  const memory = new WorldMemory();
   const runner = new MinecraftTaskRunner(runtime, skills, new MinecraftTaskDecisionModel(), logger, {
     clock: () => adapter.simulatedNowMs,
+    memory,
   });
   const tracker = new ProgressTracker();
   // The autonomy controller runs on the virtual clock, so cooldowns are measured in simulated seconds.
@@ -92,6 +104,8 @@ export async function profileAutonomy(options: {
   const limitMs = options.virtualSeconds * 1_000;
   const maxTasks = options.maxTasks ?? 200;
   const tasks: AutonomyProfileTaskRecord[] = [];
+  const actionFailureCodes: Record<string, number> = {};
+  const failedActions: { code: string; skillId: string; targetKey: string | null }[] = [];
   let idleVirtualMs = 0;
   try {
     await runtime.connect();
@@ -113,6 +127,12 @@ export async function profileAutonomy(options: {
       const startedAt = adapter.simulatedNowMs;
       const result = await runner.run(task);
       autonomy.record(task, result);
+      for (const action of result.actions) {
+        if (action.failureCode) {
+          actionFailureCodes[action.failureCode] = (actionFailureCodes[action.failureCode] ?? 0) + 1;
+          failedActions.push({ code: action.failureCode, skillId: action.skillId, targetKey: action.targetKey });
+        }
+      }
       tasks.push({
         taskId: task.id,
         status: result.status,
@@ -139,6 +159,8 @@ export async function profileAutonomy(options: {
     virtualSeconds: Math.round(adapter.simulatedNowMs / 100) / 10,
     tasks,
     totalActions: tasks.reduce((sum, task) => sum + task.actions, 0),
+    actionFailureCodes,
+    failedActions,
     zeroActionTasks: tasks.filter((task) => task.actions === 0).length,
     idleVirtualSeconds: idleVirtualMs / 1_000,
     finalFood,

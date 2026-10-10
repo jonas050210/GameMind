@@ -114,7 +114,8 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
 
   const scenarios = curriculumScenarios(stages);
   const existing = await readTrainingState(paths);
-  const episodesPerStage = options.episodesPerStage ?? existing?.episodesPerStage ?? DEFAULT_EPISODES_PER_STAGE;
+  const configuredPerStage = options.episodesPerStage ?? existing?.episodesPerStage ?? null;
+  const episodesPerStage = configuredPerStage ?? DEFAULT_EPISODES_PER_STAGE;
   const maxEpisodes = options.maxEpisodes ?? existing?.maxEpisodes ?? episodesPerStage * stages.length * 2;
   const maxMinutes = options.maxMinutes ?? existing?.maxMinutes ?? null;
   // On resume the saved progress is kept, but the budget and stage size come from this invocation, so a run can
@@ -179,6 +180,7 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
         learner,
         worldKey: `train:${scenario.id}:${seed}`,
         runId: `train-${String(state.totalEpisodes).padStart(6, "0")}`,
+        provenance: "training",
       });
       state.activeMs += performance.now() - episodeStarted;
       const after = learner.rewardTotals;
@@ -205,8 +207,11 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
       state.updatedAt = now().toISOString();
 
       const successRate = state.stageEpisodes === 0 ? 0 : state.stageSuccesses / state.stageEpisodes;
-      const passed = state.stageEpisodes >= stage.minEpisodes && successRate >= stage.passRate;
-      const capped = state.stageEpisodes >= stage.minEpisodes * 3;
+      // A configured episodes per stage is the minimum before the pass check; the curriculum's own minimum is a floor.
+      // Without a configured value, the curriculum's minimum applies unchanged.
+      const minimumEpisodes = configuredPerStage === null ? stage.minEpisodes : Math.max(stage.minEpisodes, configuredPerStage);
+      const passed = state.stageEpisodes >= minimumEpisodes && successRate >= stage.passRate;
+      const capped = state.stageEpisodes >= minimumEpisodes * 3;
       if (passed || capped) {
         const checkpoint = await saveCheckpoint(paths, learner.candidateWeights, stage.id, state.totalEpisodes, now);
         state.checkpoints = [...state.checkpoints, checkpoint];
