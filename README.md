@@ -111,6 +111,7 @@ Existing users should review these. Each is deliberate and covered by offline te
 10. **The Control Center page was rewritten** as seven tabs over one polling store (see [Control Center](#control-center)). The old WebGL block view is gone (it had already been removed from the code; its documentation is cleaned up).
 11. **Atomic file writes are serialised.** Every data file written by the app uses `src/core/atomic-file.ts` (unique temp names, ordered writes per file).
 12. **The build verifies the packaged UI.** `npm run build` fails if any file of the page did not reach `dist/`.
+13. **The console is quieter by default.** The per-tick `observation.received` trace event is still written to the trace, but it is printed on the console only at `LOG_LEVEL=debug`. A persistent session that idles would otherwise print two JSON lines a second (at the default 500 ms observation interval) for as long as it runs, burying the decisions, actions, lifecycle lines and errors you are there to read; those still print at the default level.
 
 ## Behaviour changes in the previous release
 
@@ -509,7 +510,7 @@ Everything in this repository was verified offline: unit and integration tests, 
 - Tests use offline fixtures, deterministic simulated worlds, an injected Mineflayer double, a fake DOM and the real HTTP server. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, plugin behaviour or how the page looks.
 
 ```bash
-npm test                 # 785 TypeScript tests
+npm test                 # 795 TypeScript tests
 npm run test:launcher    # 33 Python tests for main.py and the launcher
 npm run build            # type-check, compile, copy and verify the Control Center files
 ```
@@ -523,6 +524,7 @@ The original suites cover loaded-chunk/truncation memory, persistent world snaps
 | `app`, `control-center`, `control-center-http` | One server per process, the command set, the snapshot contract, redaction, `Host` and origin checks, token handling, reserved data folders |
 | `ui-components`, `ui-page`, `ui-e2e`, `ui-static` | The page's helpers and polling store, every tab's text, controls and states in a fake DOM, the page against a real app, and a static type-check of the browser modules with a canary proving it can see each defect class |
 | `training-safety`, `learning-evidence`, `progress-evidence`, `atomic-file` | Training lock, preflight, archive-never-delete and held-out evaluation; the success/failure/excluded rule and provenance; the wasted-action definition and what it must not steer; concurrent saves |
+| `task-report`, `trace-console` | The printed task report: the simulator's clock and world statistics stay in it (on the one-shot path, the default persistent path and for dashboard tasks), a live report never carries simulated fields, and a detail that is not known is left out instead of invented; every trace event is recorded at every log level while per-tick observations print only at `debug` |
 
 Existing tests were edited in three places, each because behaviour changed on purpose; no test was removed or skipped, and every other assertion is unchanged:
 
