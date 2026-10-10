@@ -41,6 +41,7 @@ function roadmapView(service: RoadmapService, loop: AgentLoopPerformance | null)
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import { LibraryExecutor, createMinecraftLibraryRegistry } from "./library.js";
+import type { Submission, TaskOrigin, TaskScheduler } from "./task-scheduler.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
 export interface CombatGateAdapter {
@@ -92,7 +93,14 @@ export interface ControlCenterSource {
   /** Builds the next task from a UI request; throws with a readable message when the kind is unknown. */
   taskFor?(request: { readonly kind: string; readonly resource?: string; readonly count?: number }): MinecraftTask;
   /** Called when the operator asks the UI to start a task; resolves when the run finishes. */
-  onStart?(task: MinecraftTask): Promise<void>;
+  onStart?(task: MinecraftTask, request?: { readonly origin?: TaskOrigin; readonly whenBusy?: "queue" | "reject" }): Promise<void>;
+  /** The authoritative scheduler. When present, task admission is decided there and refusals carry its codes. */
+  readonly scheduler?: TaskScheduler | null;
+  /** Synchronous admission through the scheduler; the `startTask` command uses it to report queued/refused honestly. */
+  submitTask?(task: MinecraftTask, request: { readonly origin: TaskOrigin; readonly whenBusy?: "queue" | "reject"; readonly label?: string }): Submission;
+  /** Runtime switch for autonomous idle behaviour, and its current value. */
+  setAutonomy?(enabled: boolean): void;
+  autonomyEnabled?(): boolean;
   /** Optional extra fields merged into the snapshot (used by the simulated demo host). */
   decorate?(base: ControlCenterSnapshot): ControlCenterSnapshot;
   /** Optional progress tracker for multi-task autonomous progression. */
@@ -516,11 +524,8 @@ export function createControlCenterSource(source: ControlCenterSource): {
       if (safety?.snapshot().paused) {
         return { ok: false, message: "The run is paused; resume it before starting a task." };
       }
-      if (!source.taskFor || !source.onStart) {
+      if (!source.taskFor || (!source.onStart && !source.submitTask)) {
         return { ok: false, message: "This run does not accept a new task from the Control Center." };
-      }
-      if (control.task) {
-        return { ok: false, message: "A task is already running; stop it first." };
       }
       let task: MinecraftTask;
       try {
@@ -528,10 +533,59 @@ export function createControlCenterSource(source: ControlCenterSource): {
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
-      void source.onStart(task).catch((error: unknown) => {
+      if (source.submitTask) {
+        // The scheduler decides synchronously: started now, queued, or refused with a code and a sentence.
+        const submission = source.submitTask(task, {
+          origin: "control-center",
+          whenBusy: request?.queue === true ? "queue" : "reject",
+        });
+        if (!submission.accepted) {
+          return { ok: false, message: submission.message, data: { code: submission.code } };
+        }
+        submission.done.catch((error: unknown) => {
+          source.logger.error({ err: error }, "Task started from the Control Center failed");
+        });
+        const message = submission.position === 0
+          ? `Started task '${task.id}' (${task.kind}).`
+          : submission.preempting
+            ? `Queued task '${task.id}' next: the autonomous task is stopping at its next action boundary.`
+            : `Queued task '${task.id}' at position ${submission.position}; it runs after the current task.`;
+        return { ok: true, message, data: { ticketId: submission.ticketId, position: submission.position, preempting: submission.preempting } };
+      }
+      if (control.task) {
+        return { ok: false, message: "A task is already running; stop it first." };
+      }
+      void source.onStart!(task).catch((error: unknown) => {
         source.logger.error({ err: error }, "Task started from the Control Center failed");
       });
       return { ok: true, message: `Started task '${task.id}' (${task.kind}).` };
+    },
+    cancelQueuedTask(payload) {
+      if (!source.scheduler) return { ok: false, message: "This run has no task scheduler." };
+      const ticketId = typeof payload === "string" ? payload : typeof payload === "object" && payload !== null ? String((payload as { ticketId?: unknown }).ticketId ?? "") : "";
+      if (ticketId.length === 0) return { ok: false, message: "A queued task id is required." };
+      const outcome = source.scheduler.cancel(ticketId, "cancelled from the Control Center");
+      if (outcome === null) return { ok: false, message: `No queued or running task has the id '${ticketId}'.` };
+      return {
+        ok: true,
+        message: outcome === "cancelled" ? "Queued task cancelled." : "Stop requested; the run ends after the current action.",
+      };
+    },
+    clearTaskQueue() {
+      if (!source.scheduler) return { ok: false, message: "This run has no task scheduler." };
+      const cancelled = source.scheduler.clearQueue("queue cleared from the Control Center");
+      return { ok: true, message: cancelled === 0 ? "The queue was already empty." : `Cancelled ${cancelled} queued task(s).` };
+    },
+    setAutonomy(payload) {
+      if (!source.setAutonomy) return { ok: false, message: "This run cannot change autonomy at runtime." };
+      const enabled = typeof payload === "boolean" ? payload : typeof payload === "object" && payload !== null && (payload as { enabled?: unknown }).enabled === true;
+      source.setAutonomy(enabled);
+      return {
+        ok: true,
+        message: enabled
+          ? "Autonomy is on: the agent starts its own survival and progress subgoals when idle. Safety limits are unchanged."
+          : "Autonomy is off: the agent acts only on tasks you start. Safety limits are unchanged.",
+      };
     },
     async promotePolicy() {
       if (!learner) return { ok: false, message: "No experience learner is attached to this run." };
@@ -657,6 +711,8 @@ export function createControlCenterSource(source: ControlCenterSource): {
         worldAvailable: status.adapterStatus === "connected" && status.worldLive,
       },
       companion: source.companion?.snapshot() ?? null,
+      scheduler: source.scheduler?.snapshot() ?? null,
+      autonomyEnabled: source.autonomyEnabled ? source.autonomyEnabled() : null,
       agent: {
         // An operator hold is reported even between tasks: pausing while idle still blocks the next run,
         // and the UI must not make that look like an ordinary idle agent.

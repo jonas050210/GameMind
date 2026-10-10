@@ -175,7 +175,7 @@ export interface LibraryHandlerContext {
   readonly advertisedCapabilities: readonly string[];
   readonly combatSwitchAvailable: boolean;
   readonly taskFor?: (request: { readonly kind: string; readonly resource?: string; readonly count?: number }) => MinecraftTask;
-  readonly onStart?: (task: MinecraftTask) => Promise<void>;
+  readonly onStart?: (task: MinecraftTask, request?: { readonly origin?: "library"; readonly whenBusy?: "queue" | "reject" }) => Promise<void>;
   /** Existing host commands, reused so Library safety/learning entries share one code path. */
   readonly hostCommands?: ControlCenterCommands;
   readonly logger: Logger;
@@ -1387,7 +1387,7 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
         }
         const task: MinecraftTask = built;
         // Fire-and-forget start; the operation stays running and resolves live from control.task/result.
-        ctx.onStart(task).catch((error: unknown) => {
+        ctx.onStart(task, { origin: "library" }).catch((error: unknown) => {
           ctx.logger.error({ err: error, taskId: task.id }, "Library task failed");
         });
         // The synchronous prefix of onStart sets control.task before this microtask yields; if the host

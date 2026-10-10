@@ -6,6 +6,8 @@
  * the state below.
  */
 
+import type { SchedulerSnapshot } from "../games/minecraft/task-scheduler.js";
+
 export interface ControlCenterConnection {
   readonly adapterStatus: string;
   readonly gameId: string;
@@ -592,6 +594,10 @@ export interface ControlCenterSnapshot {
   readonly offlineNote?: string | null;
   /** Central Library catalog and recent executions. Null when the host has no Library. */
   readonly library?: ControlCenterLibrary | null;
+  /** The authoritative task scheduler: active task, queue, recent outcomes, refusals. Null when the host has none. */
+  readonly scheduler?: SchedulerSnapshot | null;
+  /** Whether the agent starts its own tasks when idle. Null when the host cannot say. */
+  readonly autonomyEnabled?: boolean | null;
 }
 
 /** Folded view of the offline evaluation report, read from disk by the host. */
@@ -653,8 +659,15 @@ export interface ControlCenterCommands {
   resumeTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   stopTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   evaluateTraining?(checkpointId?: string): ControlCommandResult | Promise<ControlCommandResult>;
-  startTask?(task: { readonly kind: string; readonly resource?: string; readonly count?: number }): ControlCommandResult | Promise<ControlCommandResult>;
+  /** `queue: true` runs the task after the current one instead of refusing while the agent is busy. */
+  startTask?(task: { readonly kind: string; readonly resource?: string; readonly count?: number; readonly queue?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
   stopTask?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Removes one queued task (by ticket id) from the scheduler. */
+  cancelQueuedTask?(payload: { readonly ticketId: string } | string): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Cancels every queued task; the running one is untouched. */
+  clearTaskQueue?(): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Turns autonomous idle behaviour on or off. Safety policy, budgets and combat restrictions are unaffected. */
+  setAutonomy?(payload: { readonly enabled: boolean } | boolean): ControlCommandResult | Promise<ControlCommandResult>;
   promotePolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   rejectPolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   /**
