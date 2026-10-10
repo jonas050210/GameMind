@@ -136,6 +136,13 @@ export class RingBufferTraceSink implements TraceSink {
   }
 }
 
+/**
+ * Events that fire on every observation tick. They are always written to the trace, which is the record of what the
+ * agent saw; on the console they would scroll past twice a second for as long as a persistent session idles, burying
+ * the lifecycle, decision and error lines an operator is there to read. `LOG_LEVEL=debug` prints them again.
+ */
+const CONSOLE_DEBUG_EVENT_TYPES: ReadonlySet<string> = new Set(["observation.received"]);
+
 export class TraceRecorder {
   private writeQueue: Promise<void> = Promise.resolve();
 
@@ -188,17 +195,16 @@ export class TraceRecorder {
       }
     }
 
-    this.logger.info(
-      {
-        traceId: event.traceId,
-        eventType: event.eventType,
-        gameId: event.gameId,
-        sessionId: event.sessionId,
-        correlationId: event.correlationId,
-        data: event.data,
-      },
-      event.eventType,
-    );
+    const line = {
+      traceId: event.traceId,
+      eventType: event.eventType,
+      gameId: event.gameId,
+      sessionId: event.sessionId,
+      correlationId: event.correlationId,
+      data: event.data,
+    };
+    if (CONSOLE_DEBUG_EVENT_TYPES.has(event.eventType)) this.logger.debug(line, event.eventType);
+    else this.logger.info(line, event.eventType);
     return event;
   }
 
