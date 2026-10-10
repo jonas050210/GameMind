@@ -74,6 +74,10 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     ...(learner ? { learner } : {}),
     worldKey,
     offlineNote: "test fixture: simulated world",
+    // Tests drive the agent by explicit command; the autonomous loop would otherwise start tasks on its own.
+    autonomous: false,
+    worldConfigPath: path.join(directory, "world-config.json"),
+    trainingDirectory: path.join(directory, "training"),
     port: 0,
     bindHost: "127.0.0.1",
     evaluationReportPath: path.join(directory, "no-report.json"),
@@ -316,12 +320,11 @@ test("operator commands move the safety broker and the adapter, not just the UI"
     assert.equal(fixture.adapter.combatAllowed, false);
     assert.deepEqual((await fixture.snapshots()).safety?.optedInCapabilities, []);
 
+    // The per-run action cap was removed from the product: the command no longer exists, and the snapshot
+    // carries no action ceiling. Safety comes from per-action timeouts, stuck detection and the emergency stop.
     const budget = await fixture.command("setActionBudget", { maxActions: 40 });
-    assert.equal(budget.status, 200);
-    assert.equal((await fixture.snapshots()).safety?.maxActionsPerRun, 40);
-    const tooBig = await fixture.command("setActionBudget", { maxActions: 5_000 });
-    assert.equal(tooBig.status, 409);
-    assert.match(tooBig.body.message ?? "", /between 1 and 100/);
+    assert.notEqual(budget.status, 200);
+    assert.equal("maxActionsPerRun" in ((await fixture.snapshots()).safety ?? {}), false);
   } finally {
     await fixture.close();
   }
@@ -620,5 +623,85 @@ test("the evaluation panel reads the offline report and refuses to invent number
     });
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the Control Center shows the new panels and no longer offers an action cap", async () => {
+  const fixture = await startFixture();
+  try {
+    const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
+    const html = await (await fetch(base)).text();
+    const script = await (await fetch(`${base}/app.js`)).text();
+    for (const heading of ["Objective &amp; subgoal", "World seed", "Training", "Observation rate", "Observation age", "Reaction p95"]) {
+      assert.ok(html.includes(heading) || script.includes(heading), `the UI shows ${heading}`);
+    }
+    assert.ok(!html.includes("budget-input") && !script.includes("budget-form"), "the action-cap input is gone");
+    assert.ok(!script.includes("setActionBudget") && !html.includes("Action cap"), "no UI path sets an action cap");
+    for (const id of ["training-form", "training-metrics", "training-episodes-table", "loop-targets", "seed-form", "objective-panel"]) {
+      assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
+    }
+    for (const command of ["pauseTraining", "resumeTraining", "stopTraining", "evaluateTraining"]) {
+      assert.ok(html.includes(`data-command="${command}"`), `${command} is a button on the page`);
+    }
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("the world seed is entered by hand, validated, and always labelled unverified", async () => {
+  const fixture = await startFixture();
+  try {
+    const before = await fixture.snapshots();
+    assert.equal(before.worldSeed?.value ?? null, null);
+    assert.equal(before.worldSeed?.source, "unset");
+
+    const saved = await fixture.command("setWorldSeed", "8675309");
+    assert.equal(saved.status, 200);
+    const after = await fixture.snapshots();
+    assert.equal(after.worldSeed?.value, "8675309");
+    assert.equal(after.worldSeed?.source, "manual");
+    assert.equal(after.worldSeed?.verified, false, "an entered seed is never shown as verified");
+
+    const tooLarge = await fixture.command("setWorldSeed", "9223372036854775808");
+    assert.notEqual(tooLarge.status, 200, "a numeric seed outside the 64-bit range is refused");
+    assert.equal((await fixture.snapshots()).worldSeed?.value, "8675309", "a refused seed does not replace the stored one");
+
+    const cleared = await fixture.command("setWorldSeed", "");
+    assert.equal(cleared.status, 200);
+    assert.equal((await fixture.snapshots()).worldSeed?.value ?? null, null);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("the snapshot carries the fast loop's measured state and the training section, without invented numbers", async () => {
+  const fixture = await startFixture();
+  try {
+    const snapshot = await fixture.snapshots();
+    assert.ok(snapshot.agentLoop, "the loop performance is part of the snapshot");
+    assert.equal(snapshot.agentLoop?.targets.length, 4, "each performance target is reported with its goal");
+    assert.equal(snapshot.agentLoop?.observation.frequencyHz === null || typeof snapshot.agentLoop?.observation.frequencyHz === "number", true);
+    assert.ok(snapshot.objective === null || typeof snapshot.objective === "object");
+    assert.equal(snapshot.training?.status, "idle", "no training has run in this directory");
+    assert.equal(snapshot.training?.episodesTotal, 0);
+    assert.equal(snapshot.training?.checkpoints.length, 0);
+    assert.equal(snapshot.training?.lastEvaluation ?? null, null, "no evaluation is invented before one runs");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("training commands refuse what cannot honestly happen yet", async () => {
+  const fixture = await startFixture();
+  try {
+    const pause = await fixture.command("pauseTraining");
+    assert.equal(pause.body.ok, false, "nothing to pause");
+    const stop = await fixture.command("stopTraining");
+    assert.equal(stop.body.ok, false, "nothing to stop");
+    const evaluate = await fixture.command("evaluateTraining");
+    assert.equal(evaluate.body.ok, false);
+    assert.match(evaluate.body.message ?? "", /No checkpoint/, "an evaluation needs a checkpoint to score");
+  } finally {
+    await fixture.close();
   }
 });

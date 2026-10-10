@@ -32,7 +32,9 @@
     "task:minecraft:shelter": "tsx src/cli.ts --task build-shelter",
     "policy:status": "tsx src/cli.ts --policy status",
     "test:live": "tsx src/testing/live/live-test-runner.ts",
-    "test:live:quick": "tsx src/testing/live/live-test-runner.ts --scenario live-connection"
+    "test:live:quick": "tsx src/testing/live/live-test-runner.ts --scenario live-connection",
+    "profile:autonomy": "tsx src/testing/autonomy-profile.ts",
+    "train": "tsx src/training/cli.ts"
   },
   "dependencies": {
     "mineflayer": "4.39.0",

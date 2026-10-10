@@ -1,3 +1,4 @@
+import { heldItems } from "./inventory-accounting.js";
 import type { MinecraftObservation } from "./observation.js";
 import { isMinecraftFoodName } from "./recipes.js";
 import { bestWeapon } from "./combat.js";
@@ -76,7 +77,8 @@ export class ProgressTracker {
   }
 
   private countInventory(state: MinecraftObservation): ProgressSnapshot["inventory"] {
-    const items = state.inventory;
+    // Equipped items count too: a pickaxe in the hand is still a pickaxe the agent holds.
+    const items = heldItems(state);
     const count = (names: string[]) =>
       items.filter((i) => names.some((n) => i.name === n)).reduce((s, i) => s + i.count, 0);
     const has = (names: string[]) => items.some((i) => names.some((n) => i.name === n));

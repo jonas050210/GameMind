@@ -165,6 +165,9 @@ const TASK_CODES = new Set([
 
 /** Everything else that describes one attempted action. */
 const ACTION_CODES = new Set([
+  // A reflex (safety reaction to an urgent condition) cut the action short. It is a replan, not a failure of
+  // the action itself, so it is retryable and the runner does not count it against the target.
+  "REFLEX_INTERRUPT",
   "ACTION_TIMEOUT",
   "ACTION_NOT_CONFIRMED",
   "ACTION_ABORTED",
@@ -287,6 +290,7 @@ const LABELS: Readonly<Record<string, string>> = {
   SKILL_NOT_REGISTERED: "skill not registered",
   TASK_DEADLINE: "task time budget exceeded",
   TASK_ACTION_BUDGET: "task action budget exceeded",
+  REFLEX_INTERRUPT: "urgent condition interrupted the action; replanning",
   OPERATOR_STOP: "stopped by the operator",
   ADAPTER_DISCONNECTED: "Minecraft session disconnected",
   NOT_CONNECTED: "adapter is not connected",

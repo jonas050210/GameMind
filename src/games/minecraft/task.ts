@@ -4,7 +4,8 @@ import { minecraftMineableBlockNames } from "./mining.js";
 
 const taskLimits = {
   schemaVersion: z.literal(1).default(1),
-  maxActions: z.number().int().min(1).max(500).default(12),
+  // A runaway guard, not a budget: tasks end by completion, timeout, stuck detection or stop.
+  maxActions: z.number().int().min(1).max(5000).default(12),
   maxDurationMs: z.number().int().min(1_000).max(1_800_000).default(120_000),
   dangerRadius: z.number().finite().min(2).max(16).default(6),
   maxTargetDistance: z.number().finite().min(2).max(96).default(24),

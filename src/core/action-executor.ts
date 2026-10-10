@@ -66,6 +66,8 @@ export class ActionExecutor<TState = unknown> {
   private quarantined = false;
   private activeActionId: string | null = null;
   private activeAbortController: AbortController | null = null;
+  private activeCapability: string | null = null;
+  private activeInterrupt: ((reason: string, code: string) => void) | null = null;
   private readonly capabilities: CapabilityRegistry;
 
   private readonly safety: SafetyBroker | null;
@@ -84,6 +86,28 @@ export class ActionExecutor<TState = unknown> {
 
   get registry(): CapabilityRegistry {
     return this.capabilities;
+  }
+
+  /** The capability of the action in flight, or null when the executor is idle. */
+  get runningCapability(): string | null {
+    return this.activeCapability;
+  }
+
+  /**
+   * Stops the action in flight, if there is one, and reports the reason with its failure code. The
+   * interrupted action settles as `aborted` (never `succeeded`), so the caller decides what to do next
+   * with a fresh observation. Protected capabilities (for example an eat or an attack that must finish)
+   * are left running and reported as not interrupted.
+   */
+  interruptActive(
+    reason: string,
+    options: { readonly code?: string; readonly protectedCapabilities?: readonly string[] } = {},
+  ): { readonly interrupted: boolean; readonly capability: string | null } {
+    const capability = this.activeCapability;
+    if (!this.activeInterrupt || capability === null) return { interrupted: false, capability: null };
+    if (options.protectedCapabilities?.includes(capability)) return { interrupted: false, capability };
+    this.activeInterrupt(reason, options.code ?? "ACTION_INTERRUPTED");
+    return { interrupted: true, capability };
   }
 
   /** The broker that gates this executor, when one is attached. */
@@ -243,7 +267,11 @@ export class ActionExecutor<TState = unknown> {
       this.activeAbortController = controller;
       this.activeActionId = actionId;
       let timedOut = false;
-      const interruption = { status: "aborted" as ActionStatus };
+      const interruption: { status: ActionStatus; code: string | null; message: string | null } = {
+        status: "aborted",
+        code: null,
+        message: null,
+      };
       let timeoutHandle: NodeJS.Timeout | undefined;
       let resolveInterruption: (() => void) | undefined;
 
@@ -268,6 +296,15 @@ export class ActionExecutor<TState = unknown> {
         }
       };
       const unsubscribe = this.adapter.onStatusChange(onStatusChange);
+      this.activeCapability = request.capability;
+      this.activeInterrupt = (reason: string, code: string): void => {
+        if (controller.signal.aborted) return;
+        interruption.status = "aborted";
+        interruption.code = code;
+        interruption.message = reason;
+        controller.abort(new Error(reason));
+        resolveInterruption?.();
+      };
 
       const operation: Promise<ActionRace> = Promise.resolve()
         .then(() =>
@@ -324,12 +361,12 @@ export class ActionExecutor<TState = unknown> {
               ? "ACTION_TIMEOUT"
               : status === "disconnected"
                 ? "ADAPTER_DISCONNECTED"
-                : "ACTION_ABORTED",
+                : (interruption.code ?? "ACTION_ABORTED"),
             message: timedOut
               ? `Action exceeded its ${timeoutMs} ms deadline and was cancelled.`
               : status === "disconnected"
                 ? "The Minecraft session ended while the action was running."
-                : "The action was cancelled during safe shutdown.",
+                : (interruption.message ?? "The action was cancelled during safe shutdown."),
           },
           details: { capability: request.capability, timeoutMs },
         });
@@ -413,6 +450,8 @@ export class ActionExecutor<TState = unknown> {
       this.busy = false;
       this.activeActionId = null;
       this.activeAbortController = null;
+      this.activeCapability = null;
+      this.activeInterrupt = null;
     }
   }
 

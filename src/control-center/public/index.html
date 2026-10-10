@@ -94,7 +94,7 @@
             <span class="hint" id="run-hint"></span>
           </header>
           <div class="metrics" id="run-metrics"></div>
-          <div class="progress" role="progressbar" aria-label="Task action budget" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
+          <div class="progress" role="progressbar" aria-label="Task progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
           <div class="controls">
             <button data-command="pause" data-payload="paused from the Control Center" class="btn">⏸ Pause</button>
             <button data-command="resume" class="btn primary">▶ Resume</button>
@@ -107,11 +107,6 @@
               <input type="checkbox" id="combat-toggle" data-command="enableCombat" />
               <span class="track" aria-hidden="true"></span><span class="switch-label">⚔ Combat armed</span>
             </label>
-            <form class="budget" id="budget-form">
-              <label for="budget-input">Action cap</label>
-              <input id="budget-input" type="number" min="1" max="100" step="1" inputmode="numeric" />
-              <button class="btn small" type="submit">Set</button>
-            </form>
           </div>
         </article>
 
@@ -121,6 +116,47 @@
             <span class="hint" id="blocker-note"></span>
           </header>
           <div class="blocker" id="blocker" data-kind="none"></div>
+        </article>
+
+        <article class="card objective-card">
+          <header class="card-head">
+            <div><span class="section-index">02b / OBJECTIVE</span><h2>Objective &amp; subgoal</h2></div>
+            <span class="hint" id="objective-hint"></span>
+          </header>
+          <div id="objective-panel" class="objective"></div>
+        </article>
+
+        <article class="card training-card" id="training-card">
+          <header class="card-head">
+            <div><span class="section-index">13 / TRAINING</span><h2>Training</h2></div>
+            <span class="hint" id="training-hint"></span>
+          </header>
+          <p class="note" id="training-note"></p>
+          <div class="metrics" id="training-metrics"></div>
+          <div class="progress" role="progressbar" aria-label="Current stage success rate" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="training-progress"></span></div>
+          <form class="training-form" id="training-form">
+            <label for="training-episodes">Episodes per stage</label>
+            <input id="training-episodes" type="number" min="1" max="200" step="1" value="8" inputmode="numeric" />
+            <label class="switch">
+              <input type="checkbox" id="training-fresh" />
+              <span class="track" aria-hidden="true"></span><span class="switch-label">Start over</span>
+            </label>
+            <button class="btn primary" type="submit" id="training-start">▶ Start / resume</button>
+          </form>
+          <div class="controls">
+            <button data-command="pauseTraining" class="btn">⏸ Pause</button>
+            <button data-command="resumeTraining" class="btn">▶ Resume</button>
+            <button data-command="stopTraining" class="btn warn">⏹ Stop</button>
+            <button data-command="evaluateTraining" class="btn">📊 Evaluate latest checkpoint</button>
+          </div>
+          <div class="table-wrap">
+            <table id="training-episodes-table">
+              <thead><tr><th>#</th><th>Stage</th><th>Scenario</th><th>Result</th><th>Actions</th><th>Reward</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="training-checkpoints" class="list"></div>
+          <div id="training-evaluation" class="list"></div>
         </article>
 
         <article class="card task-card">
@@ -161,6 +197,19 @@
 
       <!-- CENTER COLUMN: World View + Decision + Threats -->
       <section class="column column-world">
+        <article class="card seed-card">
+          <header class="card-head">
+            <div><span class="section-index">06 / WORLD SEED</span><h2>World seed</h2></div>
+            <span class="hint" id="seed-hint"></span>
+          </header>
+          <form id="seed-form" class="budget">
+            <label for="seed-input">Seed</label>
+            <input id="seed-input" type="text" maxlength="64" autocomplete="off" placeholder="blank clears" />
+            <button class="btn small" type="submit">Save</button>
+          </form>
+          <p class="note" id="seed-note"></p>
+        </article>
+
         <article class="card threats-card">
           <header class="card-head">
             <div><span class="section-index">05 / THREATS</span><h2>Nearby threats</h2></div>
@@ -335,6 +384,12 @@
             <span class="hint" id="performance-hint"></span>
           </header>
           <div class="metrics performance-metrics" id="performance-metrics"></div>
+          <div class="table-wrap">
+            <table id="loop-targets">
+              <thead><tr><th>Target</th><th>Goal</th><th>Measured</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </article>
       </section>
     </main>

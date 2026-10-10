@@ -114,8 +114,9 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); line
 .switch input:checked + .track::after { left: 18px; background: white; }
 
 /* BUDGET FORM */
-.budget { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-.budget input { width: 60px; background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; color: var(--text); font-family: var(--mono); font-size: 12px; }
+.budget, .training-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.training-form input[type="number"] { width: 70px; }
+.budget input, .training-form input { width: 60px; background: var(--surface2); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; color: var(--text); font-family: var(--mono); font-size: 12px; }
 
 /* PROGRESS */
 .progress { height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; margin: 8px 0; }
@@ -283,3 +284,12 @@ td.mono { font-family: var(--mono); }
 .progression-inventory { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); }
 .progression-inv-label { font-weight: 600; }
 .progression-inv-items { font-family: var(--mono-font, monospace); }
+
+/* Objective, seed and training panels */
+.objective .metrics { margin-bottom: 6px; }
+.objective ul { margin: 6px 0 0; padding-left: 16px; font-size: 12px; }
+.training-card .controls { margin-top: 6px; }
+#training-episodes-table td, #training-episodes-table th { font-size: 12px; }
+#loop-targets td, #loop-targets th { font-size: 12px; }
+#seed-input { width: 200px; }
+.training-card .list-item { padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px; }

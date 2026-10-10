@@ -9,6 +9,7 @@ import test from "node:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { REFLEX_CODES } from "../src/games/minecraft/reflex.js";
 import {
   FAILURE_KIND_LABELS,
   classifyFailure,
@@ -150,6 +151,9 @@ test("every failure code the runtime can raise is classified", () => {
   const unclassified = [...literals]
     .filter((code) => classifyFailure(code, null).kind === "unknown")
     // Enums that are not failures at all: verification states, safety verdicts, risk levels, statuses.
-    .filter((code) => !/^(VERIFIED|UNVERIFIED|ALLOWED|DENIED|CONFIRMED|NOT_APPLICABLE|UNKNOWN_BLOCK|LOW|MEDIUM|HIGH|CRITICAL|IDLE|RUNNING|CONNECTED|DISCONNECTED|FAILED|SUCCESS)/.test(code));
+    .filter((code) => !/^(VERIFIED|UNVERIFIED|ALLOWED|DENIED|CONFIRMED|NOT_APPLICABLE|UNKNOWN_BLOCK|LOW|MEDIUM|HIGH|CRITICAL|IDLE|RUNNING|CONNECTED|DISCONNECTED|FAILED|SUCCESS)/.test(code))
+    // Reflex situations describe the world (e.g. a hostile nearby). When one of them matters to a running action it
+    // surfaces as REFLEX_INTERRUPT, which is classified; the situation codes themselves are never failures.
+    .filter((code) => !(REFLEX_CODES as readonly string[]).includes(code));
   assert.deepEqual(unclassified, [], "add any new failure code to the taxonomy so it is never shown as unexplained");
 });

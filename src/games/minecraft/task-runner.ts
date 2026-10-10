@@ -25,6 +25,11 @@ import { countItemAndEquipment } from "./recipes.js";
 import { verifySkillPostcondition } from "./skill-contracts.js";
 import { WorldMemory } from "./world-memory.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import type { RuntimeMetrics } from "./runtime-metrics.js";
+import { REFLEX_THRESHOLDS } from "./reflex.js";
+
+/** Failure code of an action the fast loop stopped because an urgent condition appeared. */
+export const REFLEX_INTERRUPT_CODE = "REFLEX_INTERRUPT";
 
 export type TaskStatus =
   | "succeeded"
@@ -97,6 +102,8 @@ export interface TaskMetrics {
   readonly hungerRecoveryActions: number;
   readonly deathsObserved: number;
   readonly respawnRecoveries: number;
+  /** Actions stopped by the fast loop because an urgent condition appeared; they are replans, not failures. */
+  readonly reflexInterrupts: number;
 }
 
 export interface MinecraftTaskResult {
@@ -147,6 +154,8 @@ export interface MinecraftTaskRunnerOptions {
    * action half-executed: the run ends as `aborted` with the reason after the current action is verified.
    */
   readonly shouldStop?: () => string | null;
+  /** Receives decision and action timings from the running loop; absent means nothing is measured. */
+  readonly metrics?: RuntimeMetrics;
 }
 
 /** A target that is attempted this many times without observable progress is excluded. */
@@ -419,6 +428,7 @@ export class MinecraftTaskRunner {
     let successfulRecoveries = 0;
     let deathsObserved = 0;
     let respawnRecoveries = 0;
+    let reflexInterrupts = 0;
     let initialDeathCount = 0;
     let stuckActions = 0;
     let oscillations = 0;
@@ -500,7 +510,7 @@ export class MinecraftTaskRunner {
           failure = { code: "OPERATOR_STOP", message: stopReason };
           break;
         }
-        const world = this.runtime.currentWorldState;
+        let world = this.runtime.currentWorldState;
         if (!world) {
           status = "disconnected";
           failure = { code: "WORLD_STATE_UNAVAILABLE", message: "No current world state is available." };
@@ -546,6 +556,10 @@ export class MinecraftTaskRunner {
           }
           break;
         }
+        // A decision must rest on an observation that is still fresh. The fast loop normally keeps it so; if
+        // it is not (a slow observation, a skipped tick), observe now instead of deciding on old facts.
+        const refreshed = await this.runtime.observeIfStale(REFLEX_THRESHOLDS.staleAfterMs).catch(() => null);
+        if (refreshed && refreshed.sequence !== world.sequence) world = refreshed;
         memory.observe(world.state, world.sequence);
         knownResourceBlocksPeak = Math.max(knownResourceBlocksPeak, memory.blockSightings().length);
 
@@ -571,7 +585,9 @@ export class MinecraftTaskRunner {
           ...(worldKey ? { worldKey } : {}),
         };
         stuck = null;
+        const decideStartedMs = performance.now();
         const decision: MinecraftDecisionRecord = this.decisionModel.decide(world.state, task, context, world.sequence);
+        this.options.metrics?.recordDecision(performance.now() - decideStartedMs);
         decisions += 1;
 
         rejectedAlternatives += (decision.rejected?.length ?? 0) + decision.alternatives.length;
@@ -632,6 +648,7 @@ export class MinecraftTaskRunner {
         const timeoutMs = Math.max(1, Math.min(defaultTimeout, timeoutBudget));
 
         const before = this.runtime.currentWorldState;
+        this.options.metrics?.recordActionStart();
         if (before && threatAtActionStart(before.state, skill.id, selected.input, task.dangerRadius)) {
           unsafeActions += 1;
         }
@@ -656,6 +673,7 @@ export class MinecraftTaskRunner {
           break;
         }
 
+        this.options.metrics?.recordActionDuration(skillResult.action.durationMs);
         const after = skillResult.observationAfter ?? this.runtime.currentWorldState;
         if (after) memory.observe(after.state, after.sequence);
         const cellsRevealed = Math.max(0, memory.exploredCellCount - exploredBefore);
@@ -692,6 +710,14 @@ export class MinecraftTaskRunner {
             observationAfterSequence: after?.sequence ?? null,
           },
         });
+        if (skillResult.action.status === "aborted" && skillResult.action.failure?.code === REFLEX_INTERRUPT_CODE) {
+          // The fast loop saw an urgent condition and stopped this action on purpose. The target is not
+          // at fault, so nothing is excluded or counted as a failure: the next iteration replans from the
+          // fresh observation, which is where the urgent condition is handled.
+          reflexInterrupts += 1;
+          stuck = null;
+          continue;
+        }
 
         const beforeCount = before ? targetCountOf(before.state) : 0;
         const afterCount = after ? targetCountOf(after.state) : beforeCount;
@@ -1021,6 +1047,7 @@ export class MinecraftTaskRunner {
       hungerRecoveryActions,
       deathsObserved,
       respawnRecoveries,
+      reflexInterrupts,
     };
     if (learner) {
       try {

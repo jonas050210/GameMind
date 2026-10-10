@@ -59,7 +59,8 @@ export const MINECRAFT_SAFETY_POLICY: SafetyPolicy = {
   allowlist: [],
   denylist: [],
   optedInCapabilities: [],
-  maxActionsPerRun: 100,
+  // Runaway guard only, not a task budget: tasks end by completion, timeout, stuck detection or stop.
+  maxActionsPerRun: 5000,
   perCapabilityMaxPerRun: { "minecraft.attack_hostile": 6 },
   cooldownMsByCapability: {},
   protectedHealthFloor: null,

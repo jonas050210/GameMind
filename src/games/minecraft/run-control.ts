@@ -49,8 +49,6 @@ export interface RunControl {
   /** Kind of the last task that finished, so the UI still describes the run after it ends. */
   lastTaskKind: MinecraftTask["kind"] | null;
   actionsUsed: number;
-  /** The budget the last started task carried, kept after it ends so the UI can still show the ratio. */
-  startedMaxActions: number | null;
   startedAt: string | null;
   /** True when the agent is running in autonomous survival mode (no explicit task). */
   autonomous: boolean;
@@ -90,12 +88,19 @@ export interface ControlCenterSource {
   readonly progressTracker?: import("./progress-tracker.js").ProgressTracker | null;
   /** Optional landmark memory for persistent world knowledge. */
   readonly landmarkMemory?: import("./landmark-memory.js").LandmarkMemory | null;
+  /** Measured timing of the fast observation loop, decisions and actions. */
+  readonly metrics?: import("./runtime-metrics.js").RuntimeMetrics | null;
+  /** Subgoal strategy layer whose cooldowns and outcomes are shown as the objective. */
+  readonly autonomy?: import("./autonomy-controller.js").AutonomyController | null;
+  /** The fast loop itself, for its running and in-flight state. */
+  readonly loop?: import("./agent-loop.js").FastObservationLoop | null;
+  /** Operator-entered world seed (manual; never auto-detected). */
+  readonly worldSeed?: import("./world-seed.js").WorldSeedStore | null;
+  /** Training and evaluation as separate processes; null when the host has no training support. */
+  readonly training?: import("../../training/manager.js").TrainingManager | null;
 }
 
 const BAND_LABELS = ["safety", "survival", "progress"] as const;
-
-/** Same ceiling the task schemas enforce, so a UI request cannot out-run the validated limits. */
-const TASK_MAX_ACTIONS = 100;
 
 /** How young the world panel's observation must be before the Control Center asks the game for another. */
 const WORLD_VIEW_MAX_AGE_MS = 2_000;
@@ -392,21 +397,39 @@ export function createControlCenterSource(source: ControlCenterSource): {
           : "Combat disarmed: attacks are refused at both the adapter and the safety policy.",
       };
     },
-    setActionBudget(payload) {
-      const value = typeof payload === "number" ? payload : Number((payload as { maxActions?: unknown })?.maxActions);
-      if (!Number.isInteger(value) || value < 1 || value > TASK_MAX_ACTIONS) {
-        return { ok: false, message: `The action budget must be an integer between 1 and ${TASK_MAX_ACTIONS}.` };
+    setWorldSeed(seed) {
+      if (!source.worldSeed) return { ok: false, message: "This host has no world-seed store." };
+      try {
+        const stored = source.worldSeed.set(seed);
+        return {
+          ok: true,
+          message: stored
+            ? `World seed saved as ${stored}. It is an operator-entered value and is not verified against the server.`
+            : "World seed cleared.",
+        };
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
-      // Both limits move together: the task's own budget and the broker's hard cap. The broker counts up
-      // from zero only when the next run starts, so this applies to the rest of the current run as well.
-      safety?.configure({ maxActionsPerRun: value });
-      if (control.task) {
-        control.task = { ...control.task, maxActions: value };
-      }
-      return {
-        ok: true,
-        message: `Action budget set to ${value}: the running task's remaining actions and the broker's per-run cap both use it from now on.`,
-      };
+    },
+    async startTraining(options) {
+      if (!source.training) return { ok: false, message: "Training is not available in this host." };
+      return source.training.start(options ?? {});
+    },
+    async pauseTraining() {
+      if (!source.training) return { ok: false, message: "Training is not available in this host." };
+      return source.training.pause();
+    },
+    async resumeTraining() {
+      if (!source.training) return { ok: false, message: "Training is not available in this host." };
+      return source.training.resume();
+    },
+    async stopTraining() {
+      if (!source.training) return { ok: false, message: "Training is not available in this host." };
+      return source.training.stop();
+    },
+    async evaluateTraining(checkpointId) {
+      if (!source.training) return { ok: false, message: "Training is not available in this host." };
+      return source.training.evaluate(checkpointId);
     },
     stopTask(reason) {
       if (!control.task) return { ok: false, message: "No task is running." };
@@ -493,7 +516,10 @@ export function createControlCenterSource(source: ControlCenterSource): {
     // A viewer that opens the page between runs would otherwise show the last observation of the run that
     // ended — indistinguishable from a live view. Refreshing only while nothing is running keeps the
     // world-model sequence out of the way of an in-flight action verification.
-    if (source.worldSource !== "simulated" && control.task === null && runtime.status().adapterStatus === "connected") {
+    // While the fast loop runs it already refreshes the view about once a second; an extra observation from
+    // a UI poll could overlap with it, so the poll only refreshes when the loop is not running.
+    const loopRunning = source.loop?.state.running === true;
+    if (!loopRunning && source.worldSource !== "simulated" && control.task === null && runtime.status().adapterStatus === "connected") {
       await runtime.observeIfStale(WORLD_VIEW_MAX_AGE_MS);
     }
     const status = runtime.status();
@@ -683,7 +709,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
         decisionModel: str((decision?.data as Record<string, unknown> | undefined)?.modelId, "minecraft-task-decision-model"),
         startedAt: control.startedAt,
         actionsUsed: control.actionsUsed,
-        maxActions: control.task?.maxActions ?? control.startedMaxActions,
         elapsedMs: control.result?.metrics.elapsedMs ?? null,
         status: control.result?.status ?? null,
         failure: control.result?.failure ?? null,
@@ -757,7 +782,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
         pauseReason: broker.pauseReason,
         tripped: broker.tripped,
         tripReason: broker.tripReason,
-        maxActionsPerRun: broker.policy.maxActionsPerRun,
         actionsApproved: broker.actionsApproved,
         actionsDenied: broker.actionsDenied,
         deniedByCode: broker.deniedByCode,
@@ -867,6 +891,18 @@ export function createControlCenterSource(source: ControlCenterSource): {
         ? (adapter.combatAllowed ? "adapter" : "safety-policy")
         : null,
       offlineNote: source.offlineNote ?? null,
+      agentLoop: source.metrics?.summary() ?? null,
+      objective: source.autonomy?.snapshot() ?? null,
+      worldSeed: source.worldSeed
+        ? {
+            value: source.worldSeed.value,
+            source: source.worldSeed.value === null ? "unset" : "manual",
+            verified: false,
+            note: source.worldSeed.error
+              ?? "Entered by the operator. It is not auto-detected or checked against the server, so anything derived from it is a prediction until verified.",
+          }
+        : null,
+      training: source.training ? await source.training.snapshot() : null,
     };
     return source.decorate ? source.decorate(base) : base;
   }

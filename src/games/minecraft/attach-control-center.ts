@@ -1,7 +1,13 @@
 import type { Logger } from "pino";
 import { resolve } from "node:path";
-import { generateAutonomousTask } from "./autonomous-task.js";
+import { AutonomyController, type AutonomyDecision } from "./autonomy-controller.js";
+import { FastObservationLoop, type ObservationTick } from "./agent-loop.js";
+import { RuntimeMetrics } from "./runtime-metrics.js";
+import { describeReflex } from "./reflex.js";
+import { DEFAULT_WORLD_CONFIG_PATH, WorldSeedStore } from "./world-seed.js";
+import { TrainingManager } from "../../training/manager.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
+import type { WorldState } from "../../core/types.js";
 import type { SkillRuntime } from "../../core/skill-runtime.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
 import type { RingBufferTraceSink } from "../../core/trace.js";
@@ -26,12 +32,28 @@ import {
 } from "./task.js";
 import { minecraftLogNames, minecraftCraftTaskItemNames } from "./capabilities.js";
 import { minecraftMineableBlockNames } from "./mining.js";
-import type { MinecraftTaskResult, MinecraftTaskRunnerOptions } from "./task-runner.js";
+import { REFLEX_INTERRUPT_CODE, type MinecraftTaskResult, type MinecraftTaskRunnerOptions } from "./task-runner.js";
 import { createControlCenterSource, type RunControl } from "./run-control.js";
 import { ProgressTracker } from "./progress-tracker.js";
 import { CompanionMemory } from "./companion-memory.js";
 import { CompanionController } from "./companion-controller.js";
-import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
+import {
+  MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
+  MINECRAFT_EAT_CAPABILITY,
+  MINECRAFT_INSPECT_BLOCK_CAPABILITY,
+  MINECRAFT_LOOK_CAPABILITY,
+} from "./capabilities.js";
+
+/**
+ * Capabilities a reflex must not interrupt: finishing a meal or a swing is the survival response itself, and
+ * interrupting a look or an inspection only costs a fresh observation.
+ */
+export const REFLEX_PROTECTED_CAPABILITIES = [
+  MINECRAFT_EAT_CAPABILITY,
+  MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
+  MINECRAFT_LOOK_CAPABILITY,
+  MINECRAFT_INSPECT_BLOCK_CAPABILITY,
+] as const;
 
 /** Task kinds the Control Center may start. Each maps onto one validated task schema. */
 export const controlCenterTaskKinds = ["gather-logs", "mine-stone", "craft-wooden-pickaxe", "secure-food", "build-shelter"] as const;
@@ -132,10 +154,33 @@ export interface MinecraftRunHostOptions {
   readonly worldSource?: "live" | "simulated";
   /** Invoked when the operator starts a task from the UI and it finishes; the demo uses it to print a report. */
   readonly onTaskFinished?: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
+  /**
+   * Whether the agent starts its own tasks when idle (autonomous survival and progression). Defaults to true.
+   * With false the fast loop still observes and reacts, but no task is started without an operator request.
+   */
+  readonly autonomous?: boolean;
+  /** Where the operator's world seed is stored. Defaults to data/world-config.json. */
+  readonly worldConfigPath?: string;
+  /** Root directory for training state, checkpoints and evaluation reports. Defaults to data/training. */
+  readonly trainingDirectory?: string;
+  /** Period of the fast observation loop. Defaults to one second; tests shorten or stretch it. */
+  readonly observationIntervalMs?: number;
+  /** Starts the fast loop immediately. Tests that drive ticks by hand set this to false. */
+  readonly startFastLoop?: boolean;
+  /** Injectable clocks and timers for deterministic tests of the loop. */
+  readonly loopClock?: () => number;
+  readonly loopTimers?: {
+    readonly setTimer: (callback: () => void, ms: number) => unknown;
+    readonly clearTimer: (handle: unknown) => void;
+  };
 }
 
 export interface MinecraftRunHost {
   readonly control: RunControl;
+  /** Measured timing of the fast loop, the decisions and the actions. */
+  readonly metrics: RuntimeMetrics;
+  readonly loop: FastObservationLoop;
+  readonly autonomy: AutonomyController;
   readonly memory: WorldMemory;
   readonly companion: CompanionController | null;
   /** Options the caller must spread into its own runner so live state, budgets and cancellation are shared. */
@@ -161,7 +206,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     result: null,
     lastTaskKind: null,
     actionsUsed: 0,
-    startedMaxActions: null,
     startedAt: null,
     autonomous: false,
   };
@@ -254,44 +298,83 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     }
   }
 
-  // Autonomous survival loop: runs when no task is active and the agent is connected.
-  // Generates implicit survival tasks based on the agent's current needs.
-  let autonomousTimer: NodeJS.Timeout | null = null;
+  // Autonomous progress. It is driven by the fast observation loop rather than a timer: whenever the loop has
+  // a fresh observation and no task is running, the autonomy controller chooses the next subgoal at once.
+  const metrics = new RuntimeMetrics(options.loopClock ?? (() => Date.now()));
+  const worldSeed = new WorldSeedStore(options.worldConfigPath ?? DEFAULT_WORLD_CONFIG_PATH);
+  const training = new TrainingManager({ root: options.trainingDirectory ?? "data/training" });
+  const autonomy = new AutonomyController({ tracker: progressTracker, now: options.loopClock ?? (() => Date.now()) });
   let autonomousRunning = false;
-  const startAutonomousLoop = (): void => {
-    if (autonomousTimer) return;
-    autonomousTimer = setInterval(() => {
-      if (autonomousRunning || control.task !== null) return;
-      if (options.runtime.adapter.status !== "connected") return;
-      if (options.safety?.snapshot().tripped || options.safety?.snapshot().paused) return;
-      const world = options.runtime.currentWorldState;
-      if (!world?.state) return;
-      autonomousRunning = true;
-      try {
-        // Record landmarks from current observation before generating the next task
-        const seq = world.observedAt ? Date.parse(world.observedAt) : Date.now();
-        recordLandmarksFromObservation(world.state, seq);
 
-        const autoTask = generateAutonomousTask(world.state, progressTracker);
-        if (autoTask) {
-          control.autonomous = true;
-          void execute(autoTask, "cli").then(() => {
-            autonomousRunning = false;
-            control.autonomous = false;
-          }).catch((error: unknown) => {
-            options.logger.warn({ err: error }, "Autonomous task failed");
-            autonomousRunning = false;
-            control.autonomous = false;
-          });
-        }
-      } catch (error) {
-        options.logger.warn({ err: error }, "Autonomous loop tick failed");
+  const startAutonomousIfIdle = (world: WorldState<MinecraftObservation>): void => {
+    if (options.autonomous === false) return;
+    if (autonomousRunning || control.task !== null) return;
+    if (options.runtime.adapter.status !== "connected") return;
+    const safetySnapshot = options.safety?.snapshot();
+    if (safetySnapshot?.tripped || safetySnapshot?.paused) return;
+    autonomousRunning = true;
+    let decision: AutonomyDecision;
+    try {
+      decision = autonomy.next(world.state);
+    } catch (error) {
+      options.logger.warn({ err: error }, "Autonomy could not choose a subgoal");
+      autonomousRunning = false;
+      return;
+    }
+    if (!decision.task) {
+      autonomousRunning = false;
+      return;
+    }
+    const task = decision.task;
+    control.autonomous = true;
+    void execute(task, "cli")
+      .then((result) => {
+        autonomy.record(task, result);
+      })
+      .catch((error: unknown) => {
+        options.logger.warn({ err: error }, "Autonomous subgoal failed");
+      })
+      .finally(() => {
         autonomousRunning = false;
-      }
-    }, 5_000);
-    autonomousTimer.unref();
+        control.autonomous = false;
+        loop.nudge();
+      });
   };
-  startAutonomousLoop();
+
+  const loop = new FastObservationLoop({
+    runtime: options.runtime,
+    metrics,
+    logger: options.logger,
+    intervalMs: options.observationIntervalMs ?? 1_000,
+    ...(options.loopClock ? { now: options.loopClock } : {}),
+    ...(options.loopTimers ? { setTimer: options.loopTimers.setTimer, clearTimer: options.loopTimers.clearTimer } : {}),
+    onObservation: (tick: ObservationTick) => {
+      // Spatial memory is fed by every observation, not only the ones that happen to be idle.
+      recordLandmarksFromObservation(tick.world.state, tick.world.sequence);
+      // Reflex: an urgent condition that just appeared stops a running action that does not have to finish.
+      if (tick.newlyUrgent.length === 0 || control.task === null) return;
+      const reason = `Reflex interrupt: ${describeReflex(tick.assessment)}`;
+      const outcome = options.runtime.actionExecutor.interruptActive(reason, {
+        code: REFLEX_INTERRUPT_CODE,
+        protectedCapabilities: REFLEX_PROTECTED_CAPABILITIES,
+      });
+      metrics.recordInterrupt({
+        detectedMs: tick.detectedMs,
+        dispatchedMs: Date.now(),
+        interrupted: outcome.interrupted,
+        protectedCapability: !outcome.interrupted && outcome.capability !== null,
+      });
+      options.logger.warn(
+        { urgent: tick.newlyUrgent, interrupted: outcome.interrupted, capability: outcome.capability },
+        outcome.interrupted ? "Urgent condition interrupted the running action" : "Urgent condition seen; the running action is protected",
+      );
+    },
+    onIdle: (tick: ObservationTick) => {
+      startAutonomousIfIdle(tick.world);
+    },
+  });
+  if (options.startFastLoop !== false) loop.start();
+
   const unsubscribeChat = companion && options.minecraftCommander && sessionAdapter.onCompanionChat
     ? sessionAdapter.onCompanionChat((username, message) => {
         if (username !== options.minecraftCommander) return;
@@ -299,7 +382,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
         void companion.submit(message, "minecraft", username);
       })
     : null;
-
   const source = createControlCenterSource({
     runtime: options.runtime,
     memory,
@@ -317,6 +399,11 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     companion,
     taskFor: taskFromControlCenterRequest,
     progressTracker,
+    metrics,
+    autonomy,
+    loop,
+    worldSeed,
+    training,
     landmarkMemory: memory.landmarks,
     ...(options.decorate ? { decorate: options.decorate } : {}),
     onStart: async (task) => {
@@ -329,8 +416,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   async function execute(task: MinecraftTask, origin: "cli" | "control-center"): Promise<MinecraftTaskResult> {
     if (control.task) throw new Error("A task is already running in this agent; stop it before starting another.");
     control.task = task;
+    metrics.setBusy(true);
     control.result = null;
-    control.startedMaxActions = task.maxActions;
     control.stopRequested = null;
     control.stoppingRequestedAt = null;
     control.autonomous = false;
@@ -352,6 +439,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
         }
       }
       control.task = null;
+      metrics.setBusy(false);
+      loop.nudge();
     }
   }
 
@@ -376,9 +465,13 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     control,
     memory,
     companion,
+    metrics,
+    loop,
+    autonomy,
     handle,
     runnerOptions: {
       memory,
+      metrics,
       onAction: () => {
         control.actionsUsed += 1;
       },
@@ -391,10 +484,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     },
     async close() {
       companion?.stop();
-      if (autonomousTimer) {
-        clearInterval(autonomousTimer);
-        autonomousTimer = null;
-      }
+      loop.stop();
+      await training.dispose();
       unsubscribeChat?.();
       await handle.stop("run host closing");
       if (memory instanceof PersistentWorldMemory) {

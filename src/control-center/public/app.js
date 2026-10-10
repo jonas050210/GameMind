@@ -101,6 +101,9 @@ function render() {
   renderLearning(snapshot);
   renderWorld(snapshot);
   renderPerformance(snapshot);
+  renderObjective(snapshot);
+  renderWorldSeed(snapshot);
+  renderTraining(snapshot);
   renderSkills(snapshot);
   renderActions(snapshot);
   renderBlocker(snapshot);
@@ -139,9 +142,7 @@ function renderRun(snapshot) {
   clear(metrics);
   metrics.append(
     metric("Task", agent.taskId ?? "none", { note: agent.taskKind ? String(agent.taskKind) : null }),
-    metric("Actions", `${agent.actionsUsed ?? 0}${agent.maxActions ? ` / ${agent.maxActions}` : ""}`, {
-      tone: agent.maxActions && agent.actionsUsed / agent.maxActions > 0.8 ? "warn" : null,
-    }),
+    metric("Actions", `${agent.actionsUsed ?? 0}`, { note: "no action cap; guarded by timeouts and stuck detection" }),
     metric("Approved", safety.actionsApproved ?? 0, { tone: "good" }),
     metric("Denied", safety.actionsDenied ?? 0, { tone: safety.actionsDenied ? "bad" : null }),
     metric("Elapsed", agent.elapsedMs != null ? `${num(agent.elapsedMs / 1000, 1)}s` : "—"),
@@ -149,21 +150,19 @@ function renderRun(snapshot) {
       tone: ["succeeded", "idle", "stopped"].includes(agent.status ?? agent.state) ? "good" : agent.status ? "bad" : null,
     }),
   );
+  // The bar shows the goal's own progress when the goal reports one; it is not an action budget.
   const progress = el("run-progress");
-  const actionsUsed = Math.max(0, agent.actionsUsed ?? 0);
-  const maxActions = Math.max(1, agent.maxActions ?? 100);
-  const ratio = Math.min(1, actionsUsed / maxActions);
+  const goalProgress = snapshot.goal?.progress ?? null;
+  const ratio = goalProgress && goalProgress.of > 0 ? Math.min(1, Math.max(0, goalProgress.have / goalProgress.of)) : 0;
   progress.style.width = `${Math.round(ratio * 100)}%`;
-  progress.parentElement?.setAttribute("aria-valuemax", String(maxActions));
-  progress.parentElement?.setAttribute("aria-valuenow", String(Math.min(actionsUsed, maxActions)));
+  progress.parentElement?.setAttribute("aria-valuemax", "100");
+  progress.parentElement?.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
   el("run-hint").textContent = agent.startedAt ? `started ${ago(agent.startedAt)}` : "no run in progress";
   const blocker = agent.blocker;
   if (blocker && blocker.kind !== "none") {
     el("run-hint").textContent = blocker.headline;
     el("run-hint").title = [blocker.detail, blocker.hint].filter(Boolean).join("\n\n");
   }
-  const budget = el("budget-input");
-  if (document.activeElement !== budget && agent.maxActions != null) budget.value = String(agent.maxActions);
   const combat = el("combat-toggle");
   if (snapshot.combatAllowed === null || snapshot.combatAllowed === undefined) {
     combat.closest(".switch").hidden = true;
@@ -283,7 +282,7 @@ function renderSituationBar(snapshot) {
     if (agent.autonomous) {
       taskEl.textContent = "Autonomous";
     } else if (agent.taskId) {
-      taskEl.textContent = `${agent.taskKind ?? "task"} (${agent.actionsUsed ?? 0}/${agent.maxActions ?? "?"})`;
+      taskEl.textContent = `${agent.taskKind ?? "task"} (${agent.actionsUsed ?? 0} actions)`;
     } else {
       taskEl.textContent = "None";
     }
@@ -545,7 +544,7 @@ function renderSafety(snapshot) {
   const metrics = el("safety-metrics");
   clear(metrics);
   metrics.append(
-    metric("Policy", safety.policyId ?? "—", { note: safety.enabled === false ? "disabled" : `max risk ${safety.maxRisk ?? "—"} · budget ${safety.maxActionsPerRun ?? "—"}` }),
+    metric("Policy", safety.policyId ?? "—", { note: safety.enabled === false ? "disabled" : `max risk ${safety.maxRisk ?? "—"}` }),
     metric("Paused", safety.paused ? "yes" : "no", { tone: safety.paused ? "warn" : null, note: safety.pauseReason ?? null }),
     metric("Tripped", safety.tripped ? "yes" : "no", { tone: safety.tripped ? "bad" : null, note: safety.tripReason ?? null }),
     metric("Denied", safety.actionsDenied ?? 0, { tone: safety.actionsDenied ? "bad" : "good" }),
@@ -925,10 +924,176 @@ function freshnessReason(freshness, provenance, connection) {
   return `live — observation #${freshness.sequence} (${age} old)${extra}`;
 }
 
+function renderObjective(snapshot) {
+  const panel = el("objective-panel");
+  if (!panel) return;
+  clear(panel);
+  const objective = snapshot.objective ?? null;
+  if (!objective) {
+    el("objective-hint").textContent = "no decision yet";
+    panel.append(node("p", "note", "Autonomy has not chosen a subgoal yet."));
+    return;
+  }
+  el("objective-hint").textContent = objective.fallback ? "fallback route" : objective.subgoal && objective.subgoal !== "none" ? "preferred route" : "waiting";
+  panel.append(
+    metric("Objective", objective.objective ?? "none"),
+    metric("Subgoal", objective.subgoal ?? "none", { note: objective.completion ?? null }),
+    metric("No-progress streak", String(objective.consecutiveNoProgress ?? 0), { tone: (objective.consecutiveNoProgress ?? 0) >= 2 ? "warn" : null }),
+    metric("Decisions", String(objective.decided ?? 0), { note: `${objective.fallbacksUsed ?? 0} fallbacks used` }),
+  );
+  panel.append(node("p", "note", objective.reason ?? ""));
+  if ((objective.cooldowns ?? []).length) {
+    const list = node("ul", null);
+    for (const cooldown of objective.cooldowns) {
+      list.append(node("li", null, `cooling: ${cooldown.signature} until ${clock(cooldown.until)} — ${cooldown.reason}`));
+    }
+    panel.append(list);
+  }
+  if ((objective.recentOutcomes ?? []).length) {
+    const list = node("ul", null);
+    for (const outcome of objective.recentOutcomes.slice(0, 5)) {
+      list.append(node("li", null, `${outcome.kind} · ${outcome.taskId} · ${outcome.reason}`));
+    }
+    panel.append(list);
+  }
+}
+
+function renderWorldSeed(snapshot) {
+  const seed = snapshot.worldSeed ?? null;
+  const input = el("seed-input");
+  if (seed && document.activeElement !== input) input.value = seed.value ?? "";
+  el("seed-hint").textContent = !seed
+    ? "unavailable"
+    : seed.source === "manual" ? "entered by hand · unverified" : "not set";
+  el("seed-note").textContent = seed ? seed.note : "";
+}
+
+function renderTraining(snapshot) {
+  const training = snapshot.training ?? null;
+  const metrics = el("training-metrics");
+  if (!metrics) return;
+  clear(metrics);
+  const setEnabled = (selector, allowed) => {
+    const button = document.querySelector(selector);
+    if (button instanceof HTMLButtonElement) button.disabled = state.busy || !allowed;
+  };
+  if (!training) {
+    el("training-hint").textContent = "unavailable";
+    metrics.append(metric("Training", "unavailable", { note: "this host has no training support" }));
+    for (const selector of ['[data-command="pauseTraining"]', '[data-command="resumeTraining"]', '[data-command="stopTraining"]', '[data-command="evaluateTraining"]', "#training-start"]) setEnabled(selector, false);
+    return;
+  }
+  const status = training.status;
+  const active = status === "running" || status === "paused" || status === "evaluating";
+  const stage = training.stage;
+  el("training-hint").textContent = training.updatedAt ? `updated ${ago(training.updatedAt)}` : "no run yet";
+  el("training-note").textContent = training.note;
+  metrics.append(
+    metric("Status", status, {
+      tone: status === "failed" || status === "interrupted" ? "bad" : status === "running" ? "good" : status === "paused" ? "warn" : null,
+      note: training.processAlive ? `separate process · pid ${training.pid}` : "no training process",
+    }),
+    metric("Episodes", `${training.episodesTotal} / ${training.episodeBudget}`, { note: "trained so far / budget" }),
+    metric("Stage", stage ? `${stage.index + 1} of ${stage.total} · ${stage.id}` : "complete", { note: stage ? stage.label : null }),
+    metric("Stage success", stage && stage.successRate !== null ? pct(stage.successRate) : "—", {
+      note: stage ? `passes at ${pct(stage.passRate)} after ${training.episodesPerStage ?? "?"}+ episodes` : null,
+    }),
+    metric("Recent success", pct(training.recentSuccessRate), { note: "last episodes in the saved state" }),
+    metric("Recent reward", num(training.recentMeanReward, 2), { note: "mean per-task reward from the learner" }),
+    metric("Checkpoints", String(training.checkpoints.length), { note: training.checkpoints[0]?.id ?? "none yet" }),
+  );
+  const bar = el("training-progress");
+  const ratio = stage && stage.successRate !== null ? Math.min(1, Math.max(0, stage.successRate)) : 0;
+  bar.style.width = `${Math.round(ratio * 100)}%`;
+  bar.parentElement?.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
+  setEnabled('[data-command="pauseTraining"]', status === "running");
+  setEnabled('[data-command="resumeTraining"]', status === "paused" || status === "interrupted");
+  setEnabled('[data-command="stopTraining"]', status === "running" || status === "paused");
+  setEnabled('[data-command="evaluateTraining"]', !active && training.checkpoints.length > 0);
+  setEnabled("#training-start", !active);
+
+  const body = el("training-episodes-table").tBodies[0];
+  body.replaceChildren();
+  for (const episode of training.recentEpisodes) {
+    const row = document.createElement("tr");
+    row.append(
+      node("td", "mono", String(episode.index)),
+      node("td", null, episode.stageId),
+      node("td", "mono", episode.scenarioId),
+      node("td", episode.success ? "ok" : "no", episode.success ? "success" : `${episode.status}${episode.failureCode ? ` · ${episode.failureCode}` : ""}`),
+      node("td", null, `${episode.actions} (${episode.wastedActions} wasted)`),
+      node("td", null, episode.reward === null ? "—" : num(episode.reward, 2)),
+    );
+    body.append(row);
+  }
+  if (!body.childElementCount) body.append(emptyRow(6, "No training episodes yet."));
+
+  const checkpoints = el("training-checkpoints");
+  checkpoints.replaceChildren();
+  for (const checkpoint of training.checkpoints) {
+    checkpoints.append(node("div", "list-item", `${checkpoint.id} · ${checkpoint.stageId} · ${checkpoint.episodes} episodes · ${checkpoint.weightedContexts} weighted contexts`));
+  }
+
+  const evaluation = el("training-evaluation");
+  evaluation.replaceChildren();
+  const last = training.lastEvaluation;
+  if (last) {
+    const deltas = last.deltas;
+    evaluation.append(
+      node("div", "list-item", `${last.verdict === "promotable" ? "Promotable" : "Not promotable"} · ${last.checkpointId} · ${clock(last.generatedAt)}`),
+      node("div", "list-item", `Held-out success: ${pct(last.successRate.baseline)} baseline → ${pct(last.successRate.candidate)} checkpoint`
+        + (deltas ? ` · median actions ${num(deltas.medianActions, 1)} · wasted actions ${num(deltas.meanWastedActions, 2)} · unsafe ${deltas.unsafeActions} · deaths ${deltas.deaths}` : "")),
+    );
+    for (const reason of last.reasons ?? []) evaluation.append(node("div", "list-item", reason));
+  }
+  if (training.lastError) evaluation.append(node("div", "list-item bad", `Last error: ${training.lastError}`));
+}
+
+function renderLoopPerformance(snapshot, container) {
+  const loop = snapshot.agentLoop ?? null;
+  const ms = (value) => (typeof value === "number" && Number.isFinite(value) ? `${num(value, 0)} ms` : "—");
+  if (!loop) {
+    container.append(metric("Observation loop", "unavailable", { note: "this host does not run the fast loop" }));
+    return;
+  }
+  const observation = loop.observation;
+  container.append(
+    metric("Observation rate", observation.frequencyHz === null ? "—" : `${num(observation.frequencyHz, 2)} Hz`, {
+      tone: !loop.running ? null : observation.frequencyHz !== null && observation.frequencyHz >= 0.8 ? "good" : "warn",
+      note: `${observation.total} total · ${observation.errors} errors · ${observation.skippedTicks} skipped${loop.running ? "" : " · loop stopped"}`,
+    }),
+    metric("Observation age", ms(observation.ageMs), {
+      tone: observation.stale ? "bad" : "good",
+      note: observation.stale ? "stale: older than the decision bound" : "fresh",
+    }),
+    metric("Interval p95", ms(observation.intervalMs.p95Ms), { note: `observation duration p95 ${ms(observation.durationMs.p95Ms)}` }),
+    metric("Decision p95", ms(loop.decisionMs.p95Ms), { note: `${loop.decisionMs.count} decisions` }),
+    metric("Action p95", ms(loop.actionMs.p95Ms), { note: `${loop.actionMs.count} actions` }),
+    metric("Reaction p95", ms(loop.reactionMs.p95Ms), { note: `urgent → dispatch · ${loop.urgent.events} urgent events` }),
+    metric("Interrupts", String(loop.urgent.interruptsDispatched), { note: `${loop.urgent.interruptsSkippedProtected} skipped (protected action)` }),
+    metric("Idle share", loop.idle.idleFraction === null ? "—" : `${num(loop.idle.idleFraction * 100, 0)}%`, { note: "time with no task running" }),
+  );
+  const body = el("loop-targets")?.tBodies[0];
+  if (!body) return;
+  body.replaceChildren();
+  for (const target of loop.targets ?? []) {
+    const row = document.createElement("tr");
+    const status = target.met === null ? "no data" : target.met ? "met" : "missed";
+    row.append(
+      node("td", null, target.label),
+      node("td", "mono", `≤ ${target.targetMs} ms`),
+      node("td", "mono", ms(target.measuredMs)),
+      node("td", target.met === false ? "no" : target.met ? "ok" : null, status),
+    );
+    body.append(row);
+  }
+}
+
 function renderPerformance(snapshot) {
   const metrics = el("performance-metrics");
   if (!metrics) return;
   clear(metrics);
+  renderLoopPerformance(snapshot, metrics);
   const runtime = snapshot.performance ?? null;
   const perception = snapshot.world?.perception ?? null;
   const mb = (bytes) => typeof bytes === "number" && Number.isFinite(bytes) ? `${num(bytes / (1024 * 1024), 1)} MB` : "—";
@@ -1158,14 +1323,20 @@ function wireControls() {
     input.value = "";
     void sendCommand("chat", message);
   });
-  el("budget-form").addEventListener("submit", (event) => {
+  el("seed-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    const value = Number(el("budget-input").value);
-    if (!Number.isInteger(value) || value < 1) {
-      toast("setActionBudget: enter a whole number of at least 1.", "bad");
+    void sendCommand("setWorldSeed", el("seed-input").value.trim());
+  });
+  el("training-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const episodesPerStage = Number(el("training-episodes").value);
+    if (!Number.isInteger(episodesPerStage) || episodesPerStage < 1 || episodesPerStage > 200) {
+      toast("startTraining: episodes per stage must be a whole number from 1 to 200.", "bad");
       return;
     }
-    void sendCommand("setActionBudget", { maxActions: value });
+    const fresh = el("training-fresh").checked;
+    if (fresh && !window.confirm("Start over deletes the saved training experience and checkpoints. Continue?")) return;
+    void sendCommand("startTraining", { episodesPerStage, fresh });
   });
   const theme = el("theme-toggle");
   if (theme) {
