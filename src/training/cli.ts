@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 import pino from "pino";
 import { evaluateCheckpoint } from "./evaluate.js";
+import { DEFAULT_TRAINING_EXPLORATION_RATE, TRAINING_STAGES } from "./curriculum.js";
 import { readControlCommand, readTrainingState, trainingPaths, writeControlCommand } from "./state.js";
 import { runTraining } from "./trainer.js";
 
 const USAGE = `GameMind training
 
-  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh] [--explore RATE]
-      Runs the curriculum on the offline simulator. Resumes from DIR/state.json unless --fresh is given.
+  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh] [--explore RATE] [--stages A,B]
+      Runs the curriculum on the offline simulator. Resumes from DIR/state.json unless --fresh is given; --fresh
+      archives (never deletes) the existing run first. --explore defaults to ${DEFAULT_TRAINING_EXPLORATION_RATE} (0 = greedy).
+      --stages picks curriculum stages by id (${TRAINING_STAGES.map((stage) => stage.id).join(", ")}). One run per directory at a time.
   npm run train -- evaluate [--dir DIR] [--checkpoint ID] [--seeds N]
       Scores a checkpoint against the baseline on held-out evaluation seeds and writes a JSON report.
   npm run train -- status [--dir DIR]
@@ -24,6 +27,7 @@ interface ParsedArgs {
   readonly maxMinutes?: number;
   readonly fresh: boolean;
   readonly explore?: number;
+  readonly stages?: readonly string[];
   readonly checkpoint?: string;
   readonly seeds?: number;
 }
@@ -69,6 +73,14 @@ export function parseTrainingArgs(argv: readonly string[]): ParsedArgs {
         parsed.explore = rate;
         break;
       }
+      case "--stages": {
+        const ids = value().split(",").map((id) => id.trim()).filter((id) => id.length > 0);
+        const known = new Set(TRAINING_STAGES.map((stage) => stage.id));
+        const unknown = ids.filter((id) => !known.has(id));
+        if (ids.length === 0 || unknown.length > 0) throw new Error(`--stages needs known stage ids (${[...known].join(", ")})${unknown.length > 0 ? `; unknown: ${unknown.join(", ")}` : ""}.`);
+        parsed.stages = ids;
+        break;
+      }
       case "--checkpoint":
         parsed.checkpoint = value();
         break;
@@ -95,7 +107,8 @@ async function main(): Promise<number> {
         ...(args.maxEpisodes !== undefined ? { maxEpisodes: args.maxEpisodes } : {}),
         ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes } : {}),
         fresh: args.fresh,
-        ...(args.explore !== undefined ? { explorationRate: args.explore } : {}),
+        explorationRate: args.explore ?? DEFAULT_TRAINING_EXPLORATION_RATE,
+        ...(args.stages ? { stages: TRAINING_STAGES.filter((stage) => args.stages!.includes(stage.id)) } : {}),
         evaluationSeedCount: 10,
         logger,
       });
@@ -111,11 +124,17 @@ async function main(): Promise<number> {
       console.log(JSON.stringify({
         checkpoint: report.checkpointId,
         verdict: report.verdict,
+        conclusion: report.conclusion,
         baselineSuccess: report.baseline.metrics.successRate,
         candidateSuccess: report.candidate.metrics.successRate,
+        confidence: report.confidence,
+        candidateContent: report.candidateContent,
+        behaviour: report.behaviour,
+        paired: report.paired,
         deltas: report.deltas,
         reasons: report.decision.reasons,
         blocking: report.decision.blocking,
+        baselineStability: report.baselineStability,
       }, null, 2));
       return 0;
     }

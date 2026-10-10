@@ -489,6 +489,19 @@ export interface ControlCenterTrainingDeltas {
 }
 
 /** Training as reported from its state file and its child process. Nothing here is estimated. */
+/** What the Training form sends. `directory` is a name under the data directory, never a path. */
+export interface ControlCenterTrainingStart {
+  readonly episodesPerStage?: number;
+  readonly maxEpisodes?: number;
+  readonly maxMinutes?: number;
+  readonly fresh?: boolean;
+  /** Required for `fresh` when the directory already holds a run; the consequences are shown before it is sent. */
+  readonly confirmFresh?: boolean;
+  readonly explorationRate?: number;
+  readonly stageIds?: readonly string[];
+  readonly directory?: string;
+}
+
 export interface ControlCenterTraining {
   /** `interrupted` means the state says a run was active but its process is gone; it can be resumed. */
   readonly status: "idle" | "running" | "paused" | "stopped" | "completed" | "failed" | "interrupted" | "evaluating";
@@ -529,6 +542,8 @@ export interface ControlCenterTraining {
     readonly createdAt: string;
     readonly episodes: number;
     readonly weightedContexts: number;
+    /** False when the checkpoint holds no learned weights: it is the baseline policy and an evaluation cannot show learning. */
+    readonly evaluable: boolean;
   }[];
   readonly lastEvaluation: {
     readonly checkpointId: string;
@@ -537,7 +552,22 @@ export interface ControlCenterTraining {
     readonly successRate: { readonly baseline: number; readonly candidate: number };
     readonly deltas: ControlCenterTrainingDeltas | null;
     readonly reasons: readonly string[];
+    /** What the comparison established (no-learned-contexts, identical-behaviour, improved, ...); null for older reports. */
+    readonly conclusion: string | null;
+    readonly learnedContexts: number | null;
+    readonly behaviourChangedRuns: number | null;
+    readonly pairedRuns: number | null;
   } | null;
+  /** Curriculum stages a run may use; the form offers exactly these. */
+  readonly availableStages: readonly { readonly id: string; readonly label: string; readonly scenarioCount: number; readonly minEpisodes: number }[];
+  /** Stages the saved run was started with; null before any run. */
+  readonly stageIds: readonly string[] | null;
+  /** Exploration rate the saved run used; null before any run. */
+  readonly explorationRate: number | null;
+  /** The default exploration rate offered for a new run. */
+  readonly defaultExplorationRate: number;
+  /** Who holds this directory's lock, if anyone. */
+  readonly lock: { readonly pid: number; readonly kind: "train" | "evaluate"; readonly startedAt: string; readonly alive: boolean } | null;
   readonly lastError: string | null;
   readonly updatedAt: string | null;
   readonly note: string;
@@ -652,7 +682,8 @@ export interface ControlCenterCommands {
   resetTrip?(): ControlCommandResult | Promise<ControlCommandResult>;
   enableCombat?(enabled: boolean): ControlCommandResult | Promise<ControlCommandResult>;
   setWorldSeed?(seed: string | null): ControlCommandResult | Promise<ControlCommandResult>;
-  startTraining?(options: { readonly episodesPerStage?: number; readonly maxEpisodes?: number; readonly maxMinutes?: number; readonly fresh?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
+  startTraining?(options: ControlCenterTrainingStart): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Reports what a start would do (resume or fresh) for a directory, without starting anything. */
   refreshRoadmap?(): ControlCommandResult | Promise<ControlCommandResult>;
   roadmapAction?(payload: { readonly fingerprint: string; readonly action: string; readonly value?: number; readonly note?: string }): ControlCommandResult | Promise<ControlCommandResult>;
   pauseTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
@@ -679,15 +710,32 @@ export interface ControlCenterCommands {
   panic?(): ControlCommandResult | Promise<ControlCommandResult>;
 }
 
+/** A read-only query served as `GET /api/<name>`; it receives the URL's query parameters. */
+export type ControlCenterQuery = (params: URLSearchParams) => unknown | Promise<unknown>;
+
 export interface ControlCenterHost {
   readonly title: string;
   snapshot(): ControlCenterSnapshot | Promise<ControlCenterSnapshot>;
+  /**
+   * Read at request time, so a host whose command set changes (a session starting or ending) can expose a getter.
+   * Only own properties are ever dispatched.
+   */
   readonly commands: ControlCenterCommands;
+  /** Extra read-only endpoints; names are lowercase words joined by dashes. */
+  readonly queries?: Readonly<Record<string, ControlCenterQuery>>;
+  /** Extra fields merged into `GET /api/health` (identity, version, session state). */
+  health?(): Readonly<Record<string, unknown>>;
 }
 
 export interface ControlCenterServerOptions {
+  /** Interface to bind. Defaults to 127.0.0.1: the Control Center is a local tool unless the operator says otherwise. */
   readonly host?: string;
   readonly port?: number;
+  /**
+   * Host header values (host names only, no port) accepted in addition to loopback names. When the server is bound to
+   * a loopback address only loopback names (and these) are accepted, which closes DNS-rebinding attacks.
+   */
+  readonly allowedHosts?: readonly string[];
   readonly logger?: { info(message: string): void; warn(message: string): void; error(message: string): void } | null;
   /** Extra static header text (e.g. a simulation warning) shown in the UI banner. */
   readonly banner?: string | null;
@@ -697,5 +745,9 @@ export interface ControlCenterHandle {
   readonly port: number;
   readonly url: string;
   readonly token: string;
+  /** The interface the server is bound to. */
+  readonly bindHost: string;
+  /** True when only this machine can reach the server. */
+  readonly localOnly: boolean;
   stop(reason?: string): Promise<void>;
 }

@@ -189,3 +189,220 @@ test("without a server the host serves nothing but still schedules, so a supervi
     await fixture.close();
   }
 });
+
+// ---------------------------------------------------------------------------------------------------------------
+// Session lifecycle: persistent versus one-shot, explicit states, reconnect, orderly shutdown.
+// ---------------------------------------------------------------------------------------------------------------
+import { SessionStartError } from "../src/app/session.js";
+import { createSessionFixture } from "./support/session-fixture.js";
+
+test("a persistent session walks connecting → initializing → idle and stays connected after its task finishes", async () => {
+  const fixture = await createSessionFixture({ request: { startupTask: cliTask, autonomy: false } });
+  try {
+    await fixture.session.start();
+    assert.equal(fixture.session.state === "idle" || fixture.session.state === "running", true);
+    const outcome = await fixture.session.startup;
+    assert.equal(outcome?.result?.status, "succeeded", outcome?.error?.message ?? outcome?.result?.failure?.message ?? "startup task failed");
+
+    // The old CLI disconnected the bot right here, with "CLI run complete".
+    assert.equal(fixture.session.isActive, true, "the session did not end with its task");
+    assert.equal(fixture.session.runtime.status().adapterStatus, "connected");
+    assert.equal(fixture.session.state, "idle");
+    assert.equal(fixture.session.view().canStop, true);
+    assert.equal(fixture.session.view().mode, "persistent");
+
+    const states = fixture.session.view().history.map((entry) => entry.state);
+    assert.deepEqual(states.slice(0, 3), ["connecting", "initializing", "idle"]);
+    assert.ok(states.includes("running"), "the timeline records that work happened");
+    assert.equal(states.at(-1), "idle");
+
+    // A second request is accepted by the same live session.
+    const second = await fixture.session.host!.runTask({ ...DEFAULT_CRAFT_PICKAXE_TASK, id: "second-task" });
+    assert.ok(["succeeded", "failed", "blocked", "max_actions"].includes(second.status));
+    assert.equal(fixture.session.runtime.status().adapterStatus, "connected");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a one-shot session ends with its task, and says why", async () => {
+  const fixture = await createSessionFixture({ request: { startupTask: cliTask, autonomy: false, mode: "one-shot" } });
+  try {
+    await fixture.session.start();
+    const outcome = await fixture.session.startup;
+    assert.equal(outcome?.result?.status, "succeeded");
+    const end = await fixture.session.ended;
+    assert.equal(end.reason, "one-shot task finished");
+    assert.equal(fixture.session.state, "shutdown");
+    assert.equal(fixture.session.runtime.status().adapterStatus, "disconnected");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("stop() while a task is running stops it, disconnects once, and is safe to call again", async () => {
+  const fixture = await createSessionFixture({ request: { autonomy: false } });
+  try {
+    await fixture.session.start();
+    const running = fixture.session.host!.runTask({ ...DEFAULT_GATHER_LOG_TASK, id: "long-task", targetCount: 12, maxActions: 200 });
+    await waitFor(() => fixture.session.state === "running", "the task started");
+    const first = fixture.session.stop("operator pressed stop");
+    const second = fixture.session.stop("a second caller");
+    assert.strictEqual(first, second, "stop is idempotent: both callers get the same shutdown");
+    await first;
+    const result = await running.catch((error: Error) => error);
+    assert.ok(result instanceof Error || ["aborted", "disconnected", "succeeded", "failed"].includes((result as { status: string }).status), "the running task settled instead of being orphaned");
+    assert.equal(fixture.session.state, "shutdown");
+    assert.equal(fixture.session.runtime.status().adapterStatus, "disconnected");
+    assert.equal(fixture.session.view().reason, "operator pressed stop");
+    const codes = fixture.events.list({ category: ["shutdown"] }).events.map((event) => event.code);
+    assert.ok(codes.includes("SESSION_STOPPING") && codes.includes("SESSION_SHUTDOWN"), `shutdown events: ${codes.join(", ")}`);
+    assert.equal(fixture.session.host?.scheduler.snapshot().state, "closed");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a connection that is refused fails the start with a diagnosis, shuts the session down cleanly, and keeps the app usable", async () => {
+  const fixture = await createSessionFixture({ failConnects: 1 });
+  try {
+    await assert.rejects(fixture.session.start(), (error: unknown) => {
+      assert.ok(error instanceof SessionStartError);
+      assert.equal(error.diagnosis.code, "CONNECTION_REFUSED");
+      assert.ok(error.diagnosis.hints.length > 0, "the diagnosis carries things to check");
+      return true;
+    });
+    const view = fixture.session.view();
+    assert.equal(view.state, "shutdown");
+    assert.equal(view.error?.code, "CONNECTION_REFUSED");
+    assert.equal(view.canConnect, true, "a new connection can be requested");
+    assert.ok(fixture.events.list({ q: "CONNECTION_REFUSED" }).matched >= 1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a dropped connection is retried with backoff and the session comes back without losing its state", async () => {
+  const delays: number[] = [];
+  const fixture = await createSessionFixture({
+    request: { autonomy: false },
+    reconnect: { enabled: true, maxAttempts: 4, baseDelayMs: 1_000, maxDelayMs: 8_000 },
+    sleep: async (ms) => {
+      delays.push(ms);
+    },
+  });
+  try {
+    await fixture.session.start();
+    fixture.adapter.failConnects = 2;
+    await fixture.adapter.disconnect("server restarting");
+    await waitFor(() => fixture.session.state === "idle" && delays.length >= 3, "the session reconnected");
+    assert.deepEqual(delays.slice(0, 3), [1_000, 2_000, 4_000], "exponential backoff between attempts");
+    assert.equal(fixture.adapter.connectAttempts, 4, "the first connect plus three retries");
+    assert.equal(fixture.session.runtime.status().adapterStatus, "connected");
+    assert.equal(fixture.session.view().reconnect, null);
+    const states = fixture.session.view().history.map((entry) => entry.state);
+    assert.ok(states.includes("reconnecting"));
+    assert.ok(fixture.events.list({ q: "Reconnected" }).matched >= 1);
+    // The agent is usable again.
+    const result = await fixture.session.host!.runTask(cliTask);
+    assert.equal(result.status, "succeeded");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("when every reconnect attempt fails the session shuts down with RECONNECT_EXHAUSTED instead of retrying forever", async () => {
+  const fixture = await createSessionFixture({
+    request: { autonomy: false },
+    reconnect: { enabled: true, maxAttempts: 2, baseDelayMs: 10, maxDelayMs: 20 },
+  });
+  try {
+    await fixture.session.start();
+    fixture.adapter.failConnects = 99;
+    await fixture.adapter.disconnect("server gone");
+    const end = await fixture.session.ended;
+    assert.equal(end.reason, "reconnect attempts exhausted");
+    assert.equal(end.error?.code, "RECONNECT_EXHAUSTED");
+    assert.equal(fixture.adapter.connectAttempts, 3, "the first connect plus exactly two retries");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("stopping during a reconnect cancels the pending retry and leaves no timer behind", async () => {
+  let release: (() => void) | null = null;
+  const fixture = await createSessionFixture({
+    request: { autonomy: false },
+    reconnect: { enabled: true, maxAttempts: 5, baseDelayMs: 60_000, maxDelayMs: 60_000 },
+    sleep: (_ms, signal) =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      }),
+  });
+  try {
+    await fixture.session.start();
+    await fixture.adapter.disconnect("network blip");
+    await waitFor(() => fixture.session.state === "reconnecting", "reconnecting");
+    assert.ok(release, "a retry is waiting");
+    assert.ok(fixture.session.view().reconnect?.nextAttemptAt, "the UI can show when the next attempt happens");
+    await fixture.session.stop("operator stop during reconnect");
+    assert.equal(fixture.session.state, "shutdown");
+    assert.equal(fixture.adapter.connectAttempts, 1, "no further connection attempt was made after the stop");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("one-shot sessions and disabled reconnect end on a lost connection instead of retrying", async () => {
+  const fixture = await createSessionFixture({ request: { autonomy: false, mode: "one-shot" } });
+  try {
+    await fixture.session.start();
+    await fixture.adapter.disconnect("link dropped");
+    const end = await fixture.session.ended;
+    assert.match(end.reason, /connection lost: link dropped/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a server-side ban is not retried: reconnecting could never fix it", async () => {
+  const fixture = await createSessionFixture({ request: { autonomy: false } });
+  try {
+    await fixture.session.start();
+    await fixture.adapter.disconnect("Minecraft server kicked the bot: You are banned from this server");
+    const end = await fixture.session.ended;
+    assert.equal(end.error?.code, "NOT_RETRYABLE");
+    assert.equal(fixture.adapter.connectAttempts, 1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("shutdown steps are bounded: a hung step is reported and the remaining steps still run", async () => {
+  const fixture = await createSessionFixture({ request: { autonomy: false }, stepTimeoutMs: 60 });
+  try {
+    await fixture.session.start();
+    const host = fixture.session.host!;
+    const realClose = host.close.bind(host);
+    // A host that never finishes closing, the way a wedged task would.
+    (host as { close: () => Promise<void> }).close = () => new Promise<void>(() => undefined);
+    let runtimeShutdowns = 0;
+    const runtime = fixture.session.runtime;
+    const original = runtime.shutdown.bind(runtime);
+    (runtime as { shutdown: typeof runtime.shutdown }).shutdown = async (reason) => {
+      runtimeShutdowns += 1;
+      await original(reason);
+    };
+    await fixture.session.stop("normal stop");
+    assert.equal(runtimeShutdowns, 1, "the bot was still disconnected, exactly once");
+    assert.equal(fixture.session.state, "shutdown");
+    assert.equal(fixture.session.runtime.status().adapterStatus, "disconnected");
+    const timeouts = fixture.events.list({ q: "SHUTDOWN_STEP_TIMEOUT" });
+    assert.equal(timeouts.matched, 1, "the hung step is reported in the event log");
+    assert.match(timeouts.events[0]?.message ?? "", /task scheduler and run host/);
+    await realClose();
+  } finally {
+    await fixture.close();
+  }
+});

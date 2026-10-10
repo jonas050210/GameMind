@@ -13,6 +13,13 @@ import { evaluationSeeds } from "../testing/eval/harness.js";
 
 export const TRAINING_SEED_BASE = 1_000_000;
 
+/**
+ * Exploration offered to a new run. Greedy training (0) only ever records the top-ranked candidate of each decision, so
+ * the learner never sees how an alternative would have gone and cannot learn to prefer one. A modest, seeded rate gives
+ * it that counterfactual evidence; 0 is still available (`--explore 0`) and means exactly what it says.
+ */
+export const DEFAULT_TRAINING_EXPLORATION_RATE = 0.15;
+
 export interface CurriculumStage {
   readonly id: string;
   readonly label: string;
