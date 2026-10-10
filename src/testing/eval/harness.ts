@@ -113,8 +113,10 @@ export async function runEvaluationOnce(
 ): Promise<EvaluationRun> {
   const logger = pino({ level: "silent" });
   const trace = new TraceRecorder(new MemoryTraceSink(), logger);
-  const adapter = new SimulatedMinecraftAdapter({ definition: scenario.world(seed) });
   const allowCombat = options.allowCombat ?? scenario.agent?.allowCombat ?? false;
+  // The same switch goes to the adapter and to the runner, as in the live composition (session-factory). The planner
+  // follows the adapter's live flag, so an adapter that was left unarmed would silently disable defence.
+  const adapter = new SimulatedMinecraftAdapter({ definition: scenario.world(seed), ...(allowCombat ? { allowCombat: true } : {}) });
   const { runtime, skills } = createMinecraftAgent(adapter, trace, logger, {
     ...(allowCombat ? { optedInCapabilities: ["minecraft.attack_hostile"] } : {}),
   });

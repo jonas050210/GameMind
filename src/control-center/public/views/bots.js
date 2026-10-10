@@ -105,7 +105,7 @@ function safety(snapshot) {
       button("Reset trip", { command: "resetTrip", disabled: !safetyState.tripped }),
       snapshot.combatAllowed === null || snapshot.combatAllowed === undefined
         ? null
-        : button(snapshot.combatAllowed ? "Disarm combat" : "Arm combat", { command: "enableCombat", payload: { enabled: !snapshot.combatAllowed }, tone: snapshot.combatAllowed ? "" : "warn", data: snapshot.combatAllowed ? {} : { confirm: "Arm the combat capability? The bot may then attack hostile mobs that threaten it." } }),
+        : button(snapshot.combatAllowed ? "Fighting allowed: turn off" : "Fighting off: allow", { command: "enableCombat", payload: { enabled: !snapshot.combatAllowed }, tone: snapshot.combatAllowed ? "" : "warn", data: snapshot.combatAllowed ? {} : { confirm: "Allow the bot to fight back against hostile mobs that threaten it? It attacks only with a weapon, enough health, and one enemy at a time, and it withdraws when health gets low." } }),
     ),
     (safetyState.recentVerdicts ?? []).length
       ? h("details", null, h("summary", null, "Recent safety verdicts"), table({ dense: true, columns: [{ label: "Time", cell: (v) => fmtTime(v.evaluatedAt) }, { label: "Capability", cell: (v) => v.capability }, { label: "Verdict", cell: (v) => (v.allowed ? badge("allowed", "good") : badge("denied", "warn")) }, { label: "Why", cell: (v) => v.message }], rows: safetyState.recentVerdicts.map((v, index) => ({ key: index, value: v })) }))

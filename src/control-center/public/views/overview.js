@@ -81,13 +81,14 @@ function vitals(snapshot, now) {
       meter("Food", world.food, 20, live),
     ),
     kv([
-      ["Position", position ? `${position.x}, ${position.y}, ${position.z}` : null],
       ["Dimension", world.dimension ?? null],
       ["Game mode", world.gameMode ?? null],
       ["Alive", world.alive === null || world.alive === undefined ? null : world.alive ? "yes" : "no — respawning"],
       ["Time of day", world.time ? `${world.time.isNight ? "night" : "day"}${world.time.day !== null && world.time.day !== undefined ? ` (day ${world.time.day})` : ""}` : null],
       ["Inventory", world.inventory?.length ? `${fmtNumber(world.inventory.reduce((sum, item) => sum + item.count, 0))} items in ${world.inventory.length} slots` : live ? "empty" : null],
     ]),
+    // Exact coordinates are for debugging, not for watching the agent: they stay one click away.
+    h("details", { class: "small" }, h("summary", null, "Exact position"), kv([["Position", position ? `${position.x}, ${position.y}, ${position.z}` : null]])),
   );
 }
 

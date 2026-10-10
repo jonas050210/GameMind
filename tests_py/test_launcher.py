@@ -386,6 +386,37 @@ class MainFlow(unittest.TestCase):
         self.assertIn("could not be opened automatically (No browser opener worked)", text)
         self.assertIn("Open http://127.0.0.1:8787/ yourself.", text)
 
+    def test_plain_start_opens_the_control_center_and_waits_for_the_page(self) -> None:
+        code, _lines, spawned = self.run_main([])
+        self.assertEqual(code, 0)
+        self.assertIn("--no-connect", spawned[0], "no connection is made until the operator connects from the page")
+        self.assertIn("--control-center", spawned[0])
+
+    def test_an_explicit_host_or_task_or_simulator_still_connects_at_once(self) -> None:
+        for argv in (["--host", "mc.local"], ["--port", "25566"], ["--task", "gather-logs"], ["--simulated"]):
+            with self.subTest(argv=argv):
+                _code, _lines, spawned = self.run_main(argv)
+                self.assertNotIn("--no-connect", spawned[0])
+
+    def test_a_connection_set_in_the_environment_counts_as_explicit(self) -> None:
+        _code, _lines, spawned = self.run_main([], env={"MINECRAFT_HOST": "mc.local"})
+        self.assertNotIn("--no-connect", spawned[0])
+
+    def test_missing_dependencies_are_installed_without_asking_unless_no_install_is_given(self) -> None:
+        calls: list[list[str]] = []
+        with mock.patch.object(cli.subprocess, "run", side_effect=lambda cmd, **kw: calls.append(list(cmd)) or mock.Mock(returncode=0)), \
+            mock.patch.object(checks, "check_dependencies", side_effect=[[checks.Problem("DEPENDENCIES_MISSING", "missing", "npm ci")], []]), \
+            mock.patch.object(checks, "find_executable", return_value="/usr/bin/npm"), \
+            mock.patch.object(checks, "node_version", return_value=(22, 22, 3)), \
+            mock.patch.object(checks, "is_port_free", return_value=True), \
+            mock.patch.object(cli, "ask", side_effect=lambda q, assume_yes, interactive: assume_yes), \
+            mock.patch.object(checks, "check_node", return_value=[]):
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                make_project(root)
+                cli.main([ "--no-browser"], root=root, env={}, out=lambda _line: None, spawn_fn=lambda *a, **k: FakeChild([]))
+        self.assertTrue(calls and calls[0][1] == "ci", "npm ci runs by default, without a prompt")
+
     def test_wsl2_with_only_the_windows_host_answering_uses_it_and_says_so(self) -> None:
         with mock.patch.object(wsl, "probe_tcp", side_effect=lambda host, port, timeout=1.5: "open" if host == "172.28.0.1" else "refused"), mock.patch.object(
             cli, "read_proc_version", return_value=WSL2_PROC

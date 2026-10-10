@@ -53,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--no-browser", action="store_true", help="do not open the browser")
     env = parser.add_argument_group("Environment")
     env.add_argument("--check", action="store_true", help="check Node, dependencies, ports and WSL, then exit")
-    env.add_argument("--install", action="store_true", help="run 'npm ci' automatically when dependencies are missing")
+    env.add_argument("--install", action="store_true", help="run 'npm ci' automatically when dependencies are missing (this is the default)")
+    env.add_argument("--no-install", action="store_true", help="do not install missing dependencies; report them and stop")
     env.add_argument("--yes", "-y", action="store_true", help="answer yes to prompts")
     env.add_argument("--verbose", "-v", action="store_true", help="print the exact command that is started")
     env.add_argument("passthrough", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
@@ -142,6 +143,14 @@ def main(
     args = parser.parse_args(list(argv) if argv is not None else None)
     root = (root or Path(__file__).resolve().parent.parent).resolve()
     environment = dict(os.environ if env is None else env)
+    # Plain `python3 main.py` opens the Control Center and waits: the operator connects from the page, with host and port
+    # typed there. Any explicit connection request (a host, a port, the simulator, a task) still connects at once.
+    explicit_connection = bool(
+        args.host or args.port is not None or args.simulated is not None or args.task
+        or environment.get("MINECRAFT_HOST") or environment.get("MINECRAFT_PORT")
+    )
+    if not explicit_connection:
+        args.no_connect = True
     system = platform_module.system()
     plat = wsl.detect_platform(system, environment, read_proc_version())
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
@@ -154,7 +163,7 @@ def main(
 
     if dependency_problems and dependency_problems[0].code == "DEPENDENCIES_MISSING" and node:
         npm = checks.find_executable(["npm.cmd", "npm"] if system.lower() == "windows" else ["npm"])
-        if npm and ask("Dependencies are missing. Run 'npm ci' now?", args.install or args.yes, interactive):
+        if npm and ask("Dependencies are missing. Run 'npm ci' now?", not args.no_install, interactive):
             out(f"Running: {npm} ci (this can take a minute)")
             code = subprocess.run([npm, "ci", "--no-audit", "--no-fund"], cwd=str(root), check=False).returncode
             dependency_problems = checks.check_dependencies(root, system, platform_module.machine()) if code == 0 else dependency_problems
@@ -201,7 +210,8 @@ def main(
     assert node is not None and control_port is not None
 
     host: Optional[str] = args.host
-    if args.simulated is None and not args.no_connect:
+    # Host detection also runs without a connection: the Control Center pre-fills its host field from it under WSL.
+    if args.simulated is None:
         port = args.port or int(environment.get("MINECRAFT_PORT", "25565") or "25565")
         decision = wsl.choose_host(args.host, environment.get("MINECRAFT_HOST"), port, plat, discover_windows_host(plat), wsl.probe_tcp)
         host = decision.host if (decision.changed or args.host) else None
