@@ -1,6 +1,6 @@
 import { h } from "../lib/h.js";
 import { badge, button, card, empty, kv, notice, progress, statusBadge, table, unknown } from "../lib/ui.js";
-import { fmtDuration, fmtNumber, fmtPercent, fmtTime, humanise, orUnknown } from "../lib/format.js";
+import { fmtAgo, fmtDuration, fmtNumber, fmtPercent, fmtTime, humanise, orUnknown } from "../lib/format.js";
 import { activeProgress, queueExplanation, taskBlocker } from "../lib/model.js";
 import { failureCell } from "./bots.js";
 
@@ -17,7 +17,7 @@ function active(snapshot, now) {
     h("p", { class: "task-title" }, task.label),
     kv([
       ["Started by", task.origin],
-      ["Started", task.startedAt ? `${fmtTime(task.startedAt)} (${fmtDuration(now - Date.parse(task.startedAt))} ago)` : null],
+      ["Started", task.startedAt ? `${fmtTime(task.startedAt)} (${fmtAgo(task.startedAt, now)})` : null],
       ["Decision", snapshot.goal ? `${snapshot.goal.rationale}` : null],
       ["Skill", snapshot.goal?.skillId ?? null],
       ["Actions used", agent ? fmtNumber(agent.actionsUsed) : null],

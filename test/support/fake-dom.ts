@@ -450,7 +450,7 @@ export class FakeWindow {
 
 /** Deterministic timers: nothing runs until the test advances the clock. */
 export class FakeClock {
-  nowMs = Date.parse("2026-10-10T12:00:00.000Z");
+  nowMs = Date.now();
   private readonly timers = new Map<number, { at: number; run: () => void }>();
   private sequence = 0;
   readonly now = (): number => this.nowMs;

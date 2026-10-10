@@ -10,7 +10,6 @@
 // It touches `document` only inside functions, so it can be loaded and tested in Node with a stand-in DOM.
 
 const SVG_NS = "http://www.w3.org/2000/svg";
-const BOOLEAN_PROPS = new Set(["disabled", "checked", "selected", "hidden", "open", "required", "readOnly", "multiple"]);
 const PROPERTY_PROPS = new Set(["value", "checked", "selected", "disabled", "hidden", "open", "readOnly"]);
 
 function flatten(children, out = []) {

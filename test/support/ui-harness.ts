@@ -121,7 +121,7 @@ export interface BootedPage {
 }
 
 /** Boots the real page against `fetch`. Timers are fake: nothing polls until the test says so. */
-export async function bootPage(options: { fetch: (input: string, init?: any) => Promise<Response>; token?: string; banner?: string; hash?: string; storedTheme?: string; html?: string }): Promise<BootedPage> {
+export async function bootPage(options: { fetch: (input: string, init?: any) => Promise<Response>; token?: string; banner?: string; hash?: string; storedTheme?: string; html?: string; settle?: boolean }): Promise<BootedPage> {
   const modules = await loadUi(); // before the page is installed: app.js starts itself when it finds a global page
   const page = new Page({ html: options.html ?? (await pageHtml(options.token ?? "test-token", options.banner ?? "")) });
   if (options.hash) page.window.location.hash = options.hash;
@@ -148,7 +148,7 @@ export async function bootPage(options: { fetch: (input: string, init?: any) => 
     },
     restore,
   };
-  await booted.settle();
+  if (options.settle !== false) await booted.settle();
   return booted;
 }
 

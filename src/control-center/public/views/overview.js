@@ -72,7 +72,7 @@ function vitals(snapshot, now) {
   return card(
     { title: "Player and world", subtitle: world.freshness?.observedAt ? `Observation #${orUnknown(world.freshness.sequence)} · ${fmtAgo(world.freshness.observedAt, now)}${world.freshness.stale ? " · stale" : ""}` : "No observation yet", actions: sourceBadge(source) },
     live
-      ? null
+      ? staleNotice(world.freshness, now)
       : notice("neutral", "Nothing is being observed", world.provenance?.note ?? "Telemetry is unknown until a session is connected."),
     h(
       "div",
@@ -88,6 +88,20 @@ function vitals(snapshot, now) {
       ["Time of day", world.time ? `${world.time.isNight ? "night" : "day"}${world.time.day !== null && world.time.day !== undefined ? ` (day ${world.time.day})` : ""}` : null],
       ["Inventory", world.inventory?.length ? `${fmtNumber(world.inventory.reduce((sum, item) => sum + item.count, 0))} items in ${world.inventory.length} slots` : live ? "empty" : null],
     ]),
+  );
+}
+
+/**
+ * A live observation can go quiet (a stalled connection, a paused server). Its numbers are then the last thing the agent saw,
+ * not what is happening now, and the safety policy refuses actions that change the world until a newer one arrives. The
+ * subtitle already says "stale"; this makes the consequence visible instead of leaving old numbers looking current.
+ */
+function staleNotice(freshness, now) {
+  if (!freshness?.stale || freshness.reason !== "stale") return null;
+  return notice(
+    "warn",
+    "The latest observation is stale",
+    `It was read ${freshness.observedAt ? fmtAgo(freshness.observedAt, now) : "a while ago"}. Until a newer one arrives the safety policy refuses actions that change the world (STALE_OBSERVATION); read-only actions still run. The values below may be out of date.`,
   );
 }
 
@@ -117,7 +131,7 @@ function currentTask(snapshot, now) {
     h("p", { class: "task-title" }, active.label),
     kv([
       ["Started by", active.origin],
-      ["Running for", active.startedAt ? fmtDuration(now - Date.parse(active.startedAt)) : null],
+      ["Running for", active.startedAt ? fmtDuration(Math.max(0, now - Date.parse(active.startedAt))) : null],
       ["Actions so far", agent ? fmtNumber(agent.actionsUsed) : null],
       ["Goal", snapshot.goal?.rationale ?? null],
     ]),
