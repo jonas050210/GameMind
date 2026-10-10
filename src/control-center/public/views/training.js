@@ -166,11 +166,17 @@ const GATE_TEXT = { promotable: "promotable", "not-promotable": "not promotable"
 /** Exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
 export function benchmarksCard(listing) {
   const subtitle = "Compares exploration rates on the offline simulator (npm run train:benchmark -- --name NAME). A winner is promotable and beats the baseline by at least the margin.";
+  const start = button("Start benchmark", {
+    command: "runBenchmark",
+    tone: "primary",
+    title: "Runs four exploration rates one after another on the offline simulator",
+    data: { confirm: "Start a benchmark? It runs several full training runs one after another on the offline simulator and can take hours. You can cancel it from the Tests & Evaluation tab." },
+  });
   if (!listing || !listing.reports?.length) {
-    return card({ title: "Exploration-rate benchmarks", subtitle }, empty("No benchmark yet", "A benchmark runs several trainings one after another and shows the comparison here."));
+    return card({ title: "Exploration-rate benchmarks", subtitle }, empty("No benchmark yet", "A benchmark runs several trainings one after another and shows the comparison here."), h("footer", { class: "button-row" }, start));
   }
   return card(
-    { title: "Exploration-rate benchmarks", subtitle },
+    { title: "Exploration-rate benchmarks", subtitle, actions: start },
     ...listing.reports.map((report) =>
       h(
         "section",

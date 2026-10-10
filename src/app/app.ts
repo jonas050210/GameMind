@@ -20,8 +20,8 @@ import { evaluationScenarios } from "../testing/eval/scenarios.js";
 import { BrowserOpener, type BrowserOpenResult } from "./browser.js";
 import { buildDetachedSnapshot } from "./detached-snapshot.js";
 import { AppEventLog, type AppEventCategory, type AppEventLevel, type AppEventSource } from "./event-log.js";
-import { planLiveVerification, planOfflineEval, planUnitTests, JobPlanError, type PlanContext } from "./job-plans.js";
-import { JobRunner } from "./jobs.js";
+import { planBenchmark, planLiveVerification, planOfflineEval, planUnitTests, JobPlanError, type PlanContext } from "./job-plans.js";
+import { JobRunner, type JobSpec } from "./jobs.js";
 import { detectPlatform, discoverWindowsHost, type PlatformInfo } from "./platform.js";
 import { buildLearningQuery, buildMemoryQuery, evaluationOverview } from "./queries.js";
 import { defaultRedactionContext, displayPath, redactStrings, type RedactionContext } from "./redact.js";
@@ -528,6 +528,10 @@ export class GameMindApp {
         }));
       },
       runLiveVerification: (payload: unknown) => this.commandLive(payload),
+      runBenchmark: (payload: unknown) => {
+        const name = typeof payload === "object" && payload !== null && typeof (payload as { name?: unknown }).name === "string" ? (payload as { name: string }).name : undefined;
+        return this.commandJob(() => planBenchmark(this.planContext(), name ? { name } : {}));
+      },
       startTestServer: () => this.testServer.start(),
       stopTestServer: () => this.testServer.stop(),
       probeServer: async (payload: unknown) => {
@@ -576,7 +580,7 @@ export class GameMindApp {
     }
   }
 
-  private commandJob(plan: () => ReturnType<typeof planUnitTests>): ControlCommandResult {
+  private commandJob(plan: () => JobSpec): ControlCommandResult {
     try {
       const started = this.jobs.start(plan());
       return started.ok ? { ok: true, message: `${started.job.label} started.`, data: { id: started.job.id } } : { ok: false, message: started.message, data: { code: started.code } };
