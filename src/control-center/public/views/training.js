@@ -161,44 +161,44 @@ export function renderTraining(ctx) {
   };
 }
 
-const GATE_TEXT = { promotable: "übernahmefähig", "not-promotable": "nicht übernahmefähig" };
+const GATE_TEXT = { promotable: "promotable", "not-promotable": "not promotable" };
 
-/** The exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
+/** Exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
 export function benchmarksCard(listing) {
-  const subtitle = "Vergleicht Explorationsraten im Offline-Simulator (npm run train:benchmark -- --name NAME). Gewinner: übernahmefähig und mindestens die Schwelle besser als die Baseline.";
+  const subtitle = "Compares exploration rates on the offline simulator (npm run train:benchmark -- --name NAME). A winner is promotable and beats the baseline by at least the margin.";
   if (!listing || !listing.reports?.length) {
-    return card({ title: "Benchmarks der Explorationsrate", subtitle }, empty("Noch kein Benchmark", "Ein Lauf startet mehrere Trainings nacheinander und zeigt hier den Vergleich."));
+    return card({ title: "Exploration-rate benchmarks", subtitle }, empty("No benchmark yet", "A benchmark runs several trainings one after another and shows the comparison here."));
   }
   return card(
-    { title: "Benchmarks der Explorationsrate", subtitle },
+    { title: "Exploration-rate benchmarks", subtitle },
     ...listing.reports.map((report) =>
       h(
         "section",
         { class: "benchmark", key: report.file },
         h("h4", null, report.name, " ", report.createdAt ? h("span", { class: "muted small" }, fmtDateTime(report.createdAt)) : null),
         report.unreadable
-          ? notice("warn", "Dieser Bericht konnte nicht gelesen werden", report.file)
+          ? notice("warn", "This report could not be read", report.file)
           : h(
               "div",
               null,
               report.winner
-                ? notice("info", `Gewinner: Explorationsrate ${report.winner}`, report.decision ?? null)
-                : notice("neutral", "Kein Gewinner", report.decision ?? "Kein Kandidat hat die Schwelle geschafft."),
+                ? notice("info", `Winner: exploration rate ${report.winner}`, report.decision ?? null)
+                : notice("neutral", "No winner", report.decision ?? "No candidate passed the gate and the margin."),
               table({
                 dense: true,
-                caption: "Ergebnisse je Kandidat",
+                caption: "Results per candidate",
                 columns: [
-                  { label: "Kandidat", cell: (r) => r.id },
-                  { label: "Explorationsrate", align: "right", cell: (r) => (r.explorationRate === null ? unknown() : fmtNumber(r.explorationRate, 2)) },
+                  { label: "Candidate", cell: (r) => r.id },
+                  { label: "Exploration rate", align: "right", cell: (r) => (r.explorationRate === null ? unknown() : fmtNumber(r.explorationRate, 2)) },
                   { label: "Status", cell: (r) => statusBadge(r.status) },
                   { label: "Baseline", align: "right", cell: (r) => (r.baselineSuccess === null ? unknown() : fmtPercent(r.baselineSuccess, 0)) },
-                  { label: "Mit Training", align: "right", cell: (r) => (r.trainedSuccess === null ? unknown() : fmtPercent(r.trainedSuccess, 0)) },
-                  { label: "Gewinn", align: "right", cell: (r) => (r.deltaPoints === null ? unknown() : fmtSigned(r.deltaPoints * 100, 1, " Pkt")) },
+                  { label: "Trained", align: "right", cell: (r) => (r.trainedSuccess === null ? unknown() : fmtPercent(r.trainedSuccess, 0)) },
+                  { label: "Gain", align: "right", cell: (r) => (r.deltaPoints === null ? unknown() : fmtSigned(r.deltaPoints * 100, 1, " pts")) },
                   { label: "Gate", cell: (r) => (r.gateVerdict ? GATE_TEXT[r.gateVerdict] ?? r.gateVerdict : unknown()) },
-                  { label: "Fehler", cell: (r) => r.error ?? "—" },
+                  { label: "Error", cell: (r) => r.error ?? "—" },
                 ],
                 rows: report.rows.map((value, index) => ({ key: `${report.file}-${index}`, value })),
-                empty: { title: "Keine Ergebnisse" },
+                empty: { title: "No results" },
               }),
             ),
       ),

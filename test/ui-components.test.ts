@@ -138,8 +138,8 @@ test("a missing measurement is shown as unknown and never as zero", () => {
   assert.equal(f.fmtDuration(61_000), "1 min 01 s");
   assert.equal(f.fmtDuration(3 * 3_600_000 + 5 * 60_000), "3 h 05 min");
   assert.equal(f.fmtAgo("not a date"), "unknown");
-  assert.equal(f.fmtAgo("2026-10-10T12:00:00Z", Date.parse("2026-10-10T12:00:02Z")), "gerade eben");
-  assert.equal(f.fmtAgo("2026-10-10T12:00:00Z", Date.parse("2026-10-10T12:00:30Z")), "vor 30 s");
+  assert.equal(f.fmtAgo("2026-10-10T12:00:00Z", Date.parse("2026-10-10T12:00:02Z")), "just now");
+  assert.equal(f.fmtAgo("2026-10-10T12:00:00Z", Date.parse("2026-10-10T12:00:30Z")), "30 s ago");
   assert.equal(f.humanise("oak_log"), "oak log");
   assert.equal(f.humanise(null), "unknown");
   assert.equal(f.orUnknown(null), "unknown");
@@ -191,13 +191,13 @@ test("presentational helpers: unknown values, progress, sparklines and tables ne
 test("every lifecycle state has a plain-language label, and connected-idle differs from running and disconnected", () => {
   const { sessionInfo, botState, SESSION_STATES } = ui.model;
   assert.deepEqual(Object.keys(SESSION_STATES).sort(), ["connecting", "idle", "initializing", "none", "reconnecting", "running", "shutdown", "stopping"]);
-  assert.equal(sessionInfo(null).label, "Keine Sitzung");
-  assert.equal(sessionInfo({ state: "idle" }).label, "Verbunden · untätig");
-  assert.equal(sessionInfo({ state: "shutdown" }).label, "Getrennt");
+  assert.equal(sessionInfo(null).label, "No session");
+  assert.equal(sessionInfo({ state: "idle" }).label, "Connected · idle");
+  assert.equal(sessionInfo({ state: "shutdown" }).label, "Disconnected");
   assert.equal(sessionInfo({ state: "mystery" }).label, "mystery", "an unknown state is shown as it is, not mapped to something nicer");
-  assert.equal(botState({ state: "idle" }, { active: null }).label, "Verbunden · untätig");
-  assert.equal(botState({ state: "idle" }, { active: { label: "Gather logs" } }).label, "Führt eine Aufgabe aus");
-  assert.equal(botState({ state: "shutdown" }, { active: null }).label, "Getrennt");
+  assert.equal(botState({ state: "idle" }, { active: null }).label, "Connected · idle");
+  assert.equal(botState({ state: "idle" }, { active: { label: "Gather logs" } }).label, "Running a task");
+  assert.equal(botState({ state: "shutdown" }, { active: null }).label, "Disconnected");
 });
 
 test("data provenance: live, simulated, historical and unavailable are told apart", () => {

@@ -4,14 +4,14 @@ import { UNKNOWN } from "./format.js";
 
 /** How each lifecycle state reads to an operator. `tone` is one of good, info, warn, bad, neutral. */
 export const SESSION_STATES = {
-  none: { label: "Keine Sitzung", tone: "neutral", meaning: "No Minecraft session has been started in this process yet." },
+  none: { label: "No session", tone: "neutral", meaning: "No Minecraft session has been started in this process yet." },
   connecting: { label: "Connecting", tone: "info", meaning: "Opening the connection to the game." },
   initializing: { label: "Initializing", tone: "info", meaning: "Connected; loading world memory and starting the agent." },
-  idle: { label: "Verbunden · untätig", tone: "good", meaning: "The bot is in the world and waiting. It starts nothing unless autonomy is on or you start a task." },
-  running: { label: "Führt eine Aufgabe aus", tone: "good", meaning: "The bot is working on a task." },
+  idle: { label: "Connected · idle", tone: "good", meaning: "The bot is in the world and waiting. It starts nothing unless autonomy is on or you start a task." },
+  running: { label: "Running a task", tone: "good", meaning: "The bot is working on a task." },
   reconnecting: { label: "Reconnecting", tone: "warn", meaning: "The connection dropped; GameMind is retrying with increasing delays." },
   stopping: { label: "Stopping", tone: "warn", meaning: "Stopping the running task and disconnecting in order." },
-  shutdown: { label: "Getrennt", tone: "bad", meaning: "The session has ended. The Control Center is still running; connect again whenever you like." },
+  shutdown: { label: "Disconnected", tone: "bad", meaning: "The session has ended. The Control Center is still running; connect again whenever you like." },
 };
 
 export function sessionInfo(session) {
@@ -128,32 +128,32 @@ export const COMMANDS_USED = [
  * snapshot only, so it is testable without a browser. Written in English like the rest of the Control Center.
  */
 export function nowSummary(snapshot) {
-  if (snapshot?.safety?.tripped) return "Sicherheitsbremse ausgelöst: es laufen nur lesende Aktionen. Setze die Bremse im Bots-Tab zurück, um weiterzumachen.";
-  if (snapshot?.safety?.paused) return `Pausiert: ${snapshot.safety.pauseReason ?? "kein Grund angegeben"}.`;
+  if (snapshot?.safety?.tripped) return "Safety stop raised: only read-only actions run. Reset the trip on the Bots tab to continue.";
+  if (snapshot?.safety?.paused) return `Paused: ${snapshot.safety.pauseReason ?? "no reason given"}.`;
   const state = snapshot?.session?.state ?? "none";
   switch (state) {
     case "none":
     case "shutdown":
       return state === "none"
-        ? "Nicht verbunden. Trage im Bots-Tab Host und Port ein und verbinde dich."
-        : "Sitzung beendet. Verbinde dich im Bots-Tab erneut, um weiterzumachen.";
+        ? "Not connected. Enter a host and port on the Bots tab and connect."
+        : "Session ended. Connect again on the Bots tab to continue.";
     case "connecting":
     case "initializing":
-      return "Verbindung zum Server wird aufgebaut.";
+      return "Connecting to the server.";
     case "reconnecting":
-      return "Die Verbindung ist abgebrochen. GameMind versucht, sie wiederherzustellen.";
+      return "The connection dropped. GameMind is trying to reconnect.";
     case "stopping":
-      return "Wird beendet: die laufende Aufgabe wird angehalten und der Bot trennt sich geordnet.";
+      return "Stopping: the running task is halted and the bot disconnects in order.";
     case "idle":
       return snapshot?.autonomyEnabled
-        ? "Verbunden und untätig. Die Autonomie ist an und wählt Arbeit, sobald sich etwas lohnt."
-        : "Verbunden und untätig. Starte eine Aufgabe oder schalte die Autonomie ein.";
+        ? "Connected and idle. Autonomy is on and will choose work when it sees something worth doing."
+        : "Connected and idle. Start a task, or turn autonomy on.";
     case "running": {
-      const label = snapshot?.scheduler?.active?.label ?? "eine Aufgabe";
+      const label = snapshot?.scheduler?.active?.label ?? "a task";
       const goal = snapshot?.goal?.rationale ? ` ${snapshot.goal.rationale}` : "";
-      return `Arbeitet an: ${label}.${goal}`;
+      return `Working on: ${label}.${goal}`;
     }
     default:
-      return `Sitzungsstatus: ${state}.`;
+      return `Session state: ${state}.`;
   }
 }
