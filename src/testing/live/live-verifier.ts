@@ -16,6 +16,7 @@
  */
 
 import pino from "pino";
+import { ACTION_PHASES, runActionPhase } from "./live-action-checks.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,9 @@ export interface LiveVerificationOptions {
   /** Which verification phases to run. Default: all. */
   readonly phases?: readonly LivePhase[];
   readonly logger?: pino.Logger;
+  /** Destructive action phases: digging changes the world, combat attacks a hostile. Both are opt-in. */
+  readonly allowDig?: boolean;
+  readonly allowCombat?: boolean;
 }
 
 export type LivePhase =
@@ -53,7 +57,12 @@ export type LivePhase =
   | "decision"
   | "episode-recording"
   | "learning-update"
-  | "control-center";
+  | "control-center"
+  | "movement"
+  | "timeout-recovery"
+  | "dig"
+  | "swim"
+  | "combat";
 
 export interface LiveAssertion {
   readonly name: string;
@@ -69,6 +78,14 @@ export interface LivePhaseResult {
   readonly assertions: LiveAssertion[];
   readonly error: string | null;
   readonly notes: string[];
+  /** True when the phase talks to the Minecraft server. Offline phases exercise only the in-process learner. */
+  readonly serverRequired?: boolean;
+  /** True only when this phase's own bot logged in to the server. */
+  readonly serverReached?: boolean;
+  /** True when the phase needed a server and never reached one: it did not run, and says so. */
+  readonly notRun?: boolean;
+  /** True when the phase was not applicable or was not opted in. A skip is neither a pass nor a failure. */
+  readonly skipped?: boolean;
 }
 
 export interface LiveVerificationReport {
@@ -100,7 +117,56 @@ function formatMs(ms: number): string {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-/** Connect a Mineflayer bot to the configured server. Returns the bot or throws. */
+/**
+ * A connection attempt that did not reach a spawned bot. `serverReached` is true only when the server answered
+ * (the bot logged in and was then kicked or failed), so "the socket was refused" is never counted as a server.
+ */
+export class LiveConnectError extends Error {
+  constructor(message: string, readonly serverReached: boolean) {
+    super(message);
+    this.name = "LiveConnectError";
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Ends a bot's connection and releases the protocol client's own timers. Safe to call on a bot that already ended.
+ * minecraft-protocol's end() arms a 30 s close timer, which keeps the process alive after a refused connection; each
+ * end() call overwrites the field, so the timer is cleared after every call. These are internals, so the access is
+ * guarded and a missing field is simply skipped.
+ */
+function endBot(bot: any): void {
+  if (!bot) return;
+  const client = bot._client as { socket?: { destroy?: () => void }; closeTimer?: ReturnType<typeof setTimeout> | undefined } | undefined;
+  const releaseCloseTimer = () => {
+    if (client?.closeTimer) {
+      clearTimeout(client.closeTimer);
+      delete client.closeTimer;
+    }
+  };
+  try {
+    bot.quit("GameMind live verification finished");
+  } catch {
+    // The socket may already be closed; nothing is left to release.
+  }
+  releaseCloseTimer();
+  try {
+    bot.end?.("GameMind live verification finished");
+  } catch {
+    // Already ended.
+  }
+  releaseCloseTimer();
+  try {
+    client?.socket?.destroy?.();
+  } catch {
+    // Already destroyed.
+  }
+}
+
+/** Connect a Mineflayer bot to the configured server. Returns the bot, or throws LiveConnectError (bot ended). */
 async function connectBot(config: LiveServerConfig, suffix: string): Promise<{
   bot: any;
   mineflayer: typeof import("mineflayer");
@@ -112,19 +178,53 @@ async function connectBot(config: LiveServerConfig, suffix: string): Promise<{
     username: `${config.botUsername}${suffix}`,
     version: config.version,
   });
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`Connection timeout after ${formatMs(config.connectTimeoutMs)}`)),
-      config.connectTimeoutMs,
-    );
-    bot.once("spawn", () => { clearTimeout(timer); resolve(); });
-    bot.once("error", (err: Error) => { clearTimeout(timer); reject(err); });
-    bot.once("kicked", (reason: string) => { clearTimeout(timer); reject(new Error(`Kicked: ${reason}`)); });
-  });
+  let loggedIn = false;
+  bot.once("login", () => { loggedIn = true; });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new LiveConnectError(`Connection timeout after ${formatMs(config.connectTimeoutMs)}`, loggedIn)),
+        config.connectTimeoutMs,
+      );
+      bot.once("spawn", () => { clearTimeout(timer); resolve(); });
+      bot.once("error", (err: Error) => { clearTimeout(timer); reject(new LiveConnectError(err.message, loggedIn)); });
+      bot.once("kicked", (reason: string) => { clearTimeout(timer); reject(new LiveConnectError(`Kicked: ${reason}`, true)); });
+      bot.once("end", (reason: string) => { clearTimeout(timer); reject(new LiveConnectError(`Connection ended before spawn: ${reason}`, loggedIn)); });
+    });
+  } catch (error) {
+    endBot(bot);
+    throw error;
+  }
   // Brief settle time for chunks to load
   await new Promise((r) => setTimeout(r, 1500));
   return { bot, mineflayer };
 }
+
+/** Result for a server phase whose connection failed: NOT RUN when no server answered, otherwise FAILED. */
+function connectionFailure(
+  phase: LivePhase,
+  start: number,
+  error: unknown,
+  assertions: LiveAssertion[],
+  notes: string[],
+  connected: boolean,
+): LivePhaseResult {
+  const serverReached = connected || (error instanceof LiveConnectError && error.serverReached);
+  return {
+    phase,
+    passed: false,
+    durationMs: Date.now() - start,
+    assertions,
+    error: errorMessage(error),
+    notes,
+    serverRequired: true,
+    serverReached,
+    notRun: !serverReached,
+  };
+}
+
+const OFFLINE_PHASES: readonly LivePhase[] = ["learning-update", "control-center"];
+const OFFLINE_NOTE = "Offline phase: exercises the learner in-process. It does not connect to the server.";
 
 // ─── Phase implementations ───────────────────────────────────────────────────
 
@@ -133,8 +233,11 @@ async function verifyConnection(config: LiveServerConfig): Promise<LivePhaseResu
   const assertions: LiveAssertion[] = [];
   const notes: string[] = [];
 
+  let bot: any = null;
+  let connected = false;
   try {
-    const { bot } = await connectBot(config, "-c");
+    ({ bot } = await connectBot(config, "-c"));
+    connected = true;
     const pos = bot.entity?.position;
     assertions.push(assert("Has position", pos !== undefined && pos !== null, "position defined",
       pos ? `(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)})` : "null"));
@@ -145,16 +248,10 @@ async function verifyConnection(config: LiveServerConfig): Promise<LivePhaseResu
     assertions.push(assert("Has game mode", typeof bot.game?.gameMode === "string",
       "gamemode string", `${bot.game?.gameMode ?? "null"}`));
     notes.push(`Connected as ${bot.username} in ${bot.game?.gameMode ?? "?"} mode`);
-    await bot.quit();
   } catch (error) {
-    return {
-      phase: "connection",
-      passed: false,
-      durationMs: Date.now() - start,
-      assertions,
-      error: error instanceof Error ? error.message : String(error),
-      notes,
-    };
+    return connectionFailure("connection", start, error, assertions, notes, connected);
+  } finally {
+    endBot(bot);
   }
   return {
     phase: "connection",
@@ -163,6 +260,9 @@ async function verifyConnection(config: LiveServerConfig): Promise<LivePhaseResu
     assertions,
     error: null,
     notes,
+    serverRequired: true,
+    serverReached: true,
+    notRun: false,
   };
 }
 
@@ -171,8 +271,11 @@ async function verifyObservation(config: LiveServerConfig): Promise<LivePhaseRes
   const assertions: LiveAssertion[] = [];
   const notes: string[] = [];
 
+  let bot: any = null;
+  let connected = false;
   try {
-    const { bot } = await connectBot(config, "-o");
+    ({ bot } = await connectBot(config, "-o"));
+    connected = true;
     // Block scanning
     const blocks = bot.findBlocks({
       matching: (block: { name: string } | null) => block !== null && block.name !== "air",
@@ -196,16 +299,10 @@ async function verifyObservation(config: LiveServerConfig): Promise<LivePhaseRes
     assertions.push(assert("Has time data", typeof bot.time?.timeOfDay === "number",
       "timeOfDay number", `${bot.time?.timeOfDay ?? "null"}`));
 
-    await bot.quit();
   } catch (error) {
-    return {
-      phase: "observation",
-      passed: false,
-      durationMs: Date.now() - start,
-      assertions,
-      error: error instanceof Error ? error.message : String(error),
-      notes,
-    };
+    return connectionFailure("observation", start, error, assertions, notes, connected);
+  } finally {
+    endBot(bot);
   }
   return {
     phase: "observation",
@@ -214,6 +311,9 @@ async function verifyObservation(config: LiveServerConfig): Promise<LivePhaseRes
     assertions,
     error: null,
     notes,
+    serverRequired: true,
+    serverReached: true,
+    notRun: false,
   };
 }
 
@@ -222,8 +322,11 @@ async function verifyDecision(config: LiveServerConfig): Promise<LivePhaseResult
   const assertions: LiveAssertion[] = [];
   const notes: string[] = [];
 
+  let bot: any = null;
+  let connected = false;
   try {
-    const { bot } = await connectBot(config, "-d");
+    ({ bot } = await connectBot(config, "-d"));
+    connected = true;
     // Test that the decision model can process live observations
     // We don't execute a full task here — just verify the observation pipeline produces
     // data that the decision model *could* consume.
@@ -249,16 +352,10 @@ async function verifyDecision(config: LiveServerConfig): Promise<LivePhaseResult
     );
     notes.push(`Nearby: ${logs.length} logs, ${hostiles.length} hostiles`);
 
-    await bot.quit();
   } catch (error) {
-    return {
-      phase: "decision",
-      passed: false,
-      durationMs: Date.now() - start,
-      assertions,
-      error: error instanceof Error ? error.message : String(error),
-      notes,
-    };
+    return connectionFailure("decision", start, error, assertions, notes, connected);
+  } finally {
+    endBot(bot);
   }
   return {
     phase: "decision",
@@ -267,6 +364,9 @@ async function verifyDecision(config: LiveServerConfig): Promise<LivePhaseResult
     assertions,
     error: null,
     notes,
+    serverRequired: true,
+    serverReached: true,
+    notRun: false,
   };
 }
 
@@ -275,6 +375,8 @@ async function verifyEpisodeRecording(config: LiveServerConfig): Promise<LivePha
   const assertions: LiveAssertion[] = [];
   const notes: string[] = [];
 
+  let bot: any = null;
+  let connected = false;
   try {
     // Import the learning system components
     const { ExperienceLearner } = await import("../../core/learning/learner.js");
@@ -284,7 +386,8 @@ async function verifyEpisodeRecording(config: LiveServerConfig): Promise<LivePha
     learner.beginRun({ runId: "live-verify", taskId: "live-task", worldKey: `${config.host}:${config.port}` });
 
     // Record a synthetic episode from the live observation to verify the pipeline
-    const { bot } = await connectBot(config, "-e");
+    ({ bot } = await connectBot(config, "-e"));
+    connected = true;
     const pos = bot.entity?.position;
     const health = bot.health;
     const food = bot.food;
@@ -359,16 +462,10 @@ async function verifyEpisodeRecording(config: LiveServerConfig): Promise<LivePha
       "finite number", `${liveReward.total}`));
     notes.push(`Live reward breakdown: survival=${liveReward.survival}, progress=${liveReward.progress}, efficiency=${liveReward.efficiency}`);
 
-    await bot.quit();
   } catch (error) {
-    return {
-      phase: "episode-recording",
-      passed: false,
-      durationMs: Date.now() - start,
-      assertions,
-      error: error instanceof Error ? error.message : String(error),
-      notes,
-    };
+    return connectionFailure("episode-recording", start, error, assertions, notes, connected);
+  } finally {
+    endBot(bot);
   }
   return {
     phase: "episode-recording",
@@ -377,6 +474,9 @@ async function verifyEpisodeRecording(config: LiveServerConfig): Promise<LivePha
     assertions,
     error: null,
     notes,
+    serverRequired: true,
+    serverReached: true,
+    notRun: false,
   };
 }
 
@@ -552,7 +652,8 @@ async function verifyControlCenter(config: LiveServerConfig): Promise<LivePhaseR
 
 // ─── Runner ──────────────────────────────────────────────────────────────────
 
-const PHASE_RUNNERS: Record<LivePhase, (config: LiveServerConfig) => Promise<LivePhaseResult>> = {
+/** Phases that take no options. Action phases are dispatched separately, with their opt-in flags. */
+const PHASE_RUNNERS: Partial<Record<LivePhase, (config: LiveServerConfig) => Promise<LivePhaseResult>>> = {
   connection: verifyConnection,
   observation: verifyObservation,
   decision: verifyDecision,
@@ -562,6 +663,7 @@ const PHASE_RUNNERS: Record<LivePhase, (config: LiveServerConfig) => Promise<Liv
 };
 
 const VERIFY_PHASES: readonly LivePhase[] = ["connection", "observation", "decision"];
+export const ACTION_PHASE_NAMES: readonly LivePhase[] = ACTION_PHASES;
 const LEARN_PHASES: readonly LivePhase[] = [
   "connection", "observation", "decision", "episode-recording", "learning-update", "control-center",
 ];
@@ -575,10 +677,19 @@ export async function runLiveVerification(options: LiveVerificationOptions): Pro
   for (const phase of phases) {
     logger.info(`Running phase: ${phase}`);
     try {
+      const run = ACTION_PHASES.includes(phase)
+        ? runActionPhase(phase, options.server, {
+            allowDig: options.allowDig === true,
+            allowCombat: options.allowCombat === true,
+            logger,
+          })
+        : (PHASE_RUNNERS[phase] ?? (() => Promise.reject(new Error(`no runner for phase ${phase}`))))(options.server);
+      // The deadline timer is cleared when the phase finishes: a pending timer would hold the process open.
+      let deadline: ReturnType<typeof setTimeout> | undefined;
       const result = await Promise.race([
-        PHASE_RUNNERS[phase](options.server),
-        new Promise<LivePhaseResult>((resolve) =>
-          setTimeout(
+        run,
+        new Promise<LivePhaseResult>((resolve) => {
+          deadline = setTimeout(
             () => resolve({
               phase,
               passed: false,
@@ -588,13 +699,16 @@ export async function runLiveVerification(options: LiveVerificationOptions): Pro
               notes: [],
             }),
             options.server.connectTimeoutMs + 5000,
-          ),
-        ),
-      ]);
-      if (result.error === null || result.assertions.some((a) => a.passed)) {
-        reachedServer = true;
-      }
-      results.push(result);
+          );
+        }),
+      ]).finally(() => {
+        if (deadline) clearTimeout(deadline);
+      });
+      // Only a phase whose own bot logged in to the server counts as reaching it.
+      if (result.serverReached === true) reachedServer = true;
+      results.push(OFFLINE_PHASES.includes(phase)
+        ? { ...result, serverRequired: false, serverReached: false, notRun: false, notes: [OFFLINE_NOTE, ...result.notes] }
+        : result);
     } catch (error) {
       results.push({
         phase,
@@ -603,11 +717,16 @@ export async function runLiveVerification(options: LiveVerificationOptions): Pro
         assertions: [],
         error: error instanceof Error ? error.message : String(error),
         notes: [],
+        serverRequired: !OFFLINE_PHASES.includes(phase),
+        serverReached: false,
+        notRun: false,
       });
     }
   }
 
   const passed = results.filter((r) => r.passed).length;
+  // "failed" means a phase ran (or was meant to run) and did not pass. Skipped and not-run phases are counted apart.
+  const failed = results.filter((r) => !r.passed && r.skipped !== true && r.notRun !== true).length;
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -615,9 +734,9 @@ export async function runLiveVerification(options: LiveVerificationOptions): Pro
     mode: options.mode,
     phases: results,
     passed,
-    failed: results.length - passed,
+    failed,
     total: results.length,
-    allPassed: results.every((r) => r.passed),
+    allPassed: results.every((r) => r.passed || r.skipped === true),
     reachedServer,
   };
 }
@@ -631,14 +750,23 @@ export function formatLiveVerificationReport(report: LiveVerificationReport): st
   lines.push("═══════════════════════════════════════════════════════════");
   lines.push(`  Server:  ${report.server}`);
   lines.push(`  Mode:    ${report.mode}`);
-  lines.push(`  Result:  ${report.allPassed ? "ALL PASSED ✓" : `${report.passed}/${report.total} passed, ${report.failed} FAILED ✗`}`);
-  lines.push(`  Reached: ${report.reachedServer ? "YES — connected to a real Minecraft server" : "NO — server unreachable"}`);
+  const notRunCount = report.phases.filter((phase) => phase.notRun === true).length;
+  const skippedCount = report.phases.filter((phase) => phase.skipped === true).length;
+  const failedCount = report.failed;
+  lines.push(`  Result:  ${report.allPassed
+    ? `ALL PASSED ✓${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}`
+    : `${report.passed}/${report.total} passed, ${failedCount} FAILED ✗, ${notRunCount} NOT RUN, ${skippedCount} skipped`}`);
+  lines.push(`  Reached: ${report.reachedServer
+    ? "YES — at least one phase logged in to a real Minecraft server"
+    : "NO — server unreachable; server phases are NOT RUN"}`);
   lines.push(`  Time:    ${report.generatedAt}`);
   lines.push("");
 
   for (const phase of report.phases) {
-    const icon = phase.passed ? "✓" : "✗";
-    lines.push(`  ${icon} ${phase.phase} (${formatMs(phase.durationMs)})`);
+    const status = phase.skipped === true ? "SKIPPED" : phase.notRun === true ? "NOT RUN" : phase.passed ? "PASSED" : "FAILED";
+    const icon = phase.skipped === true || phase.notRun === true ? "–" : phase.passed ? "✓" : "✗";
+    const tag = phase.serverRequired === false ? " [offline]" : phase.serverReached === true ? " [server]" : "";
+    lines.push(`  ${icon} ${phase.phase}${tag}: ${status} (${formatMs(phase.durationMs)})`);
     if (phase.error) {
       lines.push(`    ERROR: ${phase.error}`);
     }
@@ -652,17 +780,16 @@ export function formatLiveVerificationReport(report: LiveVerificationReport): st
     lines.push("");
   }
 
+  lines.push("  ─────────────────────────────────────────────────────────");
   if (!report.reachedServer) {
-    lines.push("  ─────────────────────────────────────────────────────────");
-    lines.push("  NOTE: No server was reached. Results show connection failures only.");
+    lines.push("  NOTE: No server was reached. Server phases are NOT RUN; no live result exists.");
+    lines.push("  Offline phases ([offline]) ran in-process and are NOT live evidence.");
     lines.push("  To run against a real server: npm run test:live -- --host <ip> --port <port>");
-    lines.push("  ─────────────────────────────────────────────────────────");
   } else {
-    lines.push("  ─────────────────────────────────────────────────────────");
-    lines.push("  These results are from a REAL Minecraft server connection.");
-    lines.push("  They are distinct from simulated/offline test results.");
-    lines.push("  ─────────────────────────────────────────────────────────");
+    lines.push("  Phases tagged [server] logged in to a REAL Minecraft server: those results are live.");
+    lines.push("  Phases tagged [offline] ran in-process and are NOT live evidence.");
   }
+  lines.push("  ─────────────────────────────────────────────────────────");
   lines.push("═══════════════════════════════════════════════════════════");
   return lines.join("\n");
 }

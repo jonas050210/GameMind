@@ -34,6 +34,7 @@ function run(success: boolean): EvaluationRun {
     metrics: { actions: 4, wastedActions: success ? 0 : 2, unsafeActions: 0, unverifiedConfirmations: 0, progressEvents: success ? 1 : 0 } as unknown as EvaluationRun["metrics"],
     worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0 },
     actionGoals: [],
+    actionChoices: [],
     failureCode: success ? null : "CONSECUTIVE_ACTION_FAILURES",
   };
 }

@@ -11,6 +11,10 @@
  *   # Full verification including episode recording + learning updates:
  *   npx tsx src/testing/live/live-test-runner.ts --host <ip> --port 25565 --mode learn
  *
+ *   Action checks (movement, timeout/recovery, swim, dig, combat). Dig and combat are opt-in:
+ *   npx tsx src/testing/live/live-test-runner.ts --host <ip> --port 25565 --actions
+ *   npx tsx src/testing/live/live-test-runner.ts --host <ip> --port 25565 --actions --allow-dig --allow-combat
+ *
  *   # Specific phases only:
  *   npx tsx src/testing/live/live-test-runner.ts --host <ip> --port 25565 --phases connection,observation
  *
@@ -30,6 +34,7 @@ import {
   type LiveTestMode,
   type LivePhase,
 } from "./live-verifier.js";
+import { ACTION_PHASES } from "./live-action-checks.js";
 import { writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
@@ -50,7 +55,12 @@ async function main(): Promise<void> {
 
   const phases = phasesStr
     ? (phasesStr.split(",").map((s) => s.trim()) as LivePhase[])
-    : undefined;
+    : args.includes("--actions")
+      ? ([...(mode === "verify" ? ["connection", "observation", "decision"] : ["connection", "observation", "decision", "episode-recording", "learning-update", "control-center"]), ...ACTION_PHASES] as LivePhase[])
+      : undefined;
+  // Destructive checks are opt-in: digging changes the world and combat attacks a hostile.
+  const allowDig = args.includes("--allow-dig");
+  const allowCombat = args.includes("--allow-combat");
 
   const server: LiveServerConfig = {
     host,
@@ -70,6 +80,8 @@ async function main(): Promise<void> {
   const report = await runLiveVerification({
     server,
     mode,
+    allowDig,
+    allowCombat,
     ...(phases ? { phases } : {}),
     logger,
   });

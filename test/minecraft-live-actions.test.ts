@@ -9,10 +9,10 @@ import { randomUUID } from "node:crypto";
 import test from "node:test";
 import pino from "pino";
 import type { BotOptions } from "mineflayer";
-import { MINECRAFT_HARVEST_BERRIES_CAPABILITY, MINECRAFT_PICKUP_ITEM_CAPABILITY, MINECRAFT_REST_CAPABILITY } from "../src/games/minecraft/capabilities.js";
+import { MINECRAFT_COLLECT_BLOCK_CAPABILITY, MINECRAFT_HARVEST_BERRIES_CAPABILITY, MINECRAFT_MINE_BLOCK_CAPABILITY, MINECRAFT_PICKUP_ITEM_CAPABILITY, MINECRAFT_REST_CAPABILITY } from "../src/games/minecraft/capabilities.js";
 import { minecraftObservationSchema } from "../src/games/minecraft/observation.js";
 import { MinecraftAdapter } from "../src/games/minecraft/minecraft-adapter.js";
-import { createLiveMock, connectAdapter, attemptCollection, run, config, NO_PATH_X, type MockOptions, type MockBlock, Vec } from "./support/minecraft-double.js";
+import { createLiveMock, connectAdapter, attemptCollection, run, config, NO_PATH_X, PLAN_TIMEOUT_X, type MockOptions, type MockBlock, Vec } from "./support/minecraft-double.js";
 
 test("Minecraft chat is not wired to any control path", async () => {
   const mock = createLiveMock();
@@ -456,4 +456,142 @@ test("the observation contract still rejects a non-boolean visibility; the adapt
     minecraftObservationSchema.safeParse({ ...base, minableSightings: [{ ...sighting, visible: "yes" }] }).success,
     false,
   );
+});
+
+/**
+ * Mineflayer-faithful reach and digging for the mine and collect regressions. canDigBlock is true only within reach
+ * of the eyes (as Mineflayer's is), dig() refuses out of reach, and a broken block drops an item entity that is picked
+ * up only when the bot walks onto it.
+ */
+function bindReachAndDig(mock: ReturnType<typeof createLiveMock>, options: { dropItem?: string | null } = {}) {
+  const bot = mock.bot as unknown as {
+    canDigBlock: (block: { position: Vec; diggable?: boolean }) => boolean;
+    dig: (block: { name: string; position: Vec }) => Promise<void>;
+    pathfinder: { goto: (goal: { x: number; y: number; z: number }) => Promise<void> };
+    entities: Record<number, { name: string; position: Vec; getDroppedItem?: () => { name: string; count: number } }>;
+    entity: { position: Vec };
+    collectBlock: { collect: (...args: unknown[]) => Promise<void> };
+  };
+  const eye = () => bot.entity.position.offset(0, 1.62, 0);
+  bot.canDigBlock = (block) => block.diggable !== false && eye().distanceTo(block.position.offset(0.5, 0.5, 0.5)) <= 5.1;
+  const digs: Array<{ x: number; y: number; z: number }> = [];
+  bot.dig = async (block) => {
+    if (!bot.canDigBlock(block as never)) throw new Error("block is out of reach");
+    digs.push({ x: block.position.x, y: block.position.y, z: block.position.z });
+    mock.blocks.delete(`${block.position.x},${block.position.y},${block.position.z}`);
+    if (options.dropItem !== null) {
+      const name = options.dropItem ?? block.name;
+      mock.addDrop(name, 1, block.position.x + 0.5, block.position.z + 0.5);
+    }
+  };
+  // Mineflayer's collect-block plugin is never the path to a block here; a call to it would be a regression.
+  bot.collectBlock.collect = async () => {
+    throw new Error("collectBlock.collect must not be used: it silently skips blocks when canDig is false");
+  };
+  const goto = bot.pathfinder.goto;
+  bot.pathfinder.goto = async (goal) => {
+    await goto(goal);
+    // Touching an item entity picks it up, as the player does on arrival.
+    for (const [id, entity] of Object.entries(bot.entities)) {
+      if (entity.name !== "item" || !entity.getDroppedItem) continue;
+      if (Math.hypot(entity.position.x - bot.entity.position.x, entity.position.z - bot.entity.position.z) <= 1.2) {
+        const dropped = entity.getDroppedItem();
+        mock.addItem(dropped.name, dropped.count);
+        delete bot.entities[Number(id)];
+      }
+    }
+  };
+  return { digs };
+}
+
+test("mining walks to a block beyond the eye-reach check, then digs and confirms the drop", async () => {
+  const mock = createLiveMock();
+  mock.blocks.set("10,64,0", { name: "dirt", type: 3, boundingBox: "block" });
+  const { digs } = bindReachAndDig(mock);
+  const adapter = await connectAdapter(mock);
+  // 9.5 blocks away: Mineflayer's canDigBlock is false here, which must no longer decide anything before the walk.
+  const outcome = await run(adapter, MINECRAFT_MINE_BLOCK_CAPABILITY, { x: 10, y: 64, z: 0, blockName: "dirt", dangerRadius: 6 });
+  assert.equal(outcome.confirmed, true);
+  assert.equal(outcome.details?.blockRemoved, true);
+  assert.equal(outcome.details?.inventoryAfter, 1);
+  assert.equal((mock.goals[0] as { x: number }).x, 10, "the first walk is toward the block, into reach");
+  assert.ok(mock.goals.length >= 1);
+  assert.deepEqual(digs, [{ x: 10, y: 64, z: 0 }], "the dig happened only after the walk");
+  await adapter.disconnect("test");
+});
+
+test("mining refuses an undiggable block at once and never walks to it", async () => {
+  const mock = createLiveMock();
+  mock.blocks.set("10,64,0", { name: "dirt", type: 3, boundingBox: "block", diggable: false });
+  bindReachAndDig(mock);
+  const adapter = await connectAdapter(mock);
+  await assert.rejects(
+    run(adapter, MINECRAFT_MINE_BLOCK_CAPABILITY, { x: 10, y: 64, z: 0, blockName: "dirt", dangerRadius: 6 }),
+    (error: unknown) => (error as { code?: string }).code === "BLOCK_NOT_DIGGABLE",
+  );
+  assert.equal(mock.goals.length, 0);
+  await adapter.disconnect("test");
+});
+
+test("mining stone without a pickaxe stops at the tool-tier check, before any walk", async () => {
+  const mock = createLiveMock();
+  mock.blocks.set("10,64,0", { name: "stone", type: 1, boundingBox: "block", requiresTool: true });
+  bindReachAndDig(mock);
+  const adapter = await connectAdapter(mock);
+  await assert.rejects(
+    run(adapter, MINECRAFT_MINE_BLOCK_CAPABILITY, { x: 10, y: 64, z: 0, blockName: "stone", dangerRadius: 6 }),
+    (error: unknown) => (error as { code?: string }).code === "TOOL_TIER_INSUFFICIENT",
+  );
+  assert.equal(mock.goals.length, 0, "no walk for a block the held tool cannot harvest");
+  await adapter.disconnect("test");
+});
+
+test("collecting a log 18 blocks away walks there, digs it, and confirms the item it picks up", async () => {
+  const mock = createLiveMock();
+  mock.setPlayer(12.5, 64, 18.5);
+  mock.blocks.set("12,64,0", { name: "oak_log", type: 1, boundingBox: "block" });
+  const { digs } = bindReachAndDig(mock);
+  const adapter = await connectAdapter(mock);
+  const outcome = await run(adapter, MINECRAFT_COLLECT_BLOCK_CAPABILITY, { x: 12, y: 64, z: 0, blockName: "oak_log", dangerRadius: 6 });
+  assert.equal(outcome.confirmed, true);
+  assert.equal(outcome.details?.blockRemoved, true);
+  assert.equal(outcome.details?.inventoryGained, true);
+  assert.equal(mock.countItem("oak_log"), 1);
+  assert.ok(mock.goals.length >= 1, "the bot walked toward the log");
+  assert.deepEqual(digs, [{ x: 12, y: 64, z: 0 }]);
+  await adapter.disconnect("test");
+});
+
+test("a collected block whose drop is never picked up is not reported as a gathered log", async () => {
+  const mock = createLiveMock();
+  mock.setPlayer(12.5, 64, 2.5);
+  mock.blocks.set("12,64,0", { name: "oak_log", type: 1, boundingBox: "block" });
+  bindReachAndDig(mock, { dropItem: null });
+  const adapter = await connectAdapter(mock);
+  const outcome = await run(adapter, MINECRAFT_COLLECT_BLOCK_CAPABILITY, { x: 12, y: 64, z: 0, blockName: "oak_log", dangerRadius: 6 });
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.details?.blockRemoved, true);
+  assert.equal(outcome.details?.inventoryGained, false);
+  await adapter.disconnect("test");
+});
+
+test("a navigation the planner resolved without reaching the goal is not confirmed", async () => {
+  const mock = createLiveMock();
+  // goto resolves and the bot does not move: the old adapter read this as a goal reached.
+  (mock.bot.pathfinder as { goto: unknown }).goto = async () => undefined;
+  const adapter = await connectAdapter(mock);
+  const outcome = await run(adapter, "minecraft.navigate", { x: 10, y: 64, z: 0, range: 1 });
+  assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.confirmation, "pathfinder_resolved_but_goal_not_reached_by_position");
+  await adapter.disconnect("test");
+});
+
+test("a planning run that times out is reported as PATH_PLANNING_TIMEOUT and clears the goal", async () => {
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  await assert.rejects(
+    run(adapter, "minecraft.navigate", { x: PLAN_TIMEOUT_X, y: 64, z: 0, range: 1 }),
+    (error: unknown) => (error as { code?: string }).code === "PATH_PLANNING_TIMEOUT",
+  );
+  await adapter.disconnect("test");
 });

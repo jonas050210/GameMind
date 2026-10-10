@@ -296,3 +296,48 @@ npm run test:live -- --host 127.0.0.1 --port 61889 --mode learn --output test-re
 The report is written to `test-results/live-verification-report.json`. It separates per-phase `PASS`/`FAIL`, and it exits non-zero when the server is not reached. A run where the server refused connections reports **no** live result; that is what happened in the last attempt from the development sandbox (`ECONNREFUSED 127.0.0.1:61889`).
 
 **What the harness does not yet cover, and therefore has not verified live:** movement to a chosen block, digging, block placement, entity attacks, swimming and leaving water, drowning response, and task completion as individual capabilities. Each of those needs a controlled phase with a known-good setup (for example, a flat platform the operator builds, and a pool built for the swim test). They are listed as open work in `docs/HEADLESS_LEARNING.md` and in the change notes, and must not be described as verified until a run records them.
+
+## 17. Live results on a non-vanilla stand-in, and how to run the harness on a real server (2026-10-10)
+
+**What was and was not run.** This sandbox has no Java, no Docker, and no network route to Mojang, PaperMC, Maven, or Adoptium, so the vanilla 1.20.4 server could not be started. Every result below is from a **non-vanilla stand-in** (`flying-squid@1.12.0`, protocol 1.20.4, offline auth, `127.0.0.1:25566`) and is labelled as such. It is live evidence about the adapter against a real protocol server, but it is **not** evidence about vanilla Java server behaviour. Vanilla live verification is still required.
+
+**Harness honesty fixes (this change).**
+- A phase counts as "reached the server" only when its own bot logged in. Before, any phase that passed (including the in-process learner phases) set `Reached: YES`.
+- A refused connection is `NOT RUN` (not a failed server test), and the exit code is 2.
+- `learning-update` and `control-center` are tagged `[offline]`. They never connect and are not live evidence.
+- Each server phase is tagged `[server]`. Skipped action phases (`SKIPPED`) are neither a pass nor a failure.
+- A closed connection now releases the protocol client's timers, so a refused run exits in about a second instead of after 30 s.
+
+**Results on the stand-in (`npm run test:live -- --host 127.0.0.1 --port 25566 --mode learn`):** exit 0, `ALL PASSED`, `Reached: YES`. Connection, observation, decision, and episode-recording ran `[server]` in 1.8–2.4 s each. Learning-update and control-center ran `[offline]`.
+
+**Opt-in action phases (`--actions --allow-dig --allow-combat`), stand-in:**
+
+| Phase | Result | Evidence |
+|---|---|---|
+| movement | PASSED `[server]` (899 ms) | navigate confirmed by position |
+| timeout-recovery | PASSED `[server]` (5.4 s) | timeout → cancel → next action |
+| dig | PASSED `[server]` (5.5 s) | block broken, inventory delta checked |
+| swim | SKIPPED | the phase starts where the bot stands, not in water (swim verified separately: exit from pool in 1306 ms, 13 steps) |
+| combat | SKIPPED | no hostile visible; summoned mobs are not client-visible on this stand-in |
+
+**Other live probes on the stand-in (single runs, `npm run dev` CLI):**
+- Long navigate with `timeoutMs=1200`: `timed_out`, `ACTION_TIMEOUT`, 1207 ms. The bot coasted about 0.25 blocks in the first second, then stayed still.
+- Unreachable navigate `(12,30,8)`: `PATH_NOT_FOUND` from 4 starts. From the cell beside the target, the planner's empty path now gives `ACTION_NOT_CONFIRMED` with reason `pathfinder_resolved_but_goal_not_reached_by_position`.
+- A normal navigate after the failure: `succeeded`, confirmed by position, 1556 ms.
+- `gather-logs --resource oak_log --count 1` from (12.5,5,18), the baseline flags: **exit 0** (before the fix: `blocked`, `TASK_BLOCKED_TARGETS`, exit 1). Caveat: the bot already held 2 oak logs from earlier probes, so the task reported `succeeded` with 0 actions. That is a pre-satisfied success, not a collect.
+- Valid collect: `--count 3` with the same flags, after restoring the fixture log: `succeeded`, 1 action (`minecraft.collect-log`), `targetItemsGained` 1, 0 failed actions, 0 unverified confirmations, 0 unsafe actions.
+
+**Not verified live:** drowning (the stand-in does not report air supply), combat (no client-visible mobs), vanilla server behaviour, and the original Defect 5 "OK with `confirmed=false`" (not reproduced at any start tested on HEAD or on the fixed code).
+
+**Commands for a real server (run these yourself where Java 1.20.4 runs):**
+
+```bash
+# 1. Start a private, disposable 1.20.4 Java server in survival mode. Use a test account and a world you can throw away.
+# 2. Read-only checks first:
+npm run test:live -- --host <ip> --port 25565 --mode learn --output ./test-results
+# 3. Action phases, only in a private world (dig and combat change the world; combat needs a hostile in view):
+npx tsx src/testing/live/live-test-runner.ts --host <ip> --port 25565 --actions --allow-dig --allow-combat --mode learn --output ./test-results
+# Exit codes: 0 all passed (skips allowed), 1 a phase failed, 2 server unreachable (nothing was tested).
+```
+
+Read the tags in the report. Only `[server]` phases are live evidence; `NOT RUN` and `SKIPPED` mean nothing was tested.

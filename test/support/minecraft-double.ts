@@ -56,6 +56,10 @@ export interface MockBlock {
   type: number;
   boundingBox: string;
   age?: number;
+  /** Mineflayer's block.diggable: false for bedrock-like blocks. Defaults to true. */
+  diggable?: boolean;
+  /** When true, canHarvest() needs a held item (a stand-in for a tool-tier requirement). Defaults to false. */
+  requiresTool?: boolean;
 }
 
 export interface MockOptions {
@@ -85,6 +89,8 @@ export interface MockOptions {
 
 /** A navigation goal the double cannot path to (within the adapter's 48-block limit). */
 export const NO_PATH_X = 40;
+/** A navigation goal whose planning runs out of time (within the 48-block limit). */
+export const PLAN_TIMEOUT_X = 41;
 
 export function createLiveMock(options: MockOptions = {}) {
   const emitter = new EventEmitter();
@@ -135,6 +141,8 @@ export function createLiveMock(options: MockOptions = {}) {
         position: new Vec(x, y, z),
         boundingBox: stored?.boundingBox ?? "empty",
         hardness: 1,
+        diggable: stored?.diggable ?? true,
+        canHarvest: (heldType: number | null) => (stored?.requiresTool ? heldType !== null : true),
         getProperties: () => (stored?.age === undefined ? {} : { age: stored.age }),
       };
     },
@@ -161,10 +169,21 @@ export function createLiveMock(options: MockOptions = {}) {
       }
     },
     pathfinder: {
+      // Mineflayer-faithful: when planning fails, goto() RESOLVES, and the planner reports the failure as a
+      // path_update with an empty path and a status. The emit is asynchronous, as the real planner's is.
       goto: async (goal: { x: number; y: number; z: number; constructor: { name: string } }) => {
         goals.push(goal);
-        if (goal.x === NO_PATH_X) {
-          throw Object.assign(new Error("No path to the goal!"), { name: "NoPath" });
+        if (goal.x === NO_PATH_X || goal.x === PLAN_TIMEOUT_X) {
+          const status = goal.x === NO_PATH_X ? "noPath" : "timeout";
+          // Mineflayer's goto() resolves from its own path_update listener, on a later tick (setTimeout 0): the
+          // planner's event is seen first, and the promise settles after it.
+          await new Promise<void>((resolve) => {
+            setImmediate(() => {
+              emitter.emit("path_update", { status, path: [] });
+              setTimeout(resolve, 0);
+            });
+          });
+          return;
         }
         player.position = new Vec(goal.x + 0.5, goal.y, goal.z + 0.5);
       },

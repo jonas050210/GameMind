@@ -221,3 +221,53 @@ test("the swim postcondition verifies only a real transition from water to the s
   assert.equal(verifySkillPostcondition("minecraft.swim-to-surface", {}, wet, stillWet).verified, false);
   assert.equal(verifySkillPostcondition("minecraft.swim-to-surface", {}, dry, dry).verified, false, "nothing was left behind");
 });
+
+/**
+ * Regression (live finding): Mineflayer's physics flag is computed from a player box contracted vertically, so it
+ * can read false while the feet occupy a water block. The live stand-in showed flag false, feet block `water`, and
+ * the swim executor confirmed "out of water" with the feet still submerged. These tests pin the block-data check.
+ */
+function bindFlagReadsOut(mock: ReturnType<typeof createLiveMock>): void {
+  const player = mock.bot.entity as unknown as { isInWater?: boolean };
+  Object.defineProperty(player, "isInWater", { configurable: true, get: () => false });
+}
+
+test("a body whose feet are in water is in water even when the physics flag reads false", async () => {
+  const mock = createLiveMock();
+  buildLake(mock);
+  bindFlagReadsOut(mock);
+  // Feet inside the top water cell (y 63); the head (eye at y 64.62) is in air.
+  (mock.bot.entity as unknown as { position: Vec }).position = new Vec(0.5, 63, 0.5);
+  const adapter = await connectAdapter(mock);
+  const observed = (await adapter.observe()).state.player;
+  assert.equal(observed.headInWater, false, "the head is clear");
+  assert.equal(observed.inWater, true, "the feet are in water, so the body is in water");
+  await adapter.disconnect("test");
+});
+
+test("the swim keeps stepping until the feet are clear, even when the physics flag reads false", async () => {
+  const mock = createLiveMock();
+  buildLake(mock);
+  bindFlagReadsOut(mock);
+  bindMovement(mock);
+  // Head clear from the start: the old exit test (flag and head only) would confirm at once with feet submerged.
+  (mock.bot.entity as unknown as { position: Vec }).position = new Vec(0.5, 63, 0.5);
+  const adapter = await connectAdapter(mock);
+  const session = adapter.session;
+  assert.ok(session);
+  const outcome = await adapter.executeAction(
+    {
+      actionId: randomUUID(),
+      sessionId: session.id,
+      capability: MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
+      input: minecraftSwimToSurfaceInputSchema.parse({ maxDistance: 8 }),
+    },
+    new AbortController().signal,
+  );
+  assert.equal(outcome.confirmed, true);
+  assert.equal(outcome.confirmation, "observed_out_of_water");
+  assert.ok((outcome.details as { steps: number }).steps >= 1, "the feet were in water, so the executor had to swim");
+  const after = mock.bot.blockAt(new Vec(Math.floor(mock.bot.entity.position.x), Math.floor(mock.bot.entity.position.y), Math.floor(mock.bot.entity.position.z)) as never);
+  assert.notEqual(after?.name, "water", "the feet block is no longer water when the swim is confirmed");
+  await adapter.disconnect("test");
+});

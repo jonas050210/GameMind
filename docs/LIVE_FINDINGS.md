@@ -76,3 +76,18 @@ npm run dev -- --task gather-logs --resource oak_log --count 2 \
 Then work through `LIVE_VERIFICATION.md` §2 (observation), §3 (gather + exploration), §10 (dashboard) and
 §15 (session facts), and keep `data/traces/*.jsonl` for the run. If the panel and the trace disagree with
 each other, that disagreement is the bug — the numbers themselves may be the server's honest answer.
+
+## 5. Status of each defect after the live stand-in checks (2026-10-10)
+
+Evidence is from a non-vanilla stand-in (flying-squid 1.12.0, protocol 1.20.4). It is not vanilla server evidence.
+
+| # | Defect | Fix | Live status on the stand-in |
+|---|---|---|---|
+| 1 | Harness said `Reached: YES` when no server answered | `live-verifier.ts`: `reachedServer` only from `[server]` phases; `NOT RUN`; `[offline]` tags; bot ends and timers released | **Verified**: refused run → `Reached: NO`, exit 2; stand-in run → `Reached: YES` |
+| 2 | Mine targets 6–24 blocks away failed at once with `BLOCK_NOT_DIGGABLE` (no walk) | pre-checks use `diggable` and `canHarvest`; reach is checked after the walk | **Verified**: dirt (16,5,0) from 6–8 blocks, confirmed in 3528 ms |
+| 3 | Log 18 blocks away failed at once with `BLOCK_NOT_HARVESTABLE`; dropped log not picked up | walk, then dig, then walk onto the drop (`pickUpNearbyDrops`) | **Verified**: collect confirmed in 7648 ms; `gather-logs` exit 1 → 0 (with the caveat in LIVE_VERIFICATION §17) |
+| 4 | Swim stopped with the feet still in water (`inWater` used the contracted physics flag) | feet and body block checks | **Verified**: exit to shore in 1306 ms, 13 steps |
+| 5 | A navigate with an empty planner path resolved as OK without reaching the goal | rejects NoPath/Timeout on an empty path; confirmation by position | **Partly verified**: the empty-path start now gives `ACTION_NOT_CONFIRMED`. The original "OK, `confirmed=false`" did not reproduce on HEAD or on the fix, at any start tested |
+| 6 | Exploration never fired during training (`goalId`-only eligibility) | compares goal and target | **Offline only**: switches 0 → 2 at ε=0.2, 24 at ε=1; held-out results unchanged (see HEADLESS_LEARNING §3) |
+
+Not verified live: drowning (no air supply on the stand-in), combat (no client-visible mobs), and every behaviour on a vanilla server.

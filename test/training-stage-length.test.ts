@@ -26,6 +26,7 @@ function successRun(): EvaluationRun {
     metrics: { actions: 4, wastedActions: 0, unsafeActions: 0, unverifiedConfirmations: 0, progressEvents: 1 } as unknown as EvaluationRun["metrics"],
     worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0 },
     actionGoals: [],
+    actionChoices: [],
     failureCode: null,
   };
 }

@@ -72,6 +72,9 @@ export interface HeadlessExperimentReport {
     readonly runsCompared: number;
     readonly runsWithDifferentGoalSequence: number;
     readonly differentFraction: number;
+    /** Runs whose goal-and-target sequence differs (finer than the goal sequence above). */
+    readonly runsWithDifferentChoiceSequence: number;
+    readonly differentChoiceFraction: number;
     readonly runsWithDifferentOutcome: number;
   };
   readonly conclusion: string;
@@ -199,6 +202,7 @@ export async function runHeadlessExperiment(options: HeadlessExperimentOptions):
   await trainedLearner.promote(loaded.weights, "headless experiment (not persisted)");
   let compared = 0;
   let differentGoals = 0;
+  let differentChoices = 0;
   let differentOutcome = 0;
   for (const scenario of scenarios) {
     for (const seed of seeds) {
@@ -206,6 +210,7 @@ export async function runHeadlessExperiment(options: HeadlessExperimentOptions):
       const trainedRun = await runEvaluationOnce(scenario, seed, { learner: trainedLearner, worldKey: null });
       compared += 1;
       if (JSON.stringify(baseRun.actionGoals) !== JSON.stringify(trainedRun.actionGoals)) differentGoals += 1;
+      if (JSON.stringify(baseRun.actionChoices) !== JSON.stringify(trainedRun.actionChoices)) differentChoices += 1;
       if (baseRun.success !== trainedRun.success) differentOutcome += 1;
     }
   }
@@ -256,6 +261,8 @@ export async function runHeadlessExperiment(options: HeadlessExperimentOptions):
       runsCompared: compared,
       runsWithDifferentGoalSequence: differentGoals,
       differentFraction: compared === 0 ? 0 : Math.round((differentGoals / compared) * 1000) / 1000,
+      runsWithDifferentChoiceSequence: differentChoices,
+      differentChoiceFraction: compared === 0 ? 0 : Math.round((differentChoices / compared) * 1000) / 1000,
       runsWithDifferentOutcome: differentOutcome,
     },
     conclusion,

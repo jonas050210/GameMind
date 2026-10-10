@@ -197,9 +197,27 @@ function createMockBot(
         position: new MockVector(x, y, z),
         boundingBox: stored?.boundingBox ?? "empty",
         hardness: stored ? 1 : 0,
+        diggable: true,
+        canHarvest: () => true,
       };
     },
     canDigBlock: () => true,
+    // The adapter digs collected logs itself (walk, then dig). The effect matches the old collect double: the block
+    // is removed and its item enters the inventory. A stalled dig never settles, as on a stalled server.
+    dig: async (block: { position: MockVector; name: string; type: number }) => {
+      if (collectionStalls) return new Promise<void>(() => undefined);
+      const { x, y, z } = block.position;
+      blocks.delete(blockKey(x, y, z));
+      inventoryItems.push({
+        slot: inventoryItems.length + 9,
+        name: block.name,
+        type: block.type,
+        count: 1,
+        metadata: null,
+        durabilityUsed: null,
+      });
+    },
+    stopDigging: () => undefined,
     pathfinder: {
       goto: (goal: { x: number; y: number; z: number }) => {
         if (navigationStalls) return new Promise<void>(() => undefined);
@@ -240,7 +258,6 @@ function createMockBot(
       inventorySlots[slot] = equipped;
     },
     clearControlStates: () => undefined,
-    stopDigging: () => undefined,
     quit: (reason = "quit") => queueMicrotask(() => emitter.emit("end", reason)),
     end: (reason = "end") => queueMicrotask(() => emitter.emit("end", reason)),
   });
@@ -490,7 +507,9 @@ test("navigation progress watchdog fails a stalled goal without disconnecting th
 test("stalled resource collection is cancelled by the shared movement watchdog", async () => {
   const logger = pino({ level: "silent" });
   const trace = new TraceRecorder(new MemoryTraceSink(), logger);
-  const bot = createMockBot(true, 20, false, true);
+  // The walk to the log is the stalled step: the bot starts out of reach, so the collection must navigate first.
+  const bot = createMockBot(true, 20, true, false);
+  (bot.entity as unknown as { position: MockVector }).position = new MockVector(12.5, 64, 0.5);
   const adapter = createTestAdapter(logger, () => bot, config({ navigationStuckTimeoutMs: 1_000 }));
   const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
   await runtime.connect();
