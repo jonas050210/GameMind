@@ -41,7 +41,8 @@
     "roadmap": "tsx src/roadmap/cli.ts",
     "app": "tsx src/cli.ts",
     "app:build": "node dist/src/cli.js",
-    "train:status": "tsx src/training/cli.ts status"
+    "train:status": "tsx src/training/cli.ts status",
+    "test:launcher": "python3 -m unittest discover -s tests_py -t ."
   },
   "dependencies": {
     "mineflayer": "4.39.0",

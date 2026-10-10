@@ -487,7 +487,7 @@ Offline:
   --seed N             Seed for --sim scenarios (default 101)
 
 Live Java server (requires an authorized private/local server):
-  --task TASK          Run gather-logs, mine-stone, craft-wooden-pickaxe or secure-food on a Java server
+  --task TASK          Run gather-logs, mine-stone, craft-wooden-pickaxe, secure-food or build-shelter on a Java server
   --resource NAME      Target block or item for the task (oak_log, stone, iron_ore, wooden_pickaxe, ...)
   --count N            Inventory target for gather/craft, from 1 through 64 (default: 1)
   --target-hunger N    Hunger target for secure-food, from 1 through 20 (default: 18)
