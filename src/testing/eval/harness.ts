@@ -21,6 +21,8 @@ export interface EvaluationRun {
   readonly metrics: MinecraftTaskResult["metrics"];
   readonly worldStats: { readonly damageTaken: number; readonly minHealth: number; readonly starvationTicks: number };
   readonly actionGoals: readonly string[];
+  /** Goal and target of each action (`goalId@targetKey`): the finer choice the policy makes. */
+  readonly actionChoices: readonly string[];
   readonly failureCode: string | null;
 }
 
@@ -151,6 +153,7 @@ export async function runEvaluationOnce(
       starvationTicks: world.stats.starvationTicks,
     },
     actionGoals: result.actions.map((action) => action.goalId),
+    actionChoices: result.actions.map((action) => `${action.goalId}@${action.targetKey ?? ""}`),
     failureCode: result.failure?.code ?? null,
   };
 }

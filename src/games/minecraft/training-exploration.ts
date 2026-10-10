@@ -53,12 +53,15 @@ export function exploreDecision<T extends DecisionLike>(
   if (!selected || config.epsilon <= 0 || selected.priorityBand !== BAND_PROGRESS) {
     return { decision, choice: null };
   }
+  // An alternative is a different *choice*, not a different goal name: every block target of one resource shares a
+  // goal id (for example "collect:oak_log"), so comparing goal ids alone would exclude all of them and exploration
+  // would never fire. The pair (goal, target) identifies the choice.
   const eligible = decision.alternatives.filter(
     (candidate) =>
       candidate.priorityBand === BAND_PROGRESS &&
       candidate.skillId !== null &&
       candidate.skillId !== "minecraft.attack-hostile" &&
-      candidate.goalId !== selected.goalId,
+      !(candidate.goalId === selected.goalId && candidate.targetKey === selected.targetKey),
   );
   if (eligible.length === 0) return { decision, choice: null };
   const draw = mulberry32((config.seed * 1_000_003 + observationSequence) | 0);

@@ -33,15 +33,43 @@ Training throughput: about 52 episodes/s and 216 env steps/s on this sandbox (wa
 
 Per-episode reward rose from a first-quartile mean of 0.93 to a last-quartile mean of 2.80. **This is not evidence of learning**: the curriculum changes difficulty across stages, so the rise is confounded with the scenario mix, and the success rate was flat (0.8 → 0.8).
 
-### Diagnostic: why exploration fired zero times
+### Diagnostic: why exploration fired zero times (root cause found and fixed)
 
-Forcing ε = 1 on every evaluation scenario with three seeds produced **3 switches in total**, all in one scenario (`mine-pickup-cobblestone`). The simulated worlds almost never offer two competing progress-band options, so there is almost nothing for exploration or learning to act on.
+Measured on the simulator (`26 scenarios × 2 seeds`, progress-band decisions only):
+
+| Build | Progress decisions | Decisions with an eligible alternative | Switches at ε = 0.2 | Switches at ε = 1 |
+|---|---|---|---|---|
+| Before fix | 149 | **2** | 0 | 3 (earlier diagnostic, 3 seeds) |
+| After fix | 149 | **26** | 2 | 24 |
+
+**Cause (code defect):** `exploreDecision` excluded every alternative whose `goalId` equalled the selected goal. Every block target of one resource shares a goal id (`collect:oak_log`, `mine:stone`), so each same-resource alternative was discarded. The real choice is the `(goal, target)` pair. The fix compares that pair; a regression test covers it (`test/training-exploration.test.ts`).
+
+**Structural limit (not fixed):** 120 of the 149 progress decisions still have **no** alternative at all. Those decisions come from single-candidate branches (`record(null, x, [], …)`: inventory, pickup, exploration, shelter, flee). Exploration can only act where the planner ranks several candidates (gather and mine targets). This is a candidate for the further-improvement list.
+
+### Results after the fix (held-out, paired, same seeds and scenarios)
+
+Training: `npm run train:experiment -- --name NAME --out DIR --seeds 10 --explore RATE` (writes to `DIR`, never to the repo `data/`). The paired comparison was made with a temporary script that is **not committed**: it loads the checkpoint, runs each scenario and seed twice (no learner weights; then the checkpoint weights promoted into a fresh in-memory learner), and compares the paired results. 10 seeds × 26 scenarios = 260 paired runs.
+
+| Training ε | Explorations during training | Held-out success base → trained | Mean progress base → trained | Deaths | Unsafe actions | Mean reward per run base → trained | Runs whose target choice differs | Runs whose outcome differs | Experiment verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.2 (default) | 2 | 73.5% → 73.5% | 0.786 → 0.786 | 0 → 0 | 0 → 0 | 1.933 → 1.933 | 10 / 260 (3.8%) | 0 | not promotable |
+| 0.5 | 6 | 73.5% → 73.5% | 0.786 → 0.786 | 0 → 0 | 0 → 0 | 1.933 → 1.933 | 10 / 260 (3.8%) | 0 | not promotable |
+| 1.0 | 17 | 73.5% → 73.5% | 0.786 → 0.786 | 0 → 0 | 0 → 0 | 1.933 → 1.933 | 10 / 260 (3.8%) | 0 | not promotable |
+
+Notes:
+- All three trained checkpoints changed 7 weight entries (max |Δ| 0.25). Training ran 36 episodes; the curriculum stops there regardless of ε.
+- Trained and baseline policies differ on a few target choices (10 / 260), but never in outcome, progress, deaths, unsafe actions, or reward. The weights are multiplicative on candidate scores, so they reorder only near-equal candidates in these scenarios.
+- The per-episode reward rise during training (first-quartile mean 1.08 → last-quartile 2.43) is confounded with the curriculum's scenario mix. It is not evidence of learning.
+
+### Reward does not feed the weight update (code audit)
+
+`derivePolicyWeights(stats, options)` takes only skill statistics (attempts, successes via `conservativeSuccessRate`, contradicted confirmations). `computeReward` output is accumulated into running means and an EWMA that are reported in the snapshot, but they never enter the weight calculation. So the reward signal does not influence learning updates. Making reward part of the update is a design change, listed in the further-improvements report, and was not made here.
 
 ### Interpretation (negative / inconclusive)
 
 - The parameters **do** change during training, and the change **does** alter chosen goals on a few held-out runs (10/260). That shows the learned multiplier is wired into decisions.
 - It does **not** change held-out success, and the gate correctly refuses to promote it.
-- **No evidence of improved policy performance was obtained.** The experiment is inconclusive for learning, and negative for any claim that the current curriculum trains a better policy.
+- **No evidence of improved policy performance was obtained** across ε = 0.2, 0.5, and 1.0, 10 held-out seeds, and 26 scenarios. The experiment is inconclusive for learning, and negative for any claim that the current curriculum trains a better policy.
 
 ## 4. What is still missing for a real learning demonstration
 

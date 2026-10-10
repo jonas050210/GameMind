@@ -90,3 +90,25 @@ test("a headless experiment refuses to write into an existing directory, so earl
     await rm(outDir, { recursive: true, force: true });
   }
 });
+
+// Regression: every block target of one resource shares a goal id ("collect:oak_log"). Comparing goal ids alone
+// excluded all of them, so exploration never fired on the real decision shape (2 of 149 progress decisions had an
+// eligible alternative; ε=1 gave 0 switches). The choice is the (goal, target) pair.
+test("an alternative target of the same goal is an eligible exploratory switch (regression: exploration never fired)", () => {
+  const sameGoal = (targetKey: string): DecisionCandidate =>
+    ({ goalId: "collect:oak_log", targetKey, priorityBand: BAND_PROGRESS, score: 100, skillId: "minecraft.collect-block", input: {}, rationale: targetKey }) as unknown as DecisionCandidate;
+  const d = decision(sameGoal("block:12,5,0"), [sameGoal("block:14,5,2"), sameGoal("block:9,5,-3")]);
+  const result = exploreDecision(d, { epsilon: 1, seed: 1 }, 0);
+  assert.ok(result.choice, "epsilon 1 must switch to a different target of the same goal");
+  assert.equal(result.choice.toGoalId, "collect:oak_log");
+  assert.notEqual(result.decision.selected?.targetKey, "block:12,5,0");
+  assert.equal(result.choice.eligibleAlternatives, 2);
+});
+
+test("the identical goal and target is never an exploratory switch", () => {
+  const same = { goalId: "collect:oak_log", targetKey: "block:12,5,0", priorityBand: BAND_PROGRESS, score: 100, skillId: "minecraft.collect-block", input: {}, rationale: "x" } as unknown as DecisionCandidate;
+  const d = decision(same, [{ ...same }]);
+  for (let sequence = 0; sequence < 50; sequence += 1) {
+    assert.equal(exploreDecision(d, { epsilon: 1, seed: 2 }, sequence).choice, null);
+  }
+});
