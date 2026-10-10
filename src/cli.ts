@@ -379,6 +379,11 @@ export function parseArgs(args: readonly string[]): CliOptions {
   if (lookPitchProvided && lookYaw === undefined) {
     throw new Error("--look-pitch requires --look-yaw.");
   }
+  if (lookYaw !== undefined && (controlCenter || openBrowser || (modeGiven && mode === "persistent"))) {
+    throw new Error(
+      "--look-yaw is a one-shot probe: it connects, turns once, prints the result and disconnects. It cannot be combined with --control-center, --open-browser or --persistent. Start a normal session and use the Look entry in the Library (Bots tab) instead.",
+    );
+  }
   if (policy !== undefined && (demo || demoTask || task || sim !== undefined)) {
     throw new Error("--policy inspects or changes the learned policy on its own; do not combine it with a run.");
   }

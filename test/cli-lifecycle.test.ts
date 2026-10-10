@@ -266,3 +266,16 @@ test("the flag parser separates persistent from one-shot, keeps loopback by defa
   assert.throws(() => parseArgs(["--allow-host", "bad host!"]), /host name/);
   assert.throws(() => parseArgs(["--demo-task", "--one-shot"]), /offline fixture demos/);
 });
+
+test("--look-yaw is a one-shot probe and refuses the options that would have it keep a session or serve the page", () => {
+  const probe = parseArgs(["--look-yaw", "0", "--host", "127.0.0.1"]);
+  assert.equal(probe.lookYaw, 0);
+  assert.equal(parseArgs(["--look-yaw", "1.5", "--one-shot", "--host", "127.0.0.1"]).lookYaw, 1.5);
+  for (const flag of ["--control-center", "--open-browser", "--persistent"]) {
+    assert.throws(
+      () => parseArgs(["--look-yaw", "0", flag]),
+      /--look-yaw is a one-shot probe.*cannot be combined with --control-center, --open-browser or --persistent/,
+      `${flag} must be refused, not silently dropped`,
+    );
+  }
+});
