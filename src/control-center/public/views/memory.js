@@ -62,7 +62,7 @@ function worlds(ctx) {
             ]),
             h("div", { class: "memory-grid" }, heat(world.grid), world.grid ? h("p", { class: "small muted" }, `One square is up to ${fmtNumber(world.grid.cellsPerBucket)} cells; darker means more explored.`) : null),
             Object.keys(world.resources).length ? h("div", null, h("h5", null, "Resource observations"), h("ul", { class: "chips" }, Object.entries(world.resources).sort((a, b) => b[1] - a[1]).slice(0, 14).map(([name, count]) => h("li", { class: "badge tone-neutral" }, `${humanise(name)} ×${fmtNumber(count)}`)))) : null,
-            world.landmarks.length ? h("details", null, h("summary", null, `Landmarks (${world.landmarkTotal})`), table({ dense: true, columns: [{ label: "Type", cell: (l) => l.type }, { label: "Label", cell: (l) => l.label }, { label: "Position", cell: (l) => `${l.position.x}, ${l.position.y}, ${l.position.z}` }, { label: "Recorded", cell: (l) => fmtTime(l.createdAt) }], rows: world.landmarks.map((value) => ({ key: value.id, value })) })) : null,
+            world.landmarks.length ? h("details", null, h("summary", null, `Landmarks (${world.landmarkTotal})`), table({ dense: true, columns: [{ label: "Type", cell: (l) => l.type }, { label: "Label", cell: (l) => l.label }, { label: "Recorded", cell: (l) => fmtTime(l.createdAt) }], rows: world.landmarks.map((value) => ({ key: value.id, value })) })) : null,
           ),
         )
       : empty("No world memory has been saved yet", "Memory is written while a session observes a world. Nothing is shown here until there is something real to show."),

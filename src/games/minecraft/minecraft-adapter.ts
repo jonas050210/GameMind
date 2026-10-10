@@ -229,6 +229,13 @@ export interface MinecraftAdapterConfig {
   readonly resourceScanLimit: number;
   /** Allow Mineflayer's health plugin to request a vanilla respawn after death. */
   readonly autoRespawn: boolean;
+  /**
+   * Whether path planning may route through doors. Off by default: Mineflayer's own documentation calls door opening
+   * a cause of path problems. MINECRAFT_NAV_ALLOW_DOORS=true turns it on for a run.
+   */
+  readonly navigationAllowDoors: boolean;
+  /** How far the planner may let the bot drop down in one step (0 to 3 blocks). MINECRAFT_NAV_MAX_DROP changes it. */
+  readonly navigationMaxDropDown: number;
 }
 
 export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
@@ -254,6 +261,8 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   resourceScanRadius: 32,
   resourceScanLimit: 192,
   autoRespawn: true,
+  navigationAllowDoors: false,
+  navigationMaxDropDown: 1,
 };
 
 export type MinecraftBotFactory = (options: BotOptions) => Bot;
@@ -261,7 +270,7 @@ export type MinecraftBotFactory = (options: BotOptions) => Bot;
 export interface MinecraftAdapterDependencies {
   readonly botFactory?: MinecraftBotFactory;
   readonly installPlugins?: (bot: Bot) => void;
-  readonly configureSafeMovements?: (bot: Bot) => void;
+  readonly configureSafeMovements?: (bot: Bot, navigation: NavigationMovementOptions) => void;
 }
 
 class MinecraftAdapterError extends Error {
@@ -503,7 +512,13 @@ function safeInstallPlugins(bot: Bot): void {
   bot.loadPlugin(collectBlockPlugin);
 }
 
-function configureConservativeMovements(bot: Bot): void {
+/** The two movement settings an operator may change; everything else in the movement policy stays fixed. */
+export interface NavigationMovementOptions {
+  readonly allowDoors: boolean;
+  readonly maxDropDown: number;
+}
+
+function configureConservativeMovements(bot: Bot, navigation: NavigationMovementOptions): void {
   if (!bot.pathfinder || !bot.collectBlock) {
     throw new MinecraftAdapterError(
       "Navigation and collection plugins were not installed on the Mineflayer bot.",
@@ -512,13 +527,13 @@ function configureConservativeMovements(bot: Bot): void {
   }
   const movements: PathfinderMovements = new pathfinderApi.Movements(bot);
   movements.canDig = false;
-  movements.canOpenDoors = false;
+  movements.canOpenDoors = navigation.allowDoors;
   movements.allow1by1towers = false;
   movements.allowParkour = false;
   movements.allowSprinting = false;
   movements.allowFreeMotion = false;
   movements.allowEntityDetection = true;
-  movements.maxDropDown = 1;
+  movements.maxDropDown = navigation.maxDropDown;
   movements.infiniteLiquidDropdownDistance = false;
   (movements as PathfinderMovements & { liquidCost: number }).liquidCost = 100;
   movements.entityCost = 50;
@@ -584,7 +599,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
   private readonly botFactory: MinecraftBotFactory;
   private readonly installPlugins: (bot: Bot) => void;
-  private readonly configureSafeMovements: (bot: Bot) => void;
+  private readonly configureSafeMovements: (bot: Bot, navigation: NavigationMovementOptions) => void;
 
   /**
    * Combat is switched through this field rather than the config object, so an operator can arm or
@@ -654,6 +669,16 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (typeof config.autoRespawn !== "boolean") {
       throw new Error("autoRespawn must be a boolean.");
     }
+    if (typeof config.navigationAllowDoors !== "boolean") {
+      throw new Error("navigationAllowDoors must be a boolean.");
+    }
+    if (!Number.isInteger(config.navigationMaxDropDown) || config.navigationMaxDropDown < 0 || config.navigationMaxDropDown > 3) {
+      throw new Error("navigationMaxDropDown must be an integer from 0 through 3.");
+    }
+  }
+
+  private navigationOptions(): NavigationMovementOptions {
+    return { allowDoors: this.config.navigationAllowDoors, maxDropDown: this.config.navigationMaxDropDown };
   }
 
   get status(): AdapterStatus {
@@ -732,7 +757,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           // re-applied because plugins may reset their world context on respawn.
           if (this.statusValue === "connected" && this.sessionValue?.id === sessionId) {
             try {
-              this.configureSafeMovements(bot);
+              this.configureSafeMovements(bot, this.navigationOptions());
               this.logger.info({ sessionId, deathCount: this.deathCount }, "Minecraft player spawned; safe movement policy reapplied");
             } catch (error) {
               this.logger.error({ err: error, sessionId }, "Could not reapply safe movement after respawn");
@@ -741,7 +766,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           return;
         }
         try {
-          this.configureSafeMovements(bot);
+          this.configureSafeMovements(bot, this.navigationOptions());
         } catch (error) {
           const failure = error instanceof Error ? error : new Error(String(error));
           finishFailure(failure);
@@ -3060,6 +3085,15 @@ export function minecraftAdapterConfigFromEnv(
   if (authValue !== "offline" && authValue !== "microsoft") {
     throw new Error("MINECRAFT_AUTH must be either 'offline' or 'microsoft'.");
   }
+  const navDoorsValue = env.MINECRAFT_NAV_ALLOW_DOORS;
+  const navigationAllowDoors = navDoorsValue === undefined || navDoorsValue.trim() === ""
+    ? DEFAULT_MINECRAFT_CONFIG.navigationAllowDoors
+    : navDoorsValue.toLowerCase() === "true"
+      ? true
+      : navDoorsValue.toLowerCase() === "false"
+        ? false
+        : (() => { throw new Error("MINECRAFT_NAV_ALLOW_DOORS must be 'true' or 'false'."); })();
+  const navigationMaxDropDown = numericEnvironmentSetting(env, "MINECRAFT_NAV_MAX_DROP", DEFAULT_MINECRAFT_CONFIG.navigationMaxDropDown, 0, 3, true);
   const respawnValue = env.MINECRAFT_AUTO_RESPAWN;
   const autoRespawn = respawnValue === undefined
     ? DEFAULT_MINECRAFT_CONFIG.autoRespawn
@@ -3084,5 +3118,7 @@ export function minecraftAdapterConfigFromEnv(
     resourceScanRadius,
     resourceScanLimit,
     autoRespawn,
+    navigationAllowDoors,
+    navigationMaxDropDown,
   };
 }

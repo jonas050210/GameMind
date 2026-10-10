@@ -139,6 +139,7 @@
       <!-- C. BOTS -->
       <section id="panel-bots" class="panel" role="tabpanel" aria-labelledby="tab-bots" hidden>
         <div id="bots-list"></div>
+        <div id="bots-testserver"></div>
         <div class="grid two">
           <section class="card" aria-labelledby="connect-title">
             <header class="card-head"><div><h3 id="connect-title">Connect a bot</h3><p class="muted small">One bot per process today. The list above is built per bot, so more can be added later.</p></div></header>
@@ -159,6 +160,8 @@
                     <div><label for="connect-version">Version</label><input id="connect-version" name="version" type="text" placeholder="1.20.4" maxlength="12" /></div>
                     <div><label for="connect-auth">Sign-in</label><select id="connect-auth" name="auth"><option value="">default (offline)</option><option value="offline">offline</option><option value="microsoft">microsoft</option></select></div>
                   </div>
+                  <div class="button-row"><button type="button" class="btn compact" id="connect-check" data-action="check-port">Check the port first</button></div>
+                  <p id="connect-probe" class="hint" aria-live="polite"></p>
                   <p class="hint">Blank fields use the environment or the defaults (127.0.0.1:25565, Minecraft 1.20.4). A world opened to LAN gets a new port each time; use the one printed in the game chat. Credentials are never entered or stored here.</p>
                   <p id="connect-wsl-hint" class="hint" hidden><span id="connect-wsl-text"></span> <button type="button" class="btn compact" id="connect-use-windows" data-action="use-windows-host">Use it</button></p>
                 </div>

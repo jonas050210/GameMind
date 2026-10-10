@@ -331,29 +331,29 @@ export function resolveEntryAvailability(
   if (missing.length > 0) {
     return {
       status: "unavailable",
-      reason: `Not advertised by this run's adapter: ${missing.join(", ")}. The legacy offline fixture exposes only the original 8 capabilities.`,
+      reason: `Not advertised by this run's adapter: ${missing.join(", ")}. The offline simulator offers only the original 8 capabilities; a live connection offers all of them.`,
     };
   }
   if (entry.requiresCompanion && !ctx.companion) {
-    return { status: "unavailable", reason: "No companion coordinator is attached to this run." };
+    return { status: "unavailable", reason: "The companion coordinator is not running. Connect a session first (Bots tab)." };
   }
   if (entry.requiresLearner && !ctx.learner) {
-    return { status: "unavailable", reason: "No experience learner is attached to this run (started with --no-learning?)." };
+    return { status: "unavailable", reason: "The experience learner is off for this run. Start GameMind without --no-learning to enable it." };
   }
   if (entry.requiresTraining && !ctx.training) {
-    return { status: "unavailable", reason: "Training is not available in this host." };
+    return { status: "unavailable", reason: "Training cannot run in this process. Start GameMind with python3 main.py and use the Training tab." };
   }
   if (entry.requiresSafety && !ctx.safety) {
-    return { status: "unavailable", reason: "This run has no Safety Broker attached." };
+    return { status: "unavailable", reason: "The Safety Broker is not attached to this run, so world-changing actions are refused. Restart GameMind." };
   }
   if (entry.requiresCombatSwitch && !ctx.combatSwitchAvailable) {
-    return { status: "unavailable", reason: "This adapter has no runtime combat switch; restart with --allow-combat." };
+    return { status: "unavailable", reason: "This adapter has no runtime combat switch. Restart with --allow-combat to use it." };
   }
   if (entry.requiresTaskRunner && (!ctx.taskFor || !ctx.onStart)) {
-    return { status: "unavailable", reason: "This run does not accept new tasks." };
+    return { status: "unavailable", reason: "This run does not accept new tasks. Connect a session (python3 main.py) to run tasks." };
   }
   if (!ctx.skills && (entry.requiresCapabilities ?? []).length > 0) {
-    return { status: "unavailable", reason: "No skill runtime is attached to this run." };
+    return { status: "unavailable", reason: "No skill runtime is attached to this run. Connect a session first (Bots tab)." };
   }
   return { status: entry.meta.status, reason: entry.meta.statusReason };
 }

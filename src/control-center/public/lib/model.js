@@ -120,6 +120,7 @@ export const COMMANDS_USED = [
   "startTraining", "pauseTraining", "resumeTraining", "stopTraining", "evaluateTraining", "selectTrainingDirectory",
   "runUnitTests", "runOfflineEvaluation", "runLiveVerification", "cancelJob",
   "promotePolicy", "rejectPolicy", "setWorldSeed", "refreshRoadmap", "roadmapAction", "libraryExecute",
+  "startTestServer", "stopTestServer", "probeServer",
 ];
 
 /**
