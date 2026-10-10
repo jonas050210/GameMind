@@ -68,9 +68,29 @@ export function bestWeapon(items: Iterable<{ readonly name: string }>): { name: 
   return best;
 }
 
-export function attackCooldownMs(): number {
+/**
+ * Time between melee swings for the held weapon, from approximate vanilla attack speeds (Java 1.20+). A swing
+ * sent before the cooldown has elapsed deals reduced damage, so the executor waits this long between swings instead
+ * of using one fixed interval. Unknown or no weapon: bare hands (4 swings per second).
+ */
+const HAND_COOLDOWN_MS = 250;
+export function attackCooldownMs(weaponName?: string | null): number {
+  if (!weaponName) return HAND_COOLDOWN_MS;
+  if (weaponName.endsWith("_sword")) return 625;
+  if (weaponName.endsWith("_axe")) return weaponName.startsWith("iron_") ? 1_100 : 1_000;
+  if (weaponName.endsWith("_pickaxe")) return 833;
+  if (weaponName.endsWith("_shovel") || weaponName.endsWith("_hoe")) return 1_000;
+  if (weaponName === "trident") return 909;
   return ATTACK_COOLDOWN_MS;
 }
+
+/** Survival melee reach, in blocks, measured from the eye to the target's bounding box. */
+export const MELEE_REACH_BLOCKS = 3;
+/**
+ * A hostile is engaged only within this distance (blocks, to its feet). The executor closes the gap with
+ * pathfinder, so this is the approach limit, not the swing reach. Decision and adapter share it.
+ */
+export const COMBAT_APPROACH_MAX_BLOCKS = 8;
 
 export function estimatedHitsToKill(weaponDamage: number, hostileHealth: number): number {
   return Math.max(1, Math.ceil(hostileHealth / Math.max(0.5, weaponDamage)));

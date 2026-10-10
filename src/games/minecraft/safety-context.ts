@@ -70,6 +70,7 @@ export const MINECRAFT_SAFETY_POLICY: SafetyPolicy = {
     "minecraft.navigate",
     "minecraft.pickup-item",
     "minecraft.harvest-berries",
+    "minecraft.swim-to-surface",
   ],
   maxObservationAgeMs: 120_000,
   readOnlyCapabilities: ["minecraft.look", "minecraft.inspect_block"],

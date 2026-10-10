@@ -1,5 +1,6 @@
 import { countItemAndEquipment } from "./recipes.js";
 import type { MinecraftObservation } from "./observation.js";
+import { COMBAT_APPROACH_MAX_BLOCKS } from "./combat.js";
 
 /** Number of the four cardinal cells around the player that are observed solid at feet level. */
 export function shelterCardinalSolidCount(state: MinecraftObservation): number {
@@ -168,11 +169,30 @@ export function verifySkillPostcondition(
     case "minecraft.attack-hostile": {
       const entityId = String(record.entityId);
       const stillVisible = after.entities.some((entity) => entity.id === entityId);
+      // "Gone from the list" alone is not a kill (render-distance edge). It counts only when the target was within
+      // melee range before, and the adapter's own confirmation (entityDead) has already gated this check.
+      const wasNear = before
+        ? before.entities.some((entity) => entity.id === entityId && entity.distance <= COMBAT_APPROACH_MAX_BLOCKS)
+        : false;
+      const verified = !stillVisible && wasNear;
       return {
-        verified: !stillVisible,
+        verified,
         evidence: stillVisible
           ? `The entity ${entityId} is still visible; the swing did not remove the threat.`
-          : `Entity ${entityId} is no longer in the observed entity list.`,
+          : wasNear
+            ? `Entity ${entityId} was within ${COMBAT_APPROACH_MAX_BLOCKS} blocks and is no longer observed.`
+            : `Entity ${entityId} is absent now, but it was not observed within ${COMBAT_APPROACH_MAX_BLOCKS} blocks before, so its removal is not verified as a kill.`,
+      };
+    }
+    case "minecraft.swim-to-surface": {
+      // Verified only by the observed state after the swim: out of the water entirely, both body and head.
+      const out = after.player.inWater === false && after.player.headInWater === false;
+      const wasIn = before ? before.player.inWater === true || before.player.headInWater === true : false;
+      return {
+        verified: out && wasIn,
+        evidence: out
+          ? "Observed body and head out of water after the swim."
+          : `Still in water after the swim (body ${after.player.inWater ?? "unknown"}, head ${after.player.headInWater ?? "unknown"}).`,
       };
     }
     case "minecraft.drop-item": {

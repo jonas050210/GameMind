@@ -5,6 +5,12 @@ import type { MinecraftObservation } from "./observation.js";
 import { assessReflex, newlyUrgent, REFLEX_THRESHOLDS, type ReflexAssessment, type ReflexCode } from "./reflex.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
 
+/**
+ * Reflex cadence. A steady-state tick costs about 2 ms (the wide scans are cached), so 500 ms bounds how long a new
+ * threat, hazard or drowning state can go unnoticed to half a second, instead of up to a full second.
+ */
+export const DEFAULT_OBSERVATION_INTERVAL_MS = 500;
+
 export interface ObservationTick {
   readonly world: WorldState<MinecraftObservation>;
   readonly assessment: ReflexAssessment;
@@ -63,7 +69,7 @@ export class FastObservationLoop {
   private stopped = false;
 
   constructor(private readonly options: FastObservationLoopOptions) {
-    this.intervalMs = Math.max(100, options.intervalMs ?? 1_000);
+    this.intervalMs = Math.max(100, options.intervalMs ?? DEFAULT_OBSERVATION_INTERVAL_MS);
     this.now = options.now ?? (() => Date.now());
     this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms).unref());
     this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));

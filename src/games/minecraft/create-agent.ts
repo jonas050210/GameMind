@@ -5,6 +5,7 @@ import { SkillRuntime } from "../../core/skill-runtime.js";
 import { TraceRecorder } from "../../core/trace.js";
 import type { MinecraftObservation } from "./observation.js";
 import { minecraftSkills } from "./skills.js";
+import { minecraftObservationSummary } from "./observation-summary.js";
 import { MINECRAFT_SAFETY_POLICY, minecraftSafetyContext } from "./safety-context.js";
 import { SafetyBroker, type SafetyPolicy } from "../../core/safety-broker.js";
 
@@ -42,6 +43,7 @@ export function createMinecraftAgent(
   const runtime = new GameMindRuntime(adapter, trace, logger, {
     ...(safety ? { safety } : {}),
     safetyContext: minecraftSafetyContext,
+    observationSummary: minecraftObservationSummary,
   });
   // Only skills whose capability the adapter advertises are registered; decisions never see the rest.
   const advertised = new Set(adapter.capabilities.map((capability) => capability.name));

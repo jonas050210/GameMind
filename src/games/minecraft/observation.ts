@@ -99,6 +99,10 @@ export const minecraftObservationSchema = z.object({
     /** Air supply in **ticks** (0-300); 300 means full lungs. Null when the adapter cannot read it. */
     oxygenLevel: z.number().finite().nullable(),
     onGround: z.boolean(),
+    /** Mineflayer's body-in-water flag (physics), null when the session did not report it. */
+    inWater: z.boolean().nullable().optional(),
+    /** True when the block at eye height is water. This is what drowning depends on. Null when unknown. */
+    headInWater: z.boolean().nullable().optional(),
     /**
      * True when the world reports that no further item can enter the inventory. Only an explicit read-out
      * from the adapter counts: a planner that merely *guessed* the inventory was full could drop items the
@@ -168,6 +172,10 @@ export const minecraftObservationSchema = z.object({
     truncated: z.boolean(),
     /** Exact chunk columns the client currently has loaded inside the scan radius. Missing means unknown. */
     loadedChunks: z.array(minecraftChunkCoordinateSchema).optional(),
+    /** Age of the scan result when it was reused from an earlier tick; 0 for a fresh scan. */
+    ageMs: z.number().finite().nonnegative().optional(),
+    /** True when this result was reused from the cache, not re-run this tick. */
+    cached: z.boolean().optional(),
   }),
   /**
    * Mineable stone-class and ore blocks found by a second wide scan. Optional so older adapters and
@@ -184,6 +192,8 @@ export const minecraftObservationSchema = z.object({
       approximate: z.boolean().optional(),
       /** Exact loaded chunk columns when the adapter can enumerate them. */
       loadedChunks: z.array(minecraftChunkCoordinateSchema).optional(),
+      ageMs: z.number().finite().nonnegative().optional(),
+      cached: z.boolean().optional(),
     })
     .optional(),
   time: minecraftTimeInfoSchema.optional(),

@@ -144,13 +144,19 @@ export class TraceRecorder {
     private readonly logger: Logger,
   ) {}
 
+  /**
+   * Records one event. By default the returned promise settles only once the event is persisted, and a failed
+   * write rejects it, so the action path fails closed. `durable: false` is for high-frequency telemetry that the
+   * caller must not wait for: the event is still queued in order behind earlier writes, but a failure is logged
+   * instead of rejecting the caller, and the observation loop never blocks on disk.
+   */
   async record(input: {
     eventType: string;
     gameId?: string | null;
     sessionId?: string | null;
     correlationId?: string | null;
     data?: Readonly<Record<string, unknown>>;
-  }): Promise<TraceEvent> {
+  }, options: { readonly durable?: boolean } = {}): Promise<TraceEvent> {
     const event: TraceEvent = {
       traceId: randomUUID(),
       eventType: input.eventType,
@@ -162,15 +168,24 @@ export class TraceRecorder {
     };
 
     const write = this.writeQueue.then(() => this.sink.write(event));
-    this.writeQueue = write;
-    try {
-      await write;
-    } catch (error) {
-      this.logger.error(
-        { err: error, eventType: event.eventType, sessionId: event.sessionId },
-        "Could not persist GameMind trace; action path is failing closed",
-      );
-      throw error;
+    this.writeQueue = write.catch(() => undefined);
+    if (options.durable === false) {
+      write.catch((error: unknown) => {
+        this.logger.error(
+          { err: error, eventType: event.eventType, sessionId: event.sessionId },
+          "Could not persist non-durable GameMind trace event",
+        );
+      });
+    } else {
+      try {
+        await write;
+      } catch (error) {
+        this.logger.error(
+          { err: error, eventType: event.eventType, sessionId: event.sessionId },
+          "Could not persist GameMind trace; action path is failing closed",
+        );
+        throw error;
+      }
     }
 
     this.logger.info(

@@ -28,7 +28,7 @@ import { explorationKeyCenter } from "./exploration.js";
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
-import { REFLEX_THRESHOLDS } from "./reflex.js";
+import { REFLEX_THRESHOLDS, assessReflex, newlyUrgent } from "./reflex.js";
 
 /** Failure code of an action the fast loop stopped because an urgent condition appeared. */
 export const REFLEX_INTERRUPT_CODE = "REFLEX_INTERRUPT";
@@ -419,6 +419,7 @@ export class MinecraftTaskRunner {
     let combatAttempts = 0;
     let lastSafetyNote: { allowed: boolean; code: string; message: string } | null = null;
     let decisions = 0;
+    let staleDecisionsDiscarded = 0;
     let successfulActions = 0;
     let failedActions = 0;
     let progressEvents = 0;
@@ -655,6 +656,42 @@ export class MinecraftTaskRunner {
         const timeoutBudget = Math.max(1, deadline - this.clock());
         const defaultTimeout = skill.defaultTimeoutMs ?? capability?.defaultTimeoutMs ?? timeoutBudget;
         const timeoutMs = Math.max(1, Math.min(defaultTimeout, timeoutBudget));
+
+        // Stale-decision guard. The decision was made from `world`; an urgent reflex (threat, hazard, drowning, a
+        // fall) may have appeared since. The reflex layer already interrupts a running action, but a decision that
+        // is still being dispatched would delay the reaction by a whole new action. Discard it and decide again on
+        // the newest observation. Once the sequences match, the guard stops firing, so this cannot loop.
+        const latest = this.runtime.currentWorldState;
+        if (latest && latest.sequence !== world.sequence) {
+          const decisionBasis = assessReflex(world.state, null, {
+            observationSequence: world.sequence,
+            observedAt: world.observedAt,
+          });
+          const latestAssessment = assessReflex(latest.state, world.state, {
+            observationSequence: latest.sequence,
+            observedAt: latest.observedAt,
+          });
+          const urgentSinceDecision = newlyUrgent(latestAssessment, decisionBasis);
+          if (urgentSinceDecision.length > 0) {
+            staleDecisionsDiscarded += 1;
+            await this.runtime.trace.record({
+              eventType: "decision.discarded_stale",
+              gameId: world.gameId,
+              sessionId: world.sessionId,
+              data: {
+                decisionSequence: world.sequence,
+                latestSequence: latest.sequence,
+                urgentCodes: urgentSinceDecision,
+                selectedSkill: selected.skillId ?? null,
+              },
+            });
+            this.logger.warn(
+              { taskId: task.id, urgentCodes: urgentSinceDecision },
+              "Discarded a decision made before an urgent reflex appeared; re-deciding on the latest observation",
+            );
+            continue;
+          }
+        }
 
         const before = this.runtime.currentWorldState;
         this.options.metrics?.recordActionStart();

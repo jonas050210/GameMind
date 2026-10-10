@@ -26,7 +26,7 @@ import {
   minecraftPlaceableBlockNames,
   miningDropFor,
 } from "./mining.js";
-import { bestWeapon, combatIsAllowed } from "./combat.js";
+import { COMBAT_APPROACH_MAX_BLOCKS, bestWeapon, combatIsAllowed } from "./combat.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
 import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
@@ -550,6 +550,31 @@ function recoveryCandidates(
 
 
 /** Observed lava/water/fire/cactus within flee distance. Unknown cells never trigger a hazard goal. */
+/**
+ * Leaving water is a survival response, not a flight from a hazard. Submerged with air running out is the most urgent
+ * case in the safety band; a body in water with the head clear is still worth leaving before anything else.
+ */
+function swimCandidate(state: MinecraftObservation, context: MinecraftDecisionContext): DecisionCandidate | null {
+  if (!available(context, "minecraft.swim-to-surface")) return null;
+  const headUnder = state.player.headInWater === true;
+  const bodyIn = state.player.inWater === true;
+  if (!headUnder && !bodyIn) return null;
+  const air = state.player.oxygenLevel;
+  const urgent = headUnder && (air === null || air < 240);
+  const targetKey = "water:surface";
+  return {
+    goalId: "leave-water",
+    priorityBand: BAND_SAFETY,
+    score: urgent ? 2_000 : 900,
+    skillId: "minecraft.swim-to-surface",
+    input: { maxDistance: 8 },
+    targetKey,
+    rationale: headUnder
+      ? `Head is under water${air === null ? "" : ` with ${Math.round(air)} air ticks`}; swimming to the surface comes before anything else.`
+      : "Body is in water; leaving it comes before gathering or fleeing.",
+  };
+}
+
 function hazardCandidate(
   state: MinecraftObservation,
   context: MinecraftDecisionContext,
@@ -647,7 +672,7 @@ function defendCandidate(
     weapon: weapon ? { name: weapon.name, damage: weapon.damage } : null,
     requiredDamage: MIN_WEAPON_DAMAGE,
     targetDistance: hostile.distance,
-    maxTargetDistance: 4,
+    maxTargetDistance: COMBAT_APPROACH_MAX_BLOCKS,
     hitsAlreadyAttempted: 0,
     maxHits: 4,
     hostileName: hostile.name,
@@ -2068,6 +2093,10 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     const hunger = state.player.food;
 
     // 2. Hazards, hostiles and stalled routes outrank everything else, and learning never touches them.
+    const swim = swimCandidate(state, context);
+    if (swim) {
+      return record(null, swim, [], swim.rationale);
+    }
     const hazard = hazardCandidate(state, context);
     if (hazard) {
       noteProgressOvertaken("escaping the hazard within reach comes before any task goal");

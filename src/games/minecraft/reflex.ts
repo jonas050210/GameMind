@@ -23,6 +23,11 @@ export const REFLEX_THRESHOLDS = {
   hazardUrgentDistance: 2,
   /** Air ticks (0..300, full = 300). Below this the agent is drowning or about to. */
   drowningAirTicks: 60,
+  /**
+   * Air ticks below which a submerged head is urgent: a full breath is 300 and air drains one tick at a time
+   * underwater, so 200 leaves about ten seconds to reach the surface.
+   */
+  submergedUrgentAirTicks: 200,
   /** A fall of this many blocks between two fresh observations, without standing on the ground. */
   fallDropBlocks: 3,
   /** Observations older than this cannot justify an action decision. */
@@ -39,6 +44,7 @@ export const REFLEX_CODES = [
   "HOSTILE_CLOSE",
   "HOSTILE_NEAR",
   "HAZARD_NEAR",
+  "IN_WATER",
   "DROWNING",
   "FALLING",
   "MOVEMENT_STALLED",
@@ -158,6 +164,29 @@ export function assessReflex(
       code: "DROWNING",
       severity: "urgent",
       detail: `Air is ${Math.round(state.player.oxygenLevel)}/300 ticks.`,
+      distance: null,
+    });
+  }
+
+  // Water is a state the agent is in, not a hazard next to it. Surfacing is the response; fleeing is not.
+  const headInWater = state.player.headInWater === true;
+  const air = state.player.oxygenLevel;
+  if (headInWater && (air === null || air < REFLEX_THRESHOLDS.submergedUrgentAirTicks)) {
+    add({
+      code: "DROWNING",
+      severity: "urgent",
+      detail: air === null
+        ? "Head is under water and the air supply is not reported; surface now."
+        : `Head is under water with ${Math.round(air)}/300 air ticks left; surface now.`,
+      distance: null,
+    });
+  } else if (state.player.inWater === true || headInWater) {
+    add({
+      code: "IN_WATER",
+      severity: "notice",
+      detail: headInWater
+        ? `Head is under water with ${air === null ? "unknown" : Math.round(air)} air ticks.`
+        : "Body is in water.",
       distance: null,
     });
   }

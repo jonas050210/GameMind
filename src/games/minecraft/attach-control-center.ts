@@ -1,7 +1,7 @@
 import type { Logger } from "pino";
 import { resolve } from "node:path";
 import { AutonomyController, type AutonomyDecision } from "./autonomy-controller.js";
-import { FastObservationLoop, type ObservationTick } from "./agent-loop.js";
+import { DEFAULT_OBSERVATION_INTERVAL_MS, FastObservationLoop, type ObservationTick } from "./agent-loop.js";
 import { RuntimeMetrics } from "./runtime-metrics.js";
 import { describeReflex } from "./reflex.js";
 import { DEFAULT_WORLD_CONFIG_PATH, WorldSeedStore } from "./world-seed.js";
@@ -40,6 +40,7 @@ import { CompanionMemory } from "./companion-memory.js";
 import { CompanionController } from "./companion-controller.js";
 import {
   MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
+  MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
   MINECRAFT_EAT_CAPABILITY,
   MINECRAFT_INSPECT_BLOCK_CAPABILITY,
   MINECRAFT_LOOK_CAPABILITY,
@@ -50,6 +51,8 @@ import {
  * interrupting a look or an inspection only costs a fresh observation.
  */
 export const REFLEX_PROTECTED_CAPABILITIES = [
+  // Leaving water: a hostile on the shore must not stop the agent from breathing.
+  MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
   MINECRAFT_EAT_CAPABILITY,
   MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
   MINECRAFT_LOOK_CAPABILITY,
@@ -347,7 +350,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     runtime: options.runtime,
     metrics,
     logger: options.logger,
-    intervalMs: options.observationIntervalMs ?? 1_000,
+    intervalMs: options.observationIntervalMs ?? DEFAULT_OBSERVATION_INTERVAL_MS,
     ...(options.loopClock ? { now: options.loopClock } : {}),
     ...(options.loopTimers ? { setTimer: options.loopTimers.setTimer, clearTimer: options.loopTimers.clearTimer } : {}),
     onObservation: (tick: ObservationTick) => {

@@ -18,6 +18,8 @@ import {
   MINECRAFT_PICKUP_ITEM_CAPABILITY,
   MINECRAFT_PLACE_TABLE_CAPABILITY,
   MINECRAFT_REST_CAPABILITY,
+  MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
+  minecraftSwimToSurfaceInputSchema,
   MINECRAFT_MINE_BLOCK_CAPABILITY,
   MINECRAFT_PLACE_BLOCK_CAPABILITY,
   MINECRAFT_BUILD_SHELTER_CAPABILITY,
@@ -51,6 +53,7 @@ import {
   isResourceBlockName,
   blockObservationPriority,
   isRipeBerryBush,
+  isWaterBlockName,
 } from "./block-classes.js";
 import type { MinecraftObservation } from "./observation.js";
 import {
@@ -67,6 +70,7 @@ import {
   type SessionField,
 } from "./live-session.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { COMBAT_APPROACH_MAX_BLOCKS, MELEE_REACH_BLOCKS, attackCooldownMs } from "./combat.js";
 import { isMineableBlockName, minecraftMiningRequirements, estimatedDigSeconds, bestPickaxeTier, canMineWithTier } from "./mining.js";
 import { bestWeapon, combatIsAllowed, weaponDamageFor } from "./combat.js";
 import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_DIRECTIONS } from "./shelter.js";
@@ -93,6 +97,104 @@ const unsafePlacementSupportNames = new Set([
   "cactus",
 ]);
 type BotPosition = Bot["entity"]["position"];
+
+/**
+ * The wide resource and mineable scans are the most expensive part of an observation (up to 32 blocks of
+ * block-state lookups plus a line-of-sight test per hit). They are reused across ticks while the cached result
+ * is still trustworthy: the agent has not drifted far from the scan centre, the result is young, and no block
+ * change or chunk change inside the scan radius has been reported since. Any action also invalidates it, so the
+ * observation that verifies an action is always a fresh scan.
+ */
+const WIDE_SCAN_MAX_DRIFT_BLOCKS = 4;
+const WIDE_SCAN_MAX_AGE_MS = 5_000;
+/** Eye height of a standing player; the block here decides whether the head is underwater. */
+const PLAYER_EYE_HEIGHT = 1.62;
+
+type ScanBlock = MinecraftObservation["resourceSightings"][number];
+interface ScanResult {
+  readonly blocks: ScanBlock[];
+  readonly truncated: boolean;
+  readonly loadedChunks?: { x: number; z: number }[];
+}
+interface WideScanCache {
+  readonly center: { x: number; y: number; z: number };
+  readonly at: number;
+  readonly resource: ScanResult;
+  readonly minable: ScanResult;
+}
+
+const COMBAT_APPROACH_TIMEOUT_MS = 3_000;
+const COMBAT_MAX_APPROACHES_PER_SWING = 2;
+
+type BotEntityLike = { readonly id: number; readonly position: BotPosition };
+
+/**
+ * True when no solid block lies on the straight line from the player's eye to the target's centre. Sampled every
+ * 0.2 blocks, which is finer than a block, so a thin wall is not stepped over. Unloaded blocks count as clear only
+ * when the bot can see them; an unknown block is treated as blocking (safer to reposition than to swing blind).
+ */
+function hasLineOfSight(bot: Bot, target: { position: BotPosition }): boolean {
+  const eye = bot.entity.position.offset(0, PLAYER_EYE_HEIGHT, 0);
+  const centre = target.position.offset(0, 0.9, 0);
+  const dx = centre.x - eye.x;
+  const dy = centre.y - eye.y;
+  const dz = centre.z - eye.z;
+  const length = Math.hypot(dx, dy, dz);
+  const steps = Math.max(1, Math.ceil(length / 0.2));
+  for (let step = 1; step < steps; step += 1) {
+    const t = step / steps;
+    const point = eye.offset(dx * t, dy * t, dz * t);
+    const block = bot.blockAt(point.floored());
+    if (!block) return false;
+    if (block.boundingBox === "block" && !isWaterBlockName(block.name)) return false;
+  }
+  return true;
+}
+
+/** Swim budget: enough to cross a few blocks of water, short enough that a stuck swim is reported, not endured. */
+const SWIM_TIMEOUT_MS = 12_000;
+
+/**
+ * Nearest cell the agent could stand on: solid ground below, and air or non-water above, within `maxDistance` blocks
+ * horizontally. Returns null when no such cell is loaded. The player's own column is excluded.
+ */
+function findNearestShore(bot: Bot, maxDistance: number): { x: number; y: number; z: number; distance: number } | null {
+  const origin = bot.entity.position;
+  const isOpen = (name: string | undefined, boundingBox: string | undefined) =>
+    !isWaterBlockName(name ?? "") && boundingBox !== "block";
+  let best: { x: number; y: number; z: number; distance: number } | null = null;
+  for (let dx = -maxDistance; dx <= maxDistance; dx += 1) {
+    for (let dz = -maxDistance; dz <= maxDistance; dz += 1) {
+      const horizontal = Math.hypot(dx, dz);
+      if (horizontal < 1 || horizontal > maxDistance) continue;
+      if (best && horizontal >= best.distance) continue;
+      for (let dy = -1; dy <= 1; dy += 1) {
+        const feet = origin.offset(dx, dy, dz).floored();
+        const ground = bot.blockAt(feet.offset(0, -1, 0));
+        const body = bot.blockAt(feet);
+        const head = bot.blockAt(feet.offset(0, 1, 0));
+        if (!ground || !body || !head) continue;
+        if (ground.boundingBox !== "block" || isWaterBlockName(ground.name)) continue;
+        if (!isOpen(body.name, body.boundingBox) || !isOpen(head.name, head.boundingBox)) continue;
+        best = { x: feet.x, y: feet.y, z: feet.z, distance: horizontal };
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+/** A cached scan re-measured from the current position, without line-of-sight (unknown for a stale result). */
+function reuseScan(result: ScanResult, position: BotPosition): ScanResult {
+  const blocks = result.blocks
+    .map(({ visible: _visible, ...block }) => ({ ...block, distance: distanceBetween(block.position, position) }))
+    .sort((left, right) => left.distance - right.distance);
+  return {
+    blocks,
+    truncated: result.truncated,
+    ...(result.loadedChunks !== undefined ? { loadedChunks: result.loadedChunks } : {}),
+  };
+}
 const pathfinderApi = require("mineflayer-pathfinder") as typeof import("mineflayer-pathfinder");
 const toolApi = require("mineflayer-tool") as typeof import("mineflayer-tool");
 
@@ -467,11 +569,14 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private deathCount = 0;
   /** When the live session last sent an `update_health` packet, i.e. when vitals were truly observed. */
   private vitalsObservedAt: string | null = null;
+  private wideScanCache: WideScanCache | null = null;
+  /** Why the cached wide scan must be re-run; null while the cache is valid. */
+  private wideScanInvalidation: string | null = "startup";
   /** Last game-state change the session reported, so a mode or dimension change is attributable. */
   private lastSessionChange: { at: string; kind: string; detail: string } | null = null;
   /** Reported once per session, so an unverified dimension does not flood the log every observation. */
   private unverifiedFactsReported = false;
-  private readonly sessionListeners: Array<{ event: string; handler: () => void }> = [];
+  private readonly sessionListeners: Array<{ event: string; handler: (...args: never[]) => void }> = [];
   private lastStatusChange: AdapterStatusChange | null = null;
 
   private activeActionId: string | null = null;
@@ -766,8 +871,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const localScanMs = performance.now() - localScanStartedAt;
 
     const strategicScanStartedAt = performance.now();
-    const resourceSightings = this.scanResourceSightings(bot, position);
-    const minableSightings = this.scanMineableSightings(bot, position);
+    const wide = this.wideScan(bot, position);
+    const resourceSightings = wide.resource;
+    const minableSightings = wide.minable;
     const itemDrops = this.scanItemDrops(bot, position);
     const strategicScanMs = performance.now() - strategicScanStartedAt;
 
@@ -821,6 +927,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         // gauge stays absent: a fabricated "full lungs" hides drowning from the safety policy.
         oxygenLevel: vitals.airTicks,
         onGround: typeof bot.entity.onGround === "boolean" ? bot.entity.onGround : false,
+        // Set by Mineflayer's physics each tick; not in its type declarations, so it is read through a narrow cast.
+        inWater: typeof (bot.entity as unknown as { isInWater?: unknown }).isInWater === "boolean"
+          ? (bot.entity as unknown as { isInWater: boolean }).isInWater
+          : null,
+        headInWater: this.headInWater(bot, position),
         // An empty-slot count from the inventory window is the only proof that nothing more can be held.
         ...(emptySlots === null
           ? { inventoryFull: bot.inventory.items().length >= 36 }
@@ -860,6 +971,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         center,
         truncated: resourceSightings.truncated,
         ...(resourceSightings.loadedChunks !== undefined ? { loadedChunks: resourceSightings.loadedChunks } : {}),
+        ageMs: wide.ageMs,
+        cached: wide.cached,
       },
       itemDrops,
       sampledRegion: {
@@ -878,6 +991,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         center,
         truncated: minableSightings.truncated,
         ...(minableSightings.loadedChunks !== undefined ? { loadedChunks: minableSightings.loadedChunks } : {}),
+        ageMs: wide.ageMs,
+        cached: wide.cached,
       },
       perception: {
         totalMs: 0,
@@ -916,20 +1031,70 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     };
   }
 
-  /** Wide, bounded search for resource-class blocks using Mineflayer's loaded-chunk index. */
-  private scanResourceSightings(
-    bot: Bot,
-    position: BotPosition,
-  ): { blocks: MinecraftObservation["resourceSightings"]; truncated: boolean; loadedChunks?: { x: number; z: number }[] } {
-    return this.scanBlocks(bot, position, isResourceBlockName, true);
+  /**
+   * Returns the wide scans for this tick, re-running them only when the cache is invalid (see the constants above).
+   * Reused results keep their block positions but are re-measured for distance from where the agent stands now, and
+   * line-of-sight is dropped: a visibility fact from several seconds ago is not a fact about this tick.
+   */
+  private wideScan(bot: Bot, position: BotPosition): {
+    resource: ScanResult;
+    minable: ScanResult;
+    cached: boolean;
+    ageMs: number;
+  } {
+    const now = performance.now();
+    const cache = this.wideScanCache;
+    const reason = this.wideScanInvalidation
+      ?? (!cache ? "empty" : null)
+      ?? (cache && distanceBetween(position, cache.center) > WIDE_SCAN_MAX_DRIFT_BLOCKS ? "moved" : null)
+      ?? (cache && now - cache.at > WIDE_SCAN_MAX_AGE_MS ? "expired" : null);
+    if (cache && reason === null) {
+      return {
+        resource: reuseScan(cache.resource, position),
+        minable: reuseScan(cache.minable, position),
+        cached: true,
+        ageMs: now - cache.at,
+      };
+    }
+    const { resource, minable } = this.scanWideClasses(bot, position);
+    this.wideScanCache = {
+      center: { x: Math.floor(position.x), y: Math.floor(position.y), z: Math.floor(position.z) },
+      at: now,
+      resource,
+      minable,
+    };
+    this.wideScanInvalidation = null;
+    return { resource, minable, cached: false, ageMs: 0 };
   }
 
-  /** Second scan for mineable stone and ore blocks, so digging targets survive a full resource list. */
-  private scanMineableSightings(
-    bot: Bot,
-    position: BotPosition,
-  ): { blocks: NonNullable<MinecraftObservation["minableSightings"]>; truncated: boolean; loadedChunks?: { x: number; z: number }[] } {
-    return this.scanBlocks(bot, position, isMineableBlockName, false);
+  /** Marks the cached wide scans stale; the next observation re-runs them. Cheap, so it is called freely. */
+  private invalidateWideScan(reason: string): void {
+    this.wideScanInvalidation = reason;
+  }
+
+  /** A block change inside the scan radius only matters when one side of it is a resource or mineable block. */
+  private invalidateWideScanForBlockUpdate(oldBlock: unknown, newBlock: unknown): void {
+    const cache = this.wideScanCache;
+    if (!cache) return;
+    for (const block of [oldBlock, newBlock]) {
+      if (!block || typeof block !== "object") continue;
+      const { position, name } = block as { position?: { x: number; y: number; z: number }; name?: string };
+      if (!position || typeof name !== "string") {
+        this.invalidateWideScan("block_update_without_position");
+        return;
+      }
+      if (distanceBetween(position, cache.center) > this.config.resourceScanRadius + 1) continue;
+      if (isResourceBlockName(name) || isMineableBlockName(name)) {
+        this.invalidateWideScan("block_update_in_scan_radius");
+        return;
+      }
+    }
+  }
+
+  /** True when the block at eye height is water; null when that chunk is not loaded. */
+  private headInWater(bot: Bot, position: BotPosition): boolean | null {
+    const head = bot.blockAt(position.offset(0, PLAYER_EYE_HEIGHT, 0));
+    return head ? isWaterBlockName(head.name) : null;
   }
 
   private loadedChunksWithinScanRadius(bot: Bot, position: BotPosition): { x: number; z: number }[] | undefined {
@@ -953,53 +1118,66 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     return chunks;
   }
 
-  private scanBlocks(
+  /**
+   * Two independent bounded walks, one per wide class, each with its own limit. A single combined walk was
+   * measured faster, but a shared cap let nearby stone fill the walk and hid distant logs, so it was rejected: an
+   * accuracy loss the scan must not hide. The cache in `wideScan` is what keeps the common case cheap.
+   */
+  private scanWideClasses(
     bot: Bot,
     position: BotPosition,
-    matches: (name: string) => boolean,
-    withProperties: boolean,
-  ): { blocks: NonNullable<MinecraftObservation["minableSightings"]>; truncated: boolean; loadedChunks?: { x: number; z: number }[] } {
+  ): { resource: ScanResult; minable: ScanResult } {
     const loadedChunks = this.loadedChunksWithinScanRadius(bot, position);
-    if (typeof bot.findBlocks !== "function") {
-      return { blocks: [], truncated: false, ...(loadedChunks !== undefined ? { loadedChunks } : {}) };
-    }
-    const limit = this.config.resourceScanLimit;
-    const found = bot.findBlocks({
-      point: position,
-      matching: (block: { name: string }) => matches(block.name),
-      maxDistance: this.config.resourceScanRadius,
-      count: limit,
-    });
-    const blocks: MinecraftObservation["resourceSightings"] = [];
-    for (const blockPosition of found) {
-      const block = bot.blockAt(blockPosition);
-      // This shared scanner must recheck the requested class. A hard-coded resource check used to
-      // silently discard every wide-range stone and ore result.
-      if (!block || !matches(block.name)) continue;
-      const visible = observedBlockVisibility(bot, block);
-      const sighting: MinecraftObservation["resourceSightings"][number] = {
-        name: block.name,
-        position: {
-          x: Math.floor(block.position.x),
-          y: Math.floor(block.position.y),
-          z: Math.floor(block.position.z),
-        },
-        distance: block.position.distanceTo(position),
-        ...(visible === undefined ? {} : { visible }),
-      };
-      if (withProperties) {
-        const properties = blockProperties(block);
-        if (block.name === "sweet_berry_bush" && properties.age !== undefined) {
-          sighting.properties = { age: properties.age };
-        }
+    const chunkFields = loadedChunks !== undefined ? { loadedChunks } : {};
+    const walk = (matches: (name: string) => boolean, withProperties: boolean): ScanResult => {
+      if (typeof bot.findBlocks !== "function") return { blocks: [], truncated: false, ...chunkFields };
+      const limit = this.config.resourceScanLimit;
+      const found = bot.findBlocks({
+        point: position,
+        matching: (block: { name: string }) => matches(block.name),
+        maxDistance: this.config.resourceScanRadius,
+        count: limit,
+      });
+      const blocks: ScanBlock[] = [];
+      for (const blockPosition of found) {
+        const block = bot.blockAt(blockPosition);
+        // This shared scanner rechecks the requested class. A hard-coded resource check used to silently discard
+        // every wide-range stone and ore result.
+        if (!block || !matches(block.name)) continue;
+        blocks.push(this.sightingFor(bot, block, position, withProperties));
       }
-      blocks.push(sighting);
-    }
-    return {
-      blocks,
-      truncated: found.length >= limit,
-      ...(loadedChunks !== undefined ? { loadedChunks } : {}),
+      return { blocks, truncated: found.length >= limit, ...chunkFields };
     };
+    return {
+      resource: walk(isResourceBlockName, true),
+      minable: walk(isMineableBlockName, false),
+    };
+  }
+
+  private sightingFor(
+    bot: Bot,
+    block: { name: string; position: { x: number; y: number; z: number } },
+    position: BotPosition,
+    withProperties: boolean,
+  ): ScanBlock {
+    const visible = observedBlockVisibility(bot, block as Parameters<typeof observedBlockVisibility>[1]);
+    const sighting: ScanBlock = {
+      name: block.name,
+      position: {
+        x: Math.floor(block.position.x),
+        y: Math.floor(block.position.y),
+        z: Math.floor(block.position.z),
+      },
+      distance: distanceBetween(block.position, position),
+      ...(visible === undefined ? {} : { visible }),
+    };
+    if (withProperties) {
+      const properties = blockProperties(block as Parameters<typeof blockProperties>[0]);
+      if (block.name === "sweet_berry_bush" && properties.age !== undefined) {
+        sighting.properties = { age: properties.age };
+      }
+    }
+    return sighting;
   }
 
   /** Dropped items are read from the entity metadata; nothing is inferred from names alone. */
@@ -1064,6 +1242,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           return await this.executeHarvestBerries(bot, action.input, signal);
         case MINECRAFT_REST_CAPABILITY:
           return await this.executeRest(bot, action.input, signal);
+        case MINECRAFT_SWIM_TO_SURFACE_CAPABILITY:
+          return await this.executeSwimToSurface(bot, action.input, signal);
         case MINECRAFT_MINE_BLOCK_CAPABILITY:
           return await this.executeMineBlock(bot, action.input, signal);
         case MINECRAFT_PLACE_BLOCK_CAPABILITY:
@@ -1087,6 +1267,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       }
       throw error;
     } finally {
+      // An action may have changed the world in ways no block event reported in time (drops, placed blocks,
+      // movement), so the next observation must re-scan rather than trust the cache.
+      this.invalidateWideScan("action_dispatched");
       if (this.activeActionId === action.actionId) {
         this.activeActionId = null;
         this.activeCapability = null;
@@ -2111,6 +2294,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
    * health, distance and how many hostiles are nearby, and the agent withdraws instead of fighting
    * to the death.
    */
+  /**
+   * Melee against one identified hostile. The loop is: approach to reach (pathfinder, bounded), require a clear line
+   * of sight, swing no faster than the held weapon's cooldown, and confirm each swing from the server's own
+   * `entityHurt` event. A kill is confirmed only by `entityDead`. An entity that merely leaves the client's entity
+   * list (render-distance edge, chunk unload) is reported as lost, never as killed.
+   */
   private async executeAttackHostile(
     bot: Bot,
     input: unknown,
@@ -2148,7 +2337,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       weapon: weapon ? { name: weapon.name, damage: weapon.damage } : null,
       requiredDamage,
       targetDistance: entity.position.distanceTo(bot.entity.position),
-      maxTargetDistance: 4,
+      maxTargetDistance: COMBAT_APPROACH_MAX_BLOCKS,
       hitsAlreadyAttempted: 0,
       maxHits,
       hostileName: name,
@@ -2164,61 +2353,207 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         await raceWithAbort(bot.equip(held, "hand"), signal);
       }
     }
+    const cooldownMs = attackCooldownMs(weapon?.name ?? null);
+    const targetId = entity.id;
+
+    // Server-confirmed events for this target only. Installed before the first swing, removed in `finally`.
+    let hurtCount = 0;
+    let deathSeen = false;
+    const emitter = bot as unknown as {
+      on(event: string, listener: (...args: unknown[]) => void): void;
+      removeListener(event: string, listener: (...args: unknown[]) => void): void;
+    };
+    const onHurt = (hurt: unknown): void => {
+      if ((hurt as { id?: number } | undefined)?.id === targetId) hurtCount += 1;
+    };
+    const onDead = (dead: unknown): void => {
+      if ((dead as { id?: number } | undefined)?.id === targetId) deathSeen = true;
+    };
+    emitter.on("entityHurt", onHurt);
+    emitter.on("entityDead", onDead);
 
     let hits = 0;
-    let killed = false;
-    let lastHealth = finiteOrNull((entity as { health?: number }).health);
-    while (hits < maxHits) {
-      if (signal.aborted) throw abortError(signal);
-      const health = finiteOrNull(bot.health);
-      if (health !== null && health <= retreatHealth) {
-        throw new MinecraftAdapterError(
-          `Health fell to ${health} while fighting; withdrawing instead of swinging again.`,
-          "COMBAT_WITHDRAWN",
-        );
+    let hitsConfirmed = 0;
+    let approaches = 0;
+    let outcome: "killed" | "target_alive" | "target_lost_from_view" = "target_alive";
+    let lastHealth: number | null = null;
+    try {
+      while (hits < maxHits) {
+        if (signal.aborted) throw abortError(signal);
+        const health = finiteOrNull(bot.health);
+        if (health !== null && health <= retreatHealth) {
+          throw new MinecraftAdapterError(
+            `Health fell to ${health} while fighting; withdrawing instead of swinging again.`,
+            "COMBAT_WITHDRAWN",
+          );
+        }
+        if (deathSeen) {
+          outcome = "killed";
+          break;
+        }
+        const current = Number.isFinite(numericId) ? bot.entities[entityId] : undefined;
+        if (!current) {
+          // Gone from the list without a death event: not a kill. Report it and let the next observation decide.
+          outcome = "target_lost_from_view";
+          break;
+        }
+        lastHealth = finiteOrNull((current as { health?: number }).health);
+        if (current.position.distanceTo(bot.entity.position) > COMBAT_APPROACH_MAX_BLOCKS) {
+          throw new MinecraftAdapterError("The hostile left melee range; the fight is broken off.", "COMBAT_TARGET_OUT_OF_RANGE");
+        }
+        if (!this.inMeleeReach(bot, current) || !hasLineOfSight(bot, current)) {
+          if (approaches >= COMBAT_MAX_APPROACHES_PER_SWING) {
+            throw new MinecraftAdapterError(
+              this.inMeleeReach(bot, current)
+                ? "No clear line of sight to the hostile after repositioning."
+                : "The hostile is out of melee reach after repositioning.",
+              this.inMeleeReach(bot, current) ? "COMBAT_NO_LINE_OF_SIGHT" : "COMBAT_NOT_IN_REACH",
+            );
+          }
+          approaches += 1;
+          await this.approachForMelee(bot, current, signal);
+          continue;
+        }
+        approaches = 0;
+
+        // Facing the target is best effort: an interrupted look must not be reported as a failed swing.
+        await raceWithAbort(bot.lookAt(current.position.offset(0, 1, 0), true), signal).catch(() => undefined);
+        const hurtBefore = hurtCount;
+        try {
+          bot.attack(current);
+        } catch (error) {
+          throw new MinecraftAdapterError(
+            `Attack failed: ${error instanceof Error ? error.message : String(error)}`,
+            "COMBAT_ATTACK_FAILED",
+          );
+        }
+        hits += 1;
+        // Wait out the weapon's cooldown before the next swing; hurt and death events arrive during this window.
+        await delayWithAbort(cooldownMs, signal);
+        if (hurtCount > hurtBefore) hitsConfirmed += hurtCount - hurtBefore;
       }
-      const current = Number.isFinite(numericId) ? bot.entities[entityId] : undefined;
-      if (!current) {
-        killed = true;
-        break;
-      }
-      if (current.position.distanceTo(bot.entity.position) > 4) {
-        throw new MinecraftAdapterError("The hostile left melee range; the fight is broken off.", "COMBAT_TARGET_OUT_OF_RANGE");
-      }
-      // Facing the target is best effort: an interrupted look must not be reported as a failed swing.
-      await raceWithAbort(bot.lookAt(current.position.offset(0, 1, 0), true), signal).catch(() => undefined);
-      try {
-        bot.attack(current);
-      } catch (error) {
-        throw new MinecraftAdapterError(
-          `Attack failed: ${error instanceof Error ? error.message : String(error)}`,
-          "COMBAT_ATTACK_FAILED",
-        );
-      }
-      hits += 1;
-      await delayWithAbort(700, signal);
-      const updated = Number.isFinite(numericId) ? bot.entities[entityId] : undefined;
-      if (!updated) {
-        killed = true;
-        break;
-      }
-      lastHealth = finiteOrNull((updated as { health?: number }).health);
+    } finally {
+      emitter.removeListener("entityHurt", onHurt);
+      emitter.removeListener("entityDead", onDead);
     }
+    if (deathSeen) outcome = "killed";
+    const killed = outcome === "killed";
     return {
       confirmed: killed,
       confirmation: killed
-        ? "target_entity_removed_from_client_entity_list"
-        : "target_still_present_after_hit_budget",
+        ? "server_entity_dead_event"
+        : outcome === "target_lost_from_view"
+          ? "target_left_client_view_without_death_event"
+          : "target_alive_after_hit_budget",
       details: {
         entityId,
         hostileName: name,
         hits,
+        hitsConfirmed,
+        approaches,
         weapon: weapon?.name ?? null,
+        cooldownMs,
         damagePerHit: weapon ? weaponDamageFor(weapon.name) : 1,
         targetHealthAfter: lastHealth,
         killed,
+        outcome,
       },
     };
+  }
+
+  /**
+   * Leaves water. Each cycle reads the live in-water state, steers toward the nearest standable shore (when one is
+   * within range) and holds jump so the agent rises. Success is the observed state: body and head out of water, read
+   * from the same session the next observation uses. A timed-out swim is reported as not confirmed.
+   */
+  private async executeSwimToSurface(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftSwimToSurfaceInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid swim request.", "INVALID_ACTION_INPUT");
+    const bodyInWater = (): boolean | null => {
+      const flag = (bot.entity as unknown as { isInWater?: unknown }).isInWater;
+      return typeof flag === "boolean" ? flag : null;
+    };
+    const stillInWater = (): boolean =>
+      bodyInWater() !== false || this.headInWater(bot, bot.entity.position) !== false;
+    const startedAt = performance.now();
+    if (!stillInWater()) {
+      return {
+        confirmed: true,
+        confirmation: "observed_out_of_water_before_swim",
+        details: { swimMs: 0, shore: null, steps: 0 },
+      };
+    }
+    const shore = findNearestShore(bot, parsed.data.maxDistance);
+    let steps = 0;
+    let exited = false;
+    try {
+      while (performance.now() - startedAt < SWIM_TIMEOUT_MS) {
+        if (signal.aborted) throw abortError(signal);
+        if (!stillInWater()) {
+          exited = true;
+          break;
+        }
+        bot.setControlState("jump", true);
+        if (shore) {
+          const dx = shore.x + 0.5 - bot.entity.position.x;
+          const dz = shore.z + 0.5 - bot.entity.position.z;
+          // Mineflayer's yaw points the forward vector at (-sin yaw, -cos yaw).
+          await raceWithAbort(bot.look(Math.atan2(-dx, -dz), 0, true), signal).catch(() => undefined);
+          bot.setControlState("forward", Math.hypot(dx, dz) > 0.6);
+        }
+        steps += 1;
+        await delayWithAbort(100, signal);
+      }
+      if (!exited && !stillInWater()) exited = true;
+    } finally {
+      bot.clearControlStates();
+    }
+    const swimMs = Math.round(performance.now() - startedAt);
+    return {
+      confirmed: exited,
+      confirmation: exited ? "observed_out_of_water" : "still_in_water_after_swim_budget",
+      details: {
+        swimMs,
+        steps,
+        shore: shore ? { x: shore.x, y: shore.y, z: shore.z, distance: shore.distance } : null,
+      },
+    };
+  }
+
+  /** True when the target's box is within melee reach of the player's eye. */
+  private inMeleeReach(bot: Bot, target: { position: BotPosition }): boolean {
+    const eye = bot.entity.position.offset(0, PLAYER_EYE_HEIGHT, 0);
+    const center = target.position.offset(0, 0.9, 0);
+    // Reach is to the nearest point of a roughly 0.6-block-wide box, not to the feet.
+    const dx = Math.max(0, Math.abs(center.x - eye.x) - 0.3);
+    const dz = Math.max(0, Math.abs(center.z - eye.z) - 0.3);
+    const dy = Math.max(0, Math.abs(center.y - eye.y) - 0.9);
+    return Math.hypot(dx, dy, dz) <= MELEE_REACH_BLOCKS;
+  }
+
+  /** Walks toward the target until it is inside reach, bounded in time. Pathfinder does the routing. */
+  private async approachForMelee(bot: Bot, target: BotEntityLike, signal: AbortSignal): Promise<void> {
+    if (!bot.pathfinder) {
+      throw new MinecraftAdapterError("Pathfinder is not available; cannot close to melee range.", "COMBAT_NOT_IN_REACH");
+    }
+    const goal = new pathfinderApi.goals.GoalFollow(target as never, 2);
+    bot.pathfinder.setGoal(goal as never, true);
+    const deadline = Date.now() + COMBAT_APPROACH_TIMEOUT_MS;
+    try {
+      while (Date.now() < deadline) {
+        if (signal.aborted) throw abortError(signal);
+        const current = bot.entities[target.id];
+        if (!current) return;
+        if (this.inMeleeReach(bot, current) && hasLineOfSight(bot, current)) return;
+        await delayWithAbort(50, signal);
+      }
+    } finally {
+      bot.pathfinder.setGoal(null);
+    }
   }
 
   /** Drops a small amount of allowlisted terrain. Tools, food and resources are refused by the schema. */
@@ -2386,6 +2721,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       // A dimension or mode change invalidates the "already reported" flag, so the new state gets its own
       // log line, and the next observation re-reads everything from the session.
       this.unverifiedFactsReported = false;
+      this.invalidateWideScan("game_state_changed");
       this.logger.info({ sessionId, ...change }, "Minecraft session reported a game-state change");
     };
     const onDeath = (): void => {
@@ -2395,15 +2731,24 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const onBreath = (): void => {
       onHealth();
     };
-    const bind = (event: string, handler: () => void): void => {
+    const onBlockUpdate = (oldBlock: unknown, newBlock: unknown): void => {
+      this.invalidateWideScanForBlockUpdate(oldBlock, newBlock);
+    };
+    const onChunkChange = (): void => {
+      this.invalidateWideScan("chunk_changed");
+    };
+    const bind = (event: string, handler: (...args: never[]) => void): void => {
       if (typeof (bot as unknown as { on?: unknown }).on !== "function") return;
-      (bot as unknown as { on(event: string, listener: () => void): void }).on(event, handler);
+      (bot as unknown as { on(event: string, listener: (...args: never[]) => void): void }).on(event, handler);
       this.sessionListeners.push({ event, handler });
     };
     bind("health", onHealth);
     bind("breath", onBreath);
     bind("game", onGame);
     bind("death", onDeath);
+    bind("blockUpdate", onBlockUpdate);
+    bind("chunkColumnLoad", onChunkChange);
+    bind("chunkColumnUnload", onChunkChange);
     // The first health value is usually already in place when the bot spawns, before any event fires.
     if (typeof bot.health === "number") this.vitalsObservedAt = new Date().toISOString();
   }
