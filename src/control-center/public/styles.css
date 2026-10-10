@@ -348,3 +348,9 @@ a { color: var(--accent); }
   .topbar, .toasts, .footer, .btn { display: none !important; }
   .panel[hidden] { display: none !important; }
 }
+
+/* One-line status under the session state: what the agent is doing now. */
+.hero-now {
+  margin: 6px 0 0;
+  font-weight: 500;
+}

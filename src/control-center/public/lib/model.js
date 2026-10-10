@@ -121,3 +121,38 @@ export const COMMANDS_USED = [
   "runUnitTests", "runOfflineEvaluation", "runLiveVerification", "cancelJob",
   "promotePolicy", "rejectPolicy", "setWorldSeed", "refreshRoadmap", "roadmapAction", "libraryExecute",
 ];
+
+/**
+ * One plain sentence for the top of the Session card: what the agent is doing right now, or why it is not. Reads the
+ * snapshot only, so it is testable without a browser. Written in English like the rest of the Control Center.
+ */
+export function nowSummary(snapshot) {
+  if (snapshot?.safety?.tripped) return "Safety stop raised: only read-only actions run. Reset the trip on the Bots tab to continue.";
+  if (snapshot?.safety?.paused) return `Paused: ${snapshot.safety.pauseReason ?? "no reason given"}.`;
+  const state = snapshot?.session?.state ?? "none";
+  switch (state) {
+    case "none":
+    case "shutdown":
+      return state === "none"
+        ? "Not connected. Enter a host and port on the Bots tab and connect."
+        : "Session ended. Connect again on the Bots tab to continue.";
+    case "connecting":
+    case "initializing":
+      return "Connecting to the server.";
+    case "reconnecting":
+      return "The connection dropped. GameMind is trying to reconnect.";
+    case "stopping":
+      return "Stopping: the running task is halted and the bot disconnects in order.";
+    case "idle":
+      return snapshot?.autonomyEnabled
+        ? "Connected and idle. Autonomy is on and will choose work when it sees something worth doing."
+        : "Connected and idle. Start a task, or turn autonomy on.";
+    case "running": {
+      const label = snapshot?.scheduler?.active?.label ?? "a task";
+      const goal = snapshot?.goal?.rationale ? ` ${snapshot.goal.rationale}` : "";
+      return `Working on: ${label}.${goal}`;
+    }
+    default:
+      return `Session state: ${state}.`;
+  }
+}
