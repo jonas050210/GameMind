@@ -28,7 +28,7 @@ import { explorationKeyCenter } from "./exploration.js";
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
-import { REFLEX_THRESHOLDS, assessReflex, newlyUrgent } from "./reflex.js";
+import { REFLEX_THRESHOLDS, urgentReflexesSince } from "./reflex.js";
 
 /** Failure code of an action the fast loop stopped because an urgent condition appeared. */
 export const REFLEX_INTERRUPT_CODE = "REFLEX_INTERRUPT";
@@ -662,16 +662,8 @@ export class MinecraftTaskRunner {
         // is still being dispatched would delay the reaction by a whole new action. Discard it and decide again on
         // the newest observation. Once the sequences match, the guard stops firing, so this cannot loop.
         const latest = this.runtime.currentWorldState;
-        if (latest && latest.sequence !== world.sequence) {
-          const decisionBasis = assessReflex(world.state, null, {
-            observationSequence: world.sequence,
-            observedAt: world.observedAt,
-          });
-          const latestAssessment = assessReflex(latest.state, world.state, {
-            observationSequence: latest.sequence,
-            observedAt: latest.observedAt,
-          });
-          const urgentSinceDecision = newlyUrgent(latestAssessment, decisionBasis);
+        if (latest) {
+          const urgentSinceDecision = urgentReflexesSince(world, latest);
           if (urgentSinceDecision.length > 0) {
             staleDecisionsDiscarded += 1;
             await this.runtime.trace.record({

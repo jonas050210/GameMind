@@ -595,88 +595,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
             : ""
       : "";
     const observedAt = world?.observedAt ?? null;
-    const observedBlocks: ControlCenterSnapshot["world"]["blocks"][number][] = (state?.nearbyBlocks ?? []).slice(0, 260).map((block) => ({
-      x: block.position.x,
-      y: block.position.y,
-      z: block.position.z,
-      name: block.name,
-      identifier: block.name.includes(":") ? block.name : `minecraft:${block.name}`,
-      type: block.type,
-      boundingBox: block.boundingBox,
-      distance: block.distance ?? (state ? Math.hypot(
-        block.position.x + 0.5 - state.player.position.x,
-        block.position.y + 0.5 - state.player.position.y,
-        block.position.z + 0.5 - state.player.position.z,
-      ) : null),
-      visibility: block.visible === true ? "visible" : block.visible === false ? "occluded" : "unknown",
-      hazard: isHazardBlockName(block.name),
-      resource: isResourceBlockName(block.name) || block.name === targetItem,
-      remembered: false,
-      source: "observation" as const,
-      observationKind: "local" as const,
-      observedAt,
-    }));
-    const observedBlockKeys = new Set(observedBlocks.map((block) => `${block.x},${block.y},${block.z}`));
-    // Strategic scans return real blockAt reads from loaded chunks. Keep them distinct from memory: they
-    // are confirmed current blocks, but may be occluded and outside the local voxel cube.
-    const strategicBlocks: ControlCenterSnapshot["world"]["blocks"][number][] = [
-      ...(state?.resourceSightings ?? []),
-      ...(state?.minableSightings ?? []),
-    ].filter((sighting) => {
-      const key = `${sighting.position.x},${sighting.position.y},${sighting.position.z}`;
-      if (observedBlockKeys.has(key)) return false;
-      observedBlockKeys.add(key);
-      return true;
-    }).slice(0, 160).map((sighting) => ({
-      x: sighting.position.x,
-      y: sighting.position.y,
-      z: sighting.position.z,
-      name: sighting.name,
-      identifier: sighting.name.includes(":") ? sighting.name : `minecraft:${sighting.name}`,
-      type: null,
-      boundingBox: null,
-      distance: sighting.distance,
-      visibility: sighting.visible === true ? "visible" : sighting.visible === false ? "occluded" : "unknown",
-      hazard: isHazardBlockName(sighting.name),
-      resource: isResourceBlockName(sighting.name) || sighting.name === targetItem,
-      remembered: false,
-      source: "observation" as const,
-      observationKind: "strategic" as const,
-      observedAt,
-    }));
-    const rememberedBlocks: ControlCenterSnapshot["world"]["blocks"][number][] = [...memory.blockSightings(), ...memory.minableSightings()]
-      .filter((sighting, index, all) => {
-        const key = `${sighting.position.x},${sighting.position.y},${sighting.position.z}`;
-        return !observedBlockKeys.has(key) && all.findIndex((other) => other.key === sighting.key) === index;
-      })
-      .slice(0, 160)
-      .map((sighting) => {
-        const staleMemory = sighting.lastSeenSequence !== world?.sequence;
-        return {
-          x: sighting.position.x,
-          y: sighting.position.y,
-          z: sighting.position.z,
-          name: sighting.name,
-          identifier: sighting.name.includes(":") ? sighting.name : `minecraft:${sighting.name}`,
-          type: null,
-          boundingBox: null,
-          distance: state ? Math.hypot(
-            sighting.position.x + 0.5 - state.player.position.x,
-            sighting.position.y + 0.5 - state.player.position.y,
-            sighting.position.z + 0.5 - state.player.position.z,
-          ) : null,
-          visibility: "unknown" as const,
-          hazard: isHazardBlockName(sighting.name),
-          // A remembered sighting is only "resource" when the block class says so; marking every memory
-          // marker as a resource is what made the map look like it had found logs it had never seen.
-          resource: isResourceBlockName(sighting.name) || sighting.name === targetItem,
-          remembered: staleMemory,
-          source: "memory" as const,
-          observationKind: staleMemory ? "memory" as const : "strategic" as const,
-          observedAt: staleMemory ? null : observedAt,
-        };
-      });
-    const worldBlocks = [...observedBlocks, ...strategicBlocks, ...rememberedBlocks];
     // How the world data below relates to the live session. A viewer must be able to tell "the agent is
     // looking at the world" from "the viewer is looking at the last thing it saw" from "there is nothing
     // to look at", because those three used to render identically.
@@ -771,7 +689,8 @@ export function createControlCenterSource(source: ControlCenterSource): {
       },
       goal: decision ? goalFromDecision(decision, control.task, state) : null,
       world: {
-        position: state?.player.position ?? null,
+        // No block or entity coordinates and no terrain census leave the agent: the Control Center is a status
+        // surface, and those fields were only ever low-level diagnostics that the operator views did not need.
         dimension: state?.player.dimension ?? null,
         gameMode: state?.player.gameMode ?? null,
         health: state?.player.health ?? null,
@@ -790,7 +709,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
             }
           : null,
         vitalsObservedAt: state?.player.session?.vitalsObservedAt ?? null,
-        terrain: state ? buildLocalTerrainModel(state).summary() : null,
         perception: state?.perception
           ? {
               ...state.perception,
@@ -804,11 +722,9 @@ export function createControlCenterSource(source: ControlCenterSource): {
         entities: (state?.entities ?? []).slice(0, 24).map((entity) => ({
           id: entity.id,
           name: entity.name,
-          position: entity.position,
           distance: entity.distance,
           hostile: isHostileMinecraftEntity(entity.name, entity.type),
         })),
-        blocks: worldBlocks,
         provenance: worldProvenance,
         freshness: worldFreshness,
         sessionFacts: worldSessionFacts,

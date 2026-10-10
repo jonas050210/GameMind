@@ -226,6 +226,31 @@ export function assessReflex(
 }
 
 /** Urgent reason codes that appear now but were not urgent in the previous assessment (edge trigger). */
+/** A world snapshot a decision was computed from, and the snapshot as it is now. */
+export interface ObservedSnapshot {
+  readonly state: MinecraftObservation;
+  readonly sequence: number;
+  readonly observedAt: string;
+}
+
+/**
+ * Urgent reflexes present in `latest` that the decision's own basis did not have. A non-empty result means a decision
+ * made from `decision` must not be dispatched as it is: the world changed in a way that demands an immediate response.
+ * Pure, so the stale-decision guard in the task runner can be tested without a running agent.
+ */
+export function urgentReflexesSince(decision: ObservedSnapshot, latest: ObservedSnapshot): readonly ReflexCode[] {
+  if (latest.sequence === decision.sequence) return [];
+  const basis = assessReflex(decision.state, null, {
+    observationSequence: decision.sequence,
+    observedAt: decision.observedAt,
+  });
+  const now = assessReflex(latest.state, decision.state, {
+    observationSequence: latest.sequence,
+    observedAt: latest.observedAt,
+  });
+  return newlyUrgent(now, basis);
+}
+
 export function newlyUrgent(current: ReflexAssessment, previous: ReflexAssessment | null): readonly ReflexCode[] {
   const before = new Set(previous?.urgentCodes ?? []);
   return current.urgentCodes.filter((code) => !before.has(code));

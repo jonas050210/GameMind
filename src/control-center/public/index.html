@@ -210,8 +210,7 @@
 
       <!-- CENTER COLUMN: World View + Decision + Threats -->
       <section class="column column-world">
-        <p class="note render-notice" id="render-notice" hidden>3D view paused: headless training is running, so the browser is not drawing the world. Untick Headless in Training to draw it again.</p>
-        <article class="card seed-card">
+            <article class="card seed-card">
           <header class="card-head">
             <div><span class="section-index">06 / WORLD SEED</span><h2>World seed</h2></div>
             <span class="hint" id="seed-hint"></span>
@@ -239,28 +238,6 @@
           </header>
           <p class="world-freshness" id="world-freshness" data-state="stale">no observation</p>
           <div class="vitals" id="vitals"></div>
-          <div class="map-panel">
-            <div class="map-topline"><span>VOXEL VIEW</span><span id="map-meta">waiting</span></div>
-            <canvas id="minimap" width="720" height="420" role="img" tabindex="0" aria-describedby="map-controls" aria-label="Interactive 3D voxel view of observed blocks"></canvas>
-            <div class="map-controls" id="map-controls"><span>Drag/arrows: orbit · scroll: zoom</span></div>
-          </div>
-          <ul class="legend">
-            <li><span class="sw player"></span>agent</li>
-            <li><span class="sw solid"></span>block</li>
-            <li><span class="sw resource"></span>resource</li>
-            <li><span class="sw hazard"></span>hazard</li>
-            <li><span class="sw memory"></span>memory</li>
-            <li><span class="sw hostile"></span>hostile</li>
-          </ul>
-          <div class="observation-panel">
-            <div class="observation-title"><span class="sub">Observation</span><span id="observation-meta" class="hint"></span></div>
-            <div class="table-wrap observation-table-wrap">
-              <table id="observations">
-                <thead><tr><th>Block</th><th>Position</th><th>Distance</th><th>Visibility</th></tr></thead>
-                <tbody></tbody>
-              </table>
-            </div>
-          </div>
           <div class="threat-row"><span class="sub">Visible entities</span><div class="items" id="hostiles"></div></div>
           <div class="split inventory-split">
             <div><div class="sub">Inventory</div><div id="inventory" class="items"></div></div>

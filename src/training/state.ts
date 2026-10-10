@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { z } from "zod";
 
 /**
@@ -99,6 +100,62 @@ export function trainingPaths(root: string): TrainingPaths {
     evaluations: join(root, "evaluations"),
     log: join(root, "logs", "train.log"),
   };
+}
+
+/** SHA-256 over a canonical (key-sorted) JSON encoding, so the digest survives re-serialisation. */
+export function canonicalDigest(value: unknown): string {
+  const canonical = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(canonical);
+    if (input && typeof input === "object") {
+      return Object.fromEntries(
+        Object.keys(input as Record<string, unknown>)
+          .sort()
+          .map((key) => [key, canonical((input as Record<string, unknown>)[key])]),
+      );
+    }
+    return input;
+  };
+  return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
+}
+
+export interface ArchiveResult {
+  readonly archiveDir: string | null;
+  readonly moved: readonly string[];
+}
+
+/**
+ * Moves the existing training artifacts (state, control file, experience, checkpoints, evaluations) into a new
+ * timestamped archive directory with a manifest. Nothing is deleted: a fresh start is a new run, and the old run
+ * stays inspectable and can be restored by moving it back.
+ */
+export async function archiveTrainingArtifacts(paths: TrainingPaths, now: Date, reason: string): Promise<ArchiveResult> {
+  const candidates = [paths.state, paths.control, paths.experience, paths.checkpoints, paths.evaluations];
+  const present: string[] = [];
+  for (const candidate of candidates) {
+    try {
+      await stat(candidate);
+      present.push(candidate);
+    } catch {
+      // absent: nothing to archive for this artifact
+    }
+  }
+  if (present.length === 0) return { archiveDir: null, moved: [] };
+  const stamp = now.toISOString().replace(/[:.]/g, "-");
+  const archiveDir = join(paths.root, "archive", `${stamp}-before-fresh`);
+  await mkdir(archiveDir, { recursive: true });
+  const moved: string[] = [];
+  for (const source of present) {
+    const target = join(archiveDir, basename(source));
+    await rename(source, target);
+    moved.push(basename(source));
+  }
+  await writeJsonAtomic(join(archiveDir, "manifest.json"), {
+    schemaVersion: 1,
+    archivedAt: now.toISOString(),
+    reason,
+    moved,
+  });
+  return { archiveDir, moved };
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {

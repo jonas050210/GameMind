@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import type { Logger } from "pino";
 import { ExperienceLearner } from "../core/learning/learner.js";
 import type { PolicyWeights } from "../core/learning/policy-weights.js";
@@ -12,18 +12,7 @@ import {
   trainingSeed,
   type CurriculumStage,
 } from "./curriculum.js";
-import {
-  TRAINING_SCHEMA_VERSION,
-  readControlCommand,
-  readTrainingState,
-  trainingPaths,
-  writeControlCommand,
-  writeJsonAtomic,
-  type TrainingCheckpointRecord,
-  type TrainingEpisodeRecord,
-  type TrainingPaths,
-  type TrainingState,
-} from "./state.js";
+import { TRAINING_SCHEMA_VERSION, readControlCommand, readTrainingState, trainingPaths, writeControlCommand, writeJsonAtomic, type TrainingCheckpointRecord, type TrainingEpisodeRecord, type TrainingPaths, type TrainingState, archiveTrainingArtifacts, canonicalDigest } from "./state.js";
 
 /** Runs one scenario episode. Injectable so tests can drive the state machine without the simulator. */
 export type EpisodeRunner = (
@@ -105,10 +94,12 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
   const pollMs = options.pollMs ?? 1_000;
 
   if (options.fresh) {
-    await rm(paths.state, { force: true });
-    await rm(paths.control, { force: true });
-    await rm(paths.experience, { recursive: true, force: true });
-    await rm(paths.checkpoints, { recursive: true, force: true });
+    // A fresh start archives the previous run rather than deleting it: its checkpoints, experience and evaluations
+    // are learning data, and removing them silently would make a regression impossible to diagnose or undo.
+    const archive = await archiveTrainingArtifacts(paths, now(), "fresh training start");
+    if (archive.archiveDir) {
+      logger?.info({ archiveDir: archive.archiveDir, moved: archive.moved }, "Archived the previous training run before a fresh start");
+    }
   }
   await mkdir(paths.root, { recursive: true });
 
@@ -267,7 +258,9 @@ async function saveCheckpoint(
   const id = `ckpt-${String(episodes).padStart(6, "0")}`;
   const path = `${paths.checkpoints}/${id}.json`;
   const createdAt = now().toISOString();
-  await writeJsonAtomic(path, { schemaVersion: 1, id, stageId, createdAt, episodes, weights });
+  const body = { schemaVersion: 1, id, stageId, createdAt, episodes, weights };
+  // The digest lets evaluation refuse a checkpoint that was edited after it was written.
+  await writeJsonAtomic(path, { ...body, digest: canonicalDigest(body) });
   return {
     id,
     stageId,
