@@ -127,6 +127,7 @@ function render() {
   renderProgression(snapshot);
   renderSafety(snapshot);
   renderLearning(snapshot);
+  renderLibrary(snapshot);
   renderWorld(snapshot);
   renderPerformance(snapshot);
   renderObjective(snapshot);
@@ -361,10 +362,10 @@ function renderThreats(snapshot) {
 function renderCompanion(snapshot) {
   const companion = snapshot.companion;
   const summary = el("companion-summary");
-  const history = el("chat-history");
-  if (!summary || !history) return;
+  const log = el("companion-log");
+  if (!summary || !log) return;
   clear(summary);
-  clear(history);
+  clear(log);
   el("companion-mode").textContent = companion ? `${companion.mode}${companion.executing ? " · acting" : ""}` : "not attached";
   if (!companion) {
     summary.append(node("p", "reason", "Companion coordination is unavailable in this run."));
@@ -378,14 +379,228 @@ function renderCompanion(snapshot) {
     intentCell("Anchor & storage", companion.anchor ? `${num(companion.anchor.x, 1)}, ${num(companion.anchor.y, 1)}, ${num(companion.anchor.z, 1)}` : "no active anchor", `${(companion.knownStorage ?? []).length} storage location(s) known`),
     intentCell("Latest outcome", companion.lastOutcome ?? "none", `transition ${ago(companion.lastTransitionAt)}`),
   );
-  for (const message of (companion.history ?? []).slice(0, 16).reverse()) {
-    const row = node("div", `chat-message ${message.direction}`);
-    const head = node("span", null, `${message.direction === "in" ? message.speaker ?? message.source : "GameMind"} · ${clock(message.at)}`);
-    row.append(head, node("p", null, message.text));
-    if (message.ok === false) row.dataset.tone = "bad";
-    history.append(row);
+  // Structured event log, newest first: each entry records what the companion did and whether it worked.
+  for (const entry of (companion.history ?? []).slice(0, 16)) {
+    const row = node("div", "companion-log-entry");
+    if (entry.ok === false) row.dataset.tone = "bad";
+    else if (entry.ok === true) row.dataset.tone = "good";
+    row.append(
+      chip(entry.kind ?? "system"),
+      node("span", "companion-log-time", clock(entry.at)),
+      node("p", null, entry.text),
+    );
+    log.append(row);
   }
-  if (!history.childElementCount) history.append(node("p", "reason", "No companion messages yet."));
+  if (!log.childElementCount) log.append(node("p", "reason", "No companion events yet."));
+}
+
+/*
+  Library: the one control surface. The catalog form is built once per catalog shape and only the
+  availability state is patched in place afterwards, so snapshot polling never eats typed input,
+  collapses an open entry, or drops a pending run. Operations are read-only and rebuilt every tick.
+*/
+const libraryState = { shape: null };
+
+function renderLibrary(snapshot) {
+  const library = snapshot.library ?? null;
+  const catalogHost = el("library-catalog");
+  const operationsHost = el("library-operations");
+  const hint = el("library-hint");
+  if (!catalogHost || !operationsHost) return;
+  if (!library) {
+    if (libraryState.shape !== "missing") {
+      libraryState.shape = "missing";
+      clear(catalogHost);
+      catalogHost.append(node("p", "reason", "This run exposes no Library."));
+    }
+    clear(operationsHost);
+    if (hint) hint.textContent = "";
+    return;
+  }
+  renderLibraryOperations(operationsHost, library.operations ?? []);
+  const catalog = library.catalog ?? [];
+  // Static shape only: status flips (available/unavailable) patch in place so a reconnect never eats typed input.
+  const shape = JSON.stringify(catalog.map((entry) => [entry.id, entry.category, entry.title, entry.description, entry.params]));
+  if (libraryState.shape !== shape) {
+    libraryState.shape = shape;
+    buildLibraryCatalog(catalogHost, catalog);
+  }
+  updateLibraryAvailability(catalogHost, catalog);
+  const available = catalog.filter((entry) => entry.status !== "unavailable").length;
+  if (hint) hint.textContent = `${available} of ${catalog.length} actions available right now. Unavailable actions name the missing requirement.`;
+}
+
+function renderLibraryOperations(host, operations) {
+  clear(host);
+  if (!operations.length) {
+    host.append(node("p", "reason", "No Library runs yet. Every run reports its measured outcome here."));
+    return;
+  }
+  for (const operation of operations.slice(0, 8)) {
+    const row = node("div", "library-operation");
+    row.dataset.state = operation.state;
+    const head = node("div", "library-operation-head");
+    head.append(
+      chip(operation.state, { tone: operation.state === "succeeded" ? "good" : operation.state === "running" ? "warn" : "bad" }),
+      node("b", null, operation.title ?? operation.entryId),
+      node("span", "library-operation-time", operation.endedAt ? `${clock(operation.startedAt)} → ${clock(operation.endedAt)}` : `started ${clock(operation.startedAt)}`),
+    );
+    row.append(head, node("p", null, operation.message));
+    const meta = [];
+    if (operation.failureCode) meta.push(`code: ${operation.failureCode}`);
+    if (operation.confirmed === true) meta.push("confirmed by adapter");
+    if (operation.confirmed === false) meta.push("NOT confirmed by adapter");
+    if (typeof operation.durationMs === "number") meta.push(`${num(operation.durationMs, 0)} ms`);
+    if (meta.length) row.append(node("small", "library-operation-meta", meta.join(" · ")));
+    host.append(row);
+  }
+}
+
+function buildLibraryCatalog(host, catalog) {
+  clear(host);
+  const byCategory = new Map();
+  for (const entry of catalog) {
+    if (!byCategory.has(entry.category)) byCategory.set(entry.category, []);
+    byCategory.get(entry.category).push(entry);
+  }
+  let first = true;
+  for (const [category, entries] of byCategory) {
+    const group = node("details", "library-category");
+    group.open = first;
+    first = false;
+    const summary = node("summary", "library-category-head");
+    summary.dataset.category = category;
+    summary.append(node("span", "library-category-name", category), node("span", "library-category-count", ""));
+    group.append(summary);
+    for (const entry of entries) group.append(buildLibraryEntry(entry));
+    host.append(group);
+  }
+}
+
+function buildLibraryEntry(entry) {
+  const details = node("details", "library-entry");
+  details.dataset.entryId = entry.id;
+  const summary = node("summary", "library-entry-head");
+  summary.append(node("span", "library-entry-title", entry.title));
+  summary.append(node("span", "library-status-chip"));
+  const avail = node("span", "library-availability");
+  summary.append(avail);
+  details.append(summary);
+  details.append(node("p", "library-description", entry.description));
+  const statusReason = node("p", "reason library-status-reason");
+  statusReason.hidden = true;
+  details.append(statusReason);
+  const form = node("form", "library-form");
+  for (const param of entry.params ?? []) form.append(buildLibraryParam(entry.id, param));
+  const run = node("button", "btn primary small", (entry.params ?? []).length ? "Run with these values" : "Run");
+  run.type = "submit";
+  form.append(run);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void sendCommand("libraryExecute", { id: entry.id, params: readLibraryParams(form, entry.params ?? []) });
+  });
+  details.append(form);
+  return details;
+}
+
+function buildLibraryParam(entryId, param) {
+  const wrap = node("label", "library-param");
+  wrap.append(node("span", "library-param-label", `${param.label}${param.required ? " *" : ""}`));
+  let input;
+  if (param.type === "select") {
+    input = document.createElement("select");
+    for (const option of param.options ?? []) {
+      const choice = document.createElement("option");
+      choice.value = option.value;
+      choice.textContent = option.label;
+      input.append(choice);
+    }
+    if (param.def !== undefined && param.def !== null) input.value = String(param.def);
+  } else if (param.type === "boolean") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = param.def === true;
+  } else {
+    input = document.createElement("input");
+    input.type = param.type === "integer" || param.type === "number" ? "number" : "text";
+    if (param.type === "integer") input.step = "1";
+    if (param.min !== undefined && param.min !== null) input.min = String(param.min);
+    if (param.max !== undefined && param.max !== null) input.max = String(param.max);
+    if (param.maxLength) input.maxLength = param.maxLength;
+    if (param.pattern) input.pattern = param.pattern;
+    if (param.def !== undefined && param.def !== null) input.value = String(param.def);
+    else if (!param.required) input.placeholder = "optional";
+  }
+  input.dataset.param = param.name;
+  input.id = `lib-${entryId}-${param.name}`;
+  if (param.required) input.required = true;
+  wrap.append(input);
+  if (param.help) wrap.append(node("small", "library-param-help", param.help));
+  return wrap;
+}
+
+function readLibraryParams(form, params) {
+  const out = {};
+  for (const param of params) {
+    const input = form.querySelector(`[data-param="${param.name}"]`);
+    if (!input) continue;
+    if (param.type === "boolean") {
+      out[param.name] = input.checked;
+      continue;
+    }
+    const raw = input.value;
+    if (raw === "" || raw === null || raw === undefined) continue;
+    if (param.type === "integer" || param.type === "number") {
+      const value = Number(raw);
+      if (Number.isNaN(value)) continue;
+      out[param.name] = value;
+      continue;
+    }
+    out[param.name] = raw;
+  }
+  return out;
+}
+
+function updateLibraryAvailability(host, catalog) {
+  const counts = new Map();
+  for (const entry of catalog) {
+    // Availability arrives as status: "unavailable" entries carry the missing requirement in statusReason.
+    const available = entry.status !== "unavailable";
+    const details = host.querySelector(`details[data-entry-id="${CSS.escape(entry.id)}"]`);
+    if (!details) continue;
+    const avail = details.querySelector(".library-availability");
+    if (avail) {
+      avail.textContent = available ? "●" : "○";
+      avail.dataset.state = available ? "yes" : "no";
+      avail.title = available ? "Available in this run" : (entry.statusReason ?? "Unavailable in this run");
+    }
+    const reason = details.querySelector(".library-status-reason");
+    if (reason) {
+      if (entry.statusReason) {
+        reason.textContent = entry.statusReason;
+        reason.hidden = false;
+      } else {
+        reason.textContent = "";
+        reason.hidden = true;
+      }
+    }
+    const chipSlot = details.querySelector(".library-status-chip");
+    if (chipSlot) {
+      clear(chipSlot);
+      if (entry.status === "experimental") chipSlot.append(chip("experimental", { tone: "warn" }));
+    }
+    const run = details.querySelector("button[type=submit]");
+    if (run) run.disabled = state.busy || !available;
+    if (!counts.has(entry.category)) counts.set(entry.category, { available: 0, total: 0 });
+    const count = counts.get(entry.category);
+    count.total += 1;
+    if (available) count.available += 1;
+  }
+  for (const summary of host.querySelectorAll("summary.library-category-head")) {
+    const count = counts.get(summary.dataset.category);
+    const slot = summary.querySelector(".library-category-count");
+    if (slot && count) slot.textContent = `${count.available}/${count.total} available`;
+  }
 }
 
 function intentCell(label, value, note) {
@@ -1598,14 +1813,6 @@ function wireControls() {
       ...(!buildShelter ? { count } : {}),
     });
   });
-  el("chat-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const input = el("chat-input");
-    const message = input.value.trim();
-    if (!message) return;
-    input.value = "";
-    void sendCommand("chat", message);
-  });
   el("seed-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void sendCommand("setWorldSeed", el("seed-input").value.trim());
@@ -1715,6 +1922,7 @@ function desiredPollDelay(snapshot) {
   // A training command returns before the trainer process has written its own state, and a live trainer changes
   // the buttons on every episode. Poll at the running cadence while either applies, so the controls follow the process.
   if (Date.now() < trainingSettlingUntil || snapshot?.training?.processAlive) return POLL_RUNNING_MS;
+  if ((snapshot?.library?.operations ?? []).some((operation) => operation.state === "running")) return POLL_RUNNING_MS;
   const agent = snapshot?.agent ?? null;
   if (!agent) return POLL_IDLE_MS;
   if (agent.state === "running" || agent.state === "stopping" || state.busy) return POLL_RUNNING_MS;

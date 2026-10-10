@@ -150,12 +150,45 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); line
 .task-submit-row > div { flex: 1; }
 .task-submit-row input { width: 100%; }
 
-/* CHAT */
-.chat-form { display: flex; gap: 6px; }
-.chat-form input { flex: 1; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-size: 13px; }
-.chat-history { max-height: 200px; overflow-y: auto; font-size: 12px; }
-.chat-history .list-item { padding: 6px 0; border-bottom: 1px solid var(--border); }
+/* LIBRARY */
+.library-operations { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.library-operation { background: var(--surface2); border: 1px solid var(--border); border-left-width: 3px; border-radius: 6px; padding: 8px 12px; font-size: 12px; }
+.library-operation[data-state="succeeded"] { border-left-color: var(--green); }
+.library-operation[data-state="running"] { border-left-color: var(--yellow); }
+.library-operation[data-state="failed"], .library-operation[data-state="refused"] { border-left-color: var(--red); }
+.library-operation-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.library-operation-head b { font-size: 12px; }
+.library-operation-time { margin-left: auto; font-size: 11px; color: var(--text-muted); font-family: var(--mono); }
+.library-operation p { margin: 6px 0 0; }
+.library-operation-meta { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+.library-catalog { display: flex; flex-direction: column; gap: 6px; }
+.library-category { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; }
+.library-category-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; font-weight: 600; font-size: 13px; }
+.library-category-count { margin-left: auto; font-size: 11px; font-weight: 400; color: var(--text-muted); font-family: var(--mono); }
+.library-entry { border-top: 1px solid var(--border); padding: 0 12px 0 20px; }
+.library-entry-head { display: flex; align-items: center; gap: 8px; padding: 8px 0; cursor: pointer; font-size: 13px; }
+.library-entry-title { font-weight: 600; }
+.library-availability { margin-left: auto; font-size: 12px; }
+.library-availability[data-state="yes"] { color: var(--green); }
+.library-availability[data-state="no"] { color: var(--text-muted); }
+.library-description { font-size: 12px; color: var(--text); margin: 0 0 6px; }
+.library-status-reason { color: var(--yellow); }
+.library-status-chip:empty { display: none; }
+.library-form { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; }
+.library-param { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.library-param input[type="text"], .library-param input[type="number"], .library-param select { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-size: 13px; text-transform: none; letter-spacing: normal; }
+.library-param input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.library-param-help { text-transform: none; letter-spacing: normal; font-size: 11px; }
+.library-form .btn { align-self: flex-start; }
 .companion-summary { font-size: 12px; }
+.companion-log-details { margin: 8px 0; font-size: 12px; }
+.companion-log-details summary { cursor: pointer; color: var(--text-muted); }
+.companion-log { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.companion-log-entry { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+.companion-log-entry[data-tone="bad"] { border-left: 3px solid var(--red); }
+.companion-log-entry[data-tone="good"] { border-left: 3px solid var(--green); }
+.companion-log-entry p { margin: 4px 0 0; }
+.companion-log-time { font-size: 11px; color: var(--text-muted); font-family: var(--mono); margin-left: 6px; }
 
 /* THREAT LIST */
 .threat-list { display: flex; flex-direction: column; gap: 6px; }

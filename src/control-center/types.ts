@@ -413,7 +413,60 @@ export interface ControlCenterCompanion {
   readonly reason: string;
   readonly executing: boolean;
   readonly lastOutcome: string | null;
-  readonly history: readonly { readonly at: string; readonly direction: "in" | "out"; readonly source: string; readonly speaker: string | null; readonly text: string; readonly ok: boolean | null }[];
+  /**
+   * Structured operation log (Library actions, mode transitions, homepoint and task outcomes).
+   * The chat transcript was removed with the chat-command system; this log carries no free text
+   * commands, only executed operations and their measured results.
+   */
+  readonly history: readonly { readonly at: string; readonly kind: string; readonly text: string; readonly ok: boolean | null }[];
+}
+
+/** One Library parameter field, rendered as a form control by the Control Center. */
+export interface ControlCenterLibraryParam {
+  readonly name: string;
+  readonly label: string;
+  readonly type: "string" | "integer" | "number" | "boolean" | "select";
+  readonly required: boolean;
+  readonly def?: unknown;
+  readonly options?: readonly { readonly value: string; readonly label: string }[];
+  readonly min?: number;
+  readonly max?: number;
+  readonly maxLength?: number;
+  readonly pattern?: string;
+  readonly help?: string;
+}
+
+/** One executable Library entry with its honest per-run availability. */
+export interface ControlCenterLibraryEntry {
+  readonly id: string;
+  readonly category: string;
+  readonly title: string;
+  readonly description: string;
+  readonly status: "implemented" | "experimental" | "unavailable";
+  readonly statusReason: string | null;
+  readonly requiresConnection: boolean;
+  readonly params: readonly ControlCenterLibraryParam[];
+}
+
+/** One Library execution with its measured outcome (never "success" for a mere accept). */
+export interface ControlCenterLibraryOperation {
+  readonly id: string;
+  readonly entryId: string;
+  readonly title: string;
+  readonly category: string;
+  readonly startedAt: string;
+  readonly finishedAt: string | null;
+  readonly state: "running" | "succeeded" | "failed" | "refused";
+  readonly message: string;
+  readonly failureCode: string | null;
+  readonly failureMessage: string | null;
+  readonly confirmed: boolean | null;
+  readonly durationMs: number | null;
+}
+
+export interface ControlCenterLibrary {
+  readonly catalog: readonly ControlCenterLibraryEntry[];
+  readonly operations: readonly ControlCenterLibraryOperation[];
 }
 
 /** Persistent landmark for the Control Center. */
@@ -571,6 +624,8 @@ export interface ControlCenterSnapshot {
   readonly combatAllowedSource?: "adapter" | "safety-policy" | "task-runner" | "unknown" | null;
   /** Present only when the data comes from a simulated run rather than a live server. */
   readonly offlineNote?: string | null;
+  /** Central Library catalog and recent executions. Null when the host has no Library. */
+  readonly library?: ControlCenterLibrary | null;
 }
 
 /** Folded view of the offline evaluation report, read from disk by the host. */
@@ -636,7 +691,11 @@ export interface ControlCenterCommands {
   stopTask?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
   promotePolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   rejectPolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
-  chat?(message: string): ControlCommandResult | Promise<ControlCommandResult>;
+  /**
+   * Executes one Library entry by id with structured parameters. The only capability-execution
+   * command; the removed `chat` free-text path answered 501 after the chat-command removal.
+   */
+  libraryExecute?(payload: { readonly id: string; readonly params?: Readonly<Record<string, unknown>> }): ControlCommandResult | Promise<ControlCommandResult>;
   /** Emergency stop: simultaneously trips, stops the task, and disarms combat. */
   panic?(): ControlCommandResult | Promise<ControlCommandResult>;
 }

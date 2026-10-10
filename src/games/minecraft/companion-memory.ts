@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import type { CompanionMode } from "./companion-command.js";
-import { homepointNamePattern } from "./companion-command.js";
+import type { CompanionMode } from "./companion-modes.js";
+import { homepointNamePattern } from "./companion-modes.js";
 
 const locationSchema = z.object({
   x: z.number().finite(), y: z.number().finite(), z: z.number().finite(),

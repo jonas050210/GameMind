@@ -192,17 +192,19 @@
           </form>
         </article>
 
-        <article class="card chat-card">
+        <article class="card library-card">
           <header class="card-head">
-            <div><span class="section-index">04 / COMPANION</span><h2>Chat</h2></div>
+            <div><span class="section-index">04 / LIBRARY</span><h2>Library</h2></div>
             <span class="hint" id="companion-mode">—</span>
           </header>
           <div id="companion-summary" class="companion-summary"></div>
-          <div id="chat-history" class="chat-history" aria-live="polite"></div>
-          <form id="chat-form" class="chat-form">
-            <input id="chat-input" maxlength="256" autocomplete="off" placeholder="#follow, #gather oak 4, or 'we need wood'" />
-            <button class="btn primary" type="submit">Send</button>
-          </form>
+          <div id="library-operations" class="library-operations" aria-live="polite"></div>
+          <details id="companion-log-details" class="companion-log-details">
+            <summary>Companion log</summary>
+            <div id="companion-log" class="companion-log"></div>
+          </details>
+          <p class="note" id="library-hint"></p>
+          <div id="library-catalog" class="library-catalog"></div>
         </article>
       </section>
 

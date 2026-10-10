@@ -40,6 +40,8 @@ interface FixtureOptions {
   readonly scenarioId?: string;
   readonly learning?: boolean;
   readonly allowCombat?: boolean;
+  /** Attaches the skill runtime and companion coordinator, as the live CLI host does. */
+  readonly companion?: boolean;
   /** Requests the operator stop after this many recorded actions, at the runner's inter-action check. */
   readonly stopAfterActions?: number;
 }
@@ -72,6 +74,7 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     traceSink: ring,
     logger,
     ...(learner ? { learner } : {}),
+    ...(options.companion ? { skills, companionMemoryDirectory: path.join(directory, "companion") } : {}),
     worldKey,
     offlineNote: "test fixture: simulated world",
     // Tests drive the agent by explicit command; the autonomous loop would otherwise start tasks on its own.
@@ -139,6 +142,59 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     },
   };
 }
+
+test("the Library is wired end to end: snapshot catalog, typed execution, and honest operations", async () => {
+  const fixture = await startFixture({ companion: true });
+  try {
+    const before = await fixture.snapshots();
+    assert.ok(before.library, "the snapshot carries the Library");
+    assert.equal(before.library?.catalog.length, 54);
+    const follow = before.library?.catalog.find((entry) => entry.id === "follow.player");
+    assert.equal(follow?.status, "implemented");
+    assert.deepEqual(follow?.params.map((param) => param.name), ["player"]);
+
+    const status = await fixture.command("libraryExecute", { id: "follow.status", params: {} });
+    assert.equal(status.status, 200);
+    assert.equal(status.body.ok, true);
+
+    const after = await fixture.snapshots();
+    const operation = after.library?.operations[0];
+    assert.equal(operation?.entryId, "follow.status");
+    assert.equal(operation?.state, "succeeded");
+
+    const bad = await fixture.command("libraryExecute", { id: "follow.player", params: { player: "not a name!" } });
+    assert.equal(bad.status, 409);
+    assert.equal(bad.body.ok, false);
+
+    const unknown = await fixture.command("libraryExecute", { id: "nope.missing", params: {} });
+    assert.equal(unknown.status, 409);
+    assert.equal(unknown.body.ok, false);
+
+    // The removed chat command is gone from the HTTP surface.
+    const chat = await fixture.command("chat", "#follow");
+    assert.equal(chat.status, 501);
+    assert.equal(chat.body.ok, false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("without a companion coordinator, companion Library entries refuse with the reason", async () => {
+  const fixture = await startFixture();
+  try {
+    const snapshot = await fixture.snapshots();
+    assert.ok(snapshot.library, "the catalog is present even when parts of the run are detached");
+    const hold = snapshot.library?.catalog.find((entry) => entry.id === "follow.hold");
+    assert.equal(hold?.status, "unavailable");
+    assert.match(hold?.statusReason ?? "", /companion/i);
+    const result = await fixture.command("libraryExecute", { id: "follow.hold", params: {} });
+    assert.equal(result.status, 409);
+    assert.equal(result.body.ok, false);
+    assert.match(result.body.message ?? "", /companion/i);
+  } finally {
+    await fixture.close();
+  }
+});
 
 test("snapshot reflects the live runtime, before and after a real task", async () => {
   const fixture = await startFixture();
