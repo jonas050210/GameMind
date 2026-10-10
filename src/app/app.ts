@@ -29,6 +29,7 @@ import { DEFAULT_RECONNECT_POLICY, MinecraftSession, SessionStartError, type Rec
 import { DEFAULT_SIMULATED_SCENARIO, SessionRequestError, createSessionFactory, type SessionFactory, type SessionFactoryDeps } from "./session-factory.js";
 import { TrainingDirectoryNameError, TrainingHub } from "./training-hub.js";
 import { TestServerController, describeProbe, probePort } from "./test-server.js";
+import { readBenchmarkListing } from "./benchmark-view.js";
 import { NO_SESSION_VIEW, type ConnectRequest, type SessionMode, type SessionView } from "./types.js";
 
 /**
@@ -613,6 +614,7 @@ export class GameMindApp {
     const evaluationReportPath = path.join(this.dataDirectory, "eval", "offline-report.json");
     const raw: NonNullable<ControlCenterHost["queries"]> = {
       testServer: async () => this.testServer.refresh(),
+      benchmarks: () => readBenchmarkListing(path.join(this.dataDirectory, "experiments")),
       events: (params) => {
         const category = params.get("category");
         const level = params.get("level");

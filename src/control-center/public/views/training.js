@@ -147,7 +147,7 @@ function lastEvaluation(training) {
 export function renderTraining(ctx) {
   const training = ctx.snapshot.training;
   if (!training) {
-    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null };
+    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null, "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null) };
   }
   return {
     "training-notice": notice("info", "Offline simulator training — not real-world training", "Training runs the agent's decision loop on the built-in simulator in a separate process, without rendering. What it learns is measured on held-out simulator seeds. It says nothing about a real Minecraft world until a live run is verified separately."),
@@ -157,7 +157,53 @@ export function renderTraining(ctx) {
     "training-checkpoints": checkpoints(training),
     "training-episodes-table": episodes(training),
     "training-eval": lastEvaluation(training),
+    "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null),
   };
+}
+
+const GATE_TEXT = { promotable: "übernahmefähig", "not-promotable": "nicht übernahmefähig" };
+
+/** The exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
+export function benchmarksCard(listing) {
+  const subtitle = "Vergleicht Explorationsraten im Offline-Simulator (npm run train:benchmark -- --name NAME). Gewinner: übernahmefähig und mindestens die Schwelle besser als die Baseline.";
+  if (!listing || !listing.reports?.length) {
+    return card({ title: "Benchmarks der Explorationsrate", subtitle }, empty("Noch kein Benchmark", "Ein Lauf startet mehrere Trainings nacheinander und zeigt hier den Vergleich."));
+  }
+  return card(
+    { title: "Benchmarks der Explorationsrate", subtitle },
+    ...listing.reports.map((report) =>
+      h(
+        "section",
+        { class: "benchmark", key: report.file },
+        h("h4", null, report.name, " ", report.createdAt ? h("span", { class: "muted small" }, fmtDateTime(report.createdAt)) : null),
+        report.unreadable
+          ? notice("warn", "Dieser Bericht konnte nicht gelesen werden", report.file)
+          : h(
+              "div",
+              null,
+              report.winner
+                ? notice("info", `Gewinner: Explorationsrate ${report.winner}`, report.decision ?? null)
+                : notice("neutral", "Kein Gewinner", report.decision ?? "Kein Kandidat hat die Schwelle geschafft."),
+              table({
+                dense: true,
+                caption: "Ergebnisse je Kandidat",
+                columns: [
+                  { label: "Kandidat", cell: (r) => r.id },
+                  { label: "Explorationsrate", align: "right", cell: (r) => (r.explorationRate === null ? unknown() : fmtNumber(r.explorationRate, 2)) },
+                  { label: "Status", cell: (r) => statusBadge(r.status) },
+                  { label: "Baseline", align: "right", cell: (r) => (r.baselineSuccess === null ? unknown() : fmtPercent(r.baselineSuccess, 0)) },
+                  { label: "Mit Training", align: "right", cell: (r) => (r.trainedSuccess === null ? unknown() : fmtPercent(r.trainedSuccess, 0)) },
+                  { label: "Gewinn", align: "right", cell: (r) => (r.deltaPoints === null ? unknown() : fmtSigned(r.deltaPoints * 100, 1, " Pkt")) },
+                  { label: "Gate", cell: (r) => (r.gateVerdict ? GATE_TEXT[r.gateVerdict] ?? r.gateVerdict : unknown()) },
+                  { label: "Fehler", cell: (r) => r.error ?? "—" },
+                ],
+                rows: report.rows.map((value, index) => ({ key: `${report.file}-${index}`, value })),
+                empty: { title: "Keine Ergebnisse" },
+              }),
+            ),
+      ),
+    ),
+  );
 }
 
 export { fmtSigned, unknown };

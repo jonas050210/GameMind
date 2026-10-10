@@ -46,6 +46,7 @@ export function wantedResources(ui, folder) {
     list.push({ name: "diagnostics", everyMs: 30000 });
     list.push({ name: "testServer", everyMs: 4000 });
   }
+  if (ui.tab === "training") list.push({ name: "benchmarks", everyMs: 15000 });
   if (ui.tab === "evaluation") list.push({ name: "evaluation", everyMs: 4000 });
   if (ui.tab === "learning") list.push({ name: "learning", params: { store: ui.learningStore }, everyMs: 5000 });
   if (ui.tab === "memory") {
@@ -192,6 +193,7 @@ export function boot(env = {}) {
         preflight: data("training-preflight"),
         diagnostics: data("diagnostics"),
         testServer: data("testServer"),
+        benchmarks: data("benchmarks"),
       },
       ui,
       now: now(),
