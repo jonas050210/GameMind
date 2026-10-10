@@ -96,7 +96,7 @@ test("the Control Center is up before any session exists, and its snapshot says 
     assert.equal(snapshot.session?.canConnect, true);
     assert.equal(snapshot.connection.adapterStatus, "disconnected");
     // Unknown telemetry is unknown, never a default that reads like a measurement.
-    for (const field of ["health", "food", "dimension", "gameMode", "alive", "onGround"] as const) {
+    for (const field of ["health", "food", "dimension", "gameMode", "alive", "onGround", "position"] as const) {
       assert.equal(snapshot.world[field], null, `world.${field} must be null without a session`);
     }
     assert.deepEqual(snapshot.world.inventory, []);
@@ -378,6 +378,18 @@ test("training commands go to the real hub: invalid input is refused and a fresh
     const dir = await fixture.command("startTraining", { directory: "bad/name" });
     assert.equal(dir.status, 409);
     assert.match(dir.body.message ?? "", /not a valid training folder name/);
+    // Folders GameMind keeps for other things are never a training folder: a run would overwrite their state.json.
+    await mkdir(path.join(fixture.directory, "data", "roadmap"), { recursive: true });
+    await writeFile(path.join(fixture.directory, "data", "roadmap", "state.json"), '{"items":[]}\n', "utf8");
+    for (const reserved of ["roadmap", "learning", "world-memory", "Roadmap"]) {
+      const refused = await fixture.command("startTraining", { directory: reserved });
+      assert.equal(refused.status, 409, `'${reserved}' must be refused as a training folder`);
+      assert.match(refused.body.message ?? "", /folder GameMind uses for something else/);
+      assert.equal((await fixture.command("selectTrainingDirectory", reserved)).status, 409);
+    }
+    const offered = await fixture.get<{ directories: string[] }>("api/training-preflight");
+    assert.ok(!offered.directories.includes("roadmap"), "a folder with a state.json that is not a training run is not offered");
+    assert.equal(await readFile(path.join(fixture.directory, "data", "roadmap", "state.json"), "utf8"), '{"items":[]}\n', "the refused requests changed nothing");
     assert.equal((await fixture.command("selectTrainingDirectory", "experiment-a")).status, 200);
     assert.equal((await fixture.snapshot()).training?.root, "data/experiment-a");
     assert.equal((await fixture.command("pauseTraining")).status, 409, "pausing with nothing running is refused, not acknowledged");

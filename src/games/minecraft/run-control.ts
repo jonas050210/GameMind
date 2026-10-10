@@ -42,7 +42,7 @@ import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import { LibraryExecutor, createMinecraftLibraryRegistry } from "./library.js";
 import { createRuntimePerformanceSampler } from "./runtime-performance.js";
-import type { Submission, TaskOrigin, TaskScheduler } from "./task-scheduler.js";
+import type { SchedulerSnapshot, SchedulerTicketView, Submission, TaskOrigin, TaskScheduler } from "./task-scheduler.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
 export interface CombatGateAdapter {
@@ -670,7 +670,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         worldAvailable: status.adapterStatus === "connected" && status.worldLive,
       },
       companion: source.companion?.snapshot() ?? null,
-      scheduler: source.scheduler?.snapshot() ?? null,
+      scheduler: source.scheduler ? withClassification(source.scheduler.snapshot()) : null,
       autonomyEnabled: source.autonomyEnabled ? source.autonomyEnabled() : null,
       agent: {
         // An operator hold is reported even between tasks: pausing while idle still blocks the next run,
@@ -706,6 +706,9 @@ export function createControlCenterSource(source: ControlCenterSource): {
       world: {
         // No block or entity coordinates and no terrain census leave the agent: the Control Center is a status
         // surface, and those fields were only ever low-level diagnostics that the operator views did not need.
+        position: state
+          ? { x: Math.round(state.player.position.x), y: Math.round(state.player.position.y), z: Math.round(state.player.position.z) }
+          : null,
         dimension: state?.player.dimension ?? null,
         gameMode: state?.player.gameMode ?? null,
         health: state?.player.health ?? null,
@@ -869,6 +872,13 @@ export function createControlCenterSource(source: ControlCenterSource): {
   }
 
   return { snapshot, commands };
+}
+
+/** Adds the shared failure classification to every ticket that ended with a failure, so the page can explain it. */
+function withClassification(snapshot: SchedulerSnapshot): SchedulerSnapshot {
+  const annotate = (ticket: SchedulerTicketView): SchedulerTicketView =>
+    ticket.failure ? { ...ticket, classification: classifyFailure(ticket.failure.code, ticket.failure.message) } : ticket;
+  return { ...snapshot, active: snapshot.active ? annotate(snapshot.active) : null, queue: snapshot.queue.map(annotate), history: snapshot.history.map(annotate) };
 }
 
 /**

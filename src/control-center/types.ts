@@ -120,6 +120,8 @@ export interface ControlCenterGoal {
 }
 
 export interface ControlCenterWorld {
+  /** The player's own position, whole blocks, from the live observation; null when nothing was observed. */
+  readonly position?: { readonly x: number; readonly y: number; readonly z: number } | null;
   readonly dimension: string | null;
   readonly gameMode: string | null;
   readonly health: number | null;

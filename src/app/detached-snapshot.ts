@@ -77,6 +77,7 @@ export function buildDetachedSnapshot(input: DetachedInputs): ControlCenterSnaps
     },
     goal: null,
     world: {
+      position: null,
       dimension: null,
       gameMode: null,
       health: null,

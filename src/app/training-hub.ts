@@ -16,9 +16,23 @@ import type { AppEventLog } from "./event-log.js";
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/;
 export const DEFAULT_TRAINING_DIRECTORY = "training";
 
+/**
+ * Folders GameMind itself keeps under the data folder. A training run writes its own state, checkpoints and lock files into
+ * its directory, so pointing one at any of these would overwrite other data (the roadmap store, for one, also keeps a
+ * state.json). They are never offered and never accepted, whatever their contents look like.
+ */
+export const RESERVED_DATA_FOLDERS: ReadonlySet<string> = new Set([
+  "events", "jobs", "learning", "learning-simulated", "world-memory", "traces", "run", "eval", "roadmap", "companion",
+  "live-verification", "profiles", "evidence", "episodes", "library", "memory",
+]);
+
 export class TrainingDirectoryNameError extends Error {
-  constructor(name: string) {
-    super(`'${name}' is not a valid training folder name. Use 1 to 48 letters, digits, dots, dashes or underscores, starting with a letter or digit; it is created inside the data folder.`);
+  constructor(name: string, reserved = false) {
+    super(
+      reserved
+        ? `'${name}' is a folder GameMind uses for something else (${[...RESERVED_DATA_FOLDERS].sort().join(", ")}). Pick another training folder name.`
+        : `'${name}' is not a valid training folder name. Use 1 to 48 letters, digits, dots, dashes or underscores, starting with a letter or digit; it is created inside the data folder.`,
+    );
     this.name = "TrainingDirectoryNameError";
   }
 }
@@ -46,6 +60,7 @@ export class TrainingHub implements TrainingControl {
   /** Resolves a folder name to its manager, creating it on first use. Throws for an invalid name. */
   manager(name: string): TrainingManager {
     if (!NAME.test(name) || name === "." || name === "..") throw new TrainingDirectoryNameError(name);
+    if (RESERVED_DATA_FOLDERS.has(name.toLowerCase())) throw new TrainingDirectoryNameError(name, true);
     let manager = this.managers.get(name);
     if (!manager) {
       const root = path.join(this.options.dataDirectory, name);
@@ -61,7 +76,7 @@ export class TrainingHub implements TrainingControl {
     const names = new Set<string>([DEFAULT_TRAINING_DIRECTORY, ...this.managers.keys()]);
     try {
       for (const entry of readdirSync(this.options.dataDirectory)) {
-        if (!NAME.test(entry)) continue;
+        if (!NAME.test(entry) || RESERVED_DATA_FOLDERS.has(entry.toLowerCase())) continue;
         const folder = path.join(this.options.dataDirectory, entry);
         try {
           if (statSync(folder).isDirectory() && this.isTrainingFolder(folder)) names.add(entry);

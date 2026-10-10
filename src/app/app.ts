@@ -26,7 +26,7 @@ import { detectPlatform, discoverWindowsHost, type PlatformInfo } from "./platfo
 import { buildLearningQuery, buildMemoryQuery, evaluationOverview } from "./queries.js";
 import { defaultRedactionContext, displayPath, redactStrings, type RedactionContext } from "./redact.js";
 import { DEFAULT_RECONNECT_POLICY, MinecraftSession, SessionStartError, type ReconnectPolicy } from "./session.js";
-import { SessionRequestError, createSessionFactory, type SessionFactory, type SessionFactoryDeps } from "./session-factory.js";
+import { DEFAULT_SIMULATED_SCENARIO, SessionRequestError, createSessionFactory, type SessionFactory, type SessionFactoryDeps } from "./session-factory.js";
 import { TrainingDirectoryNameError, TrainingHub } from "./training-hub.js";
 import { NO_SESSION_VIEW, type ConnectRequest, type SessionMode, type SessionView } from "./types.js";
 
@@ -199,6 +199,11 @@ export class GameMindApp {
 
   get url(): string {
     return this.handle.url;
+  }
+
+  /** Every command this app answers, with or without a session. The page's controls are checked against this list. */
+  get commandNames(): readonly string[] {
+    return Object.keys(this.commands());
   }
 
   get session(): MinecraftSession | null {
@@ -734,6 +739,9 @@ export function taskCatalog(): Record<string, unknown> {
   return {
     generatedAt: new Date().toISOString(),
     note: "Only tasks the agent implements and validates are offered. Every request is parsed by the same schema the command line uses, so the limits below cannot be raised from here.",
+    // The offline worlds a simulated session can load (the Bots tab offers them; nothing here is a real server).
+    simulatedScenarios: evaluationScenarios().map((scenario) => ({ id: scenario.id, family: scenario.family, description: scenario.description, expectation: scenario.expectation })),
+    defaultSimulatedScenario: DEFAULT_SIMULATED_SCENARIO,
     tasks: [
       {
         kind: "gather-logs",

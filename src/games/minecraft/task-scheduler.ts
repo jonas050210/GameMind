@@ -1,3 +1,4 @@
+import type { ClassifiedFailure } from "../../core/failure-taxonomy.js";
 import type { MinecraftTask } from "./task.js";
 import type { MinecraftTaskResult } from "./task-runner.js";
 
@@ -83,6 +84,11 @@ export interface SchedulerTicketView {
   readonly progressRatio: number | null;
   /** Why a task that did not run to completion ended early: a cancel reason, a pre-emption or a start error. */
   readonly note: string | null;
+  /**
+   * What kind of stop the failure was (safety refusal, planner decline, task budget, ...), with the hint the operator can
+   * act on. Filled in by the Control Center from the shared failure taxonomy; the scheduler itself only records the code.
+   */
+  readonly classification?: ClassifiedFailure | null;
   /** Position in the queue (1 = next). Null unless queued. */
   readonly position: number | null;
 }
