@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   formatLiveVerificationReport,
+  runLiveVerification,
   DEFAULT_SERVER_CONFIG,
   type LiveVerificationReport,
 } from "../src/testing/live/live-verifier.js";
+import { runActionPhase } from "../src/testing/live/live-action-checks.js";
 
 // ─── Server config tests ─────────────────────────────────────────────────────
 
@@ -382,4 +384,59 @@ test("live verifier: failure creates class pattern entry", async () => {
   const snap = learner.snapshot();
   assert.ok(snap.classPatterns.length > 0, "A failure should create a class pattern");
   assert.ok(snap.classPatterns[0]?.patternKey.includes("mine"));
+});
+
+// ─── Honesty regressions: an unreachable server must never be reported as reached ───────────
+
+test("live verifier: with no server, server phases are NOT RUN and nothing claims a real server", async () => {
+  // Port 1 is closed on this host: the connection is refused at once, so the test is fast and deterministic.
+  const report = await runLiveVerification({
+    server: { host: "127.0.0.1", port: 1, version: "1.20.4", botUsername: "VerifyTest", connectTimeoutMs: 3_000 },
+    mode: "learn",
+    phases: ["connection", "learning-update", "control-center"],
+  });
+  assert.equal(report.reachedServer, false, "no phase logged in, so no server was reached");
+  const connection = report.phases.find((phase) => phase.phase === "connection");
+  assert.equal(connection?.notRun, true, "a refused connection is NOT RUN, not a failed server test");
+  assert.equal(connection?.serverReached, false);
+  assert.equal(report.allPassed, false, "a phase that did not run cannot make the report pass");
+  for (const offline of report.phases.filter((phase) => phase.phase === "learning-update" || phase.phase === "control-center")) {
+    assert.equal(offline.serverRequired, false);
+    assert.equal(offline.serverReached, false, "an in-process learner phase never counts as a server connection");
+    assert.ok(offline.notes.some((note) => note.includes("does not connect to the server")));
+  }
+  const text = formatLiveVerificationReport(report);
+  assert.ok(text.includes("Reached: NO"));
+  assert.ok(text.includes("NOT RUN"));
+  assert.ok(!text.includes("These results are from a REAL Minecraft server connection"));
+});
+
+test("live verifier: a skipped action phase is neither a pass nor a failure, and needs no server", async () => {
+  // allowDig is false: the phase must skip before any connection is attempted.
+  const outcome = await runActionPhase("dig", { host: "127.0.0.1", port: 1, version: "1.20.4", botUsername: "VerifyTest", connectTimeoutMs: 3_000 }, { allowDig: false, allowCombat: false });
+  assert.equal(outcome.skipped, true);
+  assert.equal(outcome.passed, false);
+  assert.equal(outcome.serverReached, false, "no connection was attempted");
+  assert.ok(outcome.notes.some((note) => note.includes("--allow-dig")));
+});
+
+test("live verifier: a report with only skipped phases after a real connection does not fail", () => {
+  const report: LiveVerificationReport = {
+    schemaVersion: 1,
+    generatedAt: "2026-01-01T00:00:00.000Z",
+    server: "localhost:25565",
+    mode: "verify",
+    phases: [
+      { phase: "connection", passed: true, durationMs: 10, assertions: [], error: null, notes: [], serverRequired: true, serverReached: true, notRun: false },
+      { phase: "combat", passed: false, skipped: true, durationMs: 1, assertions: [], error: null, notes: ["SKIPPED: none visible"], serverRequired: true, serverReached: true, notRun: false },
+    ],
+    passed: 1,
+    failed: 0,
+    total: 2,
+    allPassed: true,
+    reachedServer: true,
+  };
+  const text = formatLiveVerificationReport(report);
+  assert.ok(text.includes("ALL PASSED"));
+  assert.ok(text.includes("SKIPPED"));
 });

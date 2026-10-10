@@ -928,9 +928,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         oxygenLevel: vitals.airTicks,
         onGround: typeof bot.entity.onGround === "boolean" ? bot.entity.onGround : false,
         // Set by Mineflayer's physics each tick; not in its type declarations, so it is read through a narrow cast.
-        inWater: typeof (bot.entity as unknown as { isInWater?: unknown }).isInWater === "boolean"
-          ? (bot.entity as unknown as { isInWater: boolean }).isInWater
-          : null,
+        inWater: this.bodyInWater(bot, position),
         headInWater: this.headInWater(bot, position),
         // An empty-slot count from the inventory window is the only proof that nothing more can be held.
         ...(emptySlots === null
@@ -1095,6 +1093,27 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private headInWater(bot: Bot, position: BotPosition): boolean | null {
     const head = bot.blockAt(position.offset(0, PLAYER_EYE_HEIGHT, 0));
     return head ? isWaterBlockName(head.name) : null;
+  }
+
+  /**
+   * Whether the block the feet occupy is water. This is block data, not Mineflayer's physics flag: the flag is
+   * computed from a player box contracted by 0.4 blocks vertically, so it reads "out of water" while the feet
+   * are still inside a water block (measured on a live 1.20.4 session: flag false, feet block `water`).
+   */
+  private feetInWater(bot: Bot, position: BotPosition): boolean | null {
+    // blockAt floors the position itself, as headInWater relies on; the feet cell is the one containing the position.
+    const feet = bot.blockAt(position);
+    return feet ? isWaterBlockName(feet.name) : null;
+  }
+
+  /** Body-in-water from both sources: true when either says so, false only when both say so, else unknown. */
+  private bodyInWater(bot: Bot, position: BotPosition): boolean | null {
+    const flag = (bot.entity as unknown as { isInWater?: unknown }).isInWater;
+    const physicsFlag = typeof flag === "boolean" ? flag : null;
+    const feet = this.feetInWater(bot, position);
+    if (physicsFlag === true || feet === true) return true;
+    if (physicsFlag === false && feet === false) return false;
+    return null;
   }
 
   private loadedChunksWithinScanRadius(bot: Bot, position: BotPosition): { x: number; z: number }[] | undefined {
@@ -1412,7 +1431,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       horizontalDistance <= range + 1.25 && standingReaches(to.y, { x, y, z }, horizontalDistance, range + 1.25);
     return {
       confirmed,
-      confirmation: "pathfinder_goal_reached_and_position_checked",
+      confirmation: confirmed
+        ? "pathfinder_goal_reached_and_position_checked"
+        : "pathfinder_resolved_but_goal_not_reached_by_position",
       details: {
         from,
         to,
@@ -1435,15 +1456,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     }
     await this.watchMovementProgress(
       bot,
-      bot.pathfinder.goto(goal),
+      () => bot.pathfinder!.goto(goal),
       signal,
       MINECRAFT_NAVIGATE_CAPABILITY,
     );
   }
 
+  /**
+   * Runs one movement operation under the progress watchdog and the planner-failure listener. The operation is passed
+   * as a starter so both listeners are attached BEFORE goto() runs: a planning result that arrives during the call
+   * cannot be missed.
+   */
   private async watchMovementProgress<T>(
     bot: Bot,
-    operation: Promise<T>,
+    start: () => Promise<T>,
     signal: AbortSignal,
     capability: string,
   ): Promise<T> {
@@ -1451,6 +1477,25 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     let lastPosition = bot.entity.position.clone();
     let stuckTimer: NodeJS.Timeout | undefined;
     let stuckTriggered = false;
+    // mineflayer-pathfinder's goto() resolves, not rejects, when a planning result has an EMPTY path, whatever its
+    // status. That is the common "no route from here" case (A* returns the start node), so a missing route would
+    // otherwise be reported as a goal reached. The planner's own verdict is read here and classified as a failure.
+    let onPathUpdate: ((results: { status?: string; path?: unknown[] }) => void) | undefined;
+    const planFailed = new Promise<never>((_resolve, reject) => {
+      onPathUpdate = (results) => {
+        if ((results.path?.length ?? 0) !== 0) return;
+        if (results.status === "noPath" || results.status === "timeout") {
+          const error = new Error(
+            results.status === "noPath"
+              ? "No path to the goal: the planner found no route from the current position."
+              : "The planner ran out of time before finding a route to the goal.",
+          );
+          error.name = results.status === "noPath" ? "NoPath" : "Timeout";
+          reject(error);
+        }
+      };
+      bot.on("path_update", onPathUpdate);
+    });
     const stuck = new Promise<never>((_resolve, reject) => {
       stuckTimer = setInterval(() => {
         const position = bot.entity.position;
@@ -1471,16 +1516,75 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       }, Math.min(500, Math.max(100, this.config.navigationStuckTimeoutMs / 10)));
     });
     try {
-      return await raceWithAbort(Promise.race([operation, stuck]), signal);
+      return await raceWithAbort(Promise.race([start(), stuck, planFailed]), signal);
     } catch (error) {
       if (error instanceof MinecraftAdapterError && error.code === "NAVIGATION_STUCK") {
         await this.cancelCurrentAction(bot, capability);
       }
+      const classified = classifyMovementError(error);
+      if (classified instanceof MinecraftAdapterError && classified.code.startsWith("PATH_")) {
+        // A failed plan can leave a goal set in the pathfinder; clear it so the next action starts clean.
+        await this.cancelCurrentAction(bot, capability);
+      }
       if (signal.aborted) throw error;
-      throw classifyMovementError(error);
+      throw classified;
     } finally {
       if (stuckTimer) clearInterval(stuckTimer);
+      if (onPathUpdate) bot.removeListener("path_update", onPathUpdate);
     }
+  }
+
+  /**
+   * Digs one block the bot is already in reach of, bounded by a deadline derived from Mineflayer's own dig-time
+   * estimate plus the configured slack. A deadline miss stops digging and is reported as DIG_TIMEOUT. Returns the
+   * deadline used, for the action's details.
+   */
+  private async digWithDeadline(
+    bot: Bot,
+    block: ReturnType<Bot["blockAt"]> & object,
+    blockName: string,
+    signal: AbortSignal,
+  ): Promise<number> {
+    const tier = bestPickaxeTier([{ name: bot.heldItem?.name ?? "" }]).tier;
+    const estimateMs =
+      typeof bot.digTime === "function"
+        ? bot.digTime(block)
+        : estimatedDigSeconds(blockName, tier) * 1_000;
+    const digDeadline = Math.max(5_000, Math.min(90_000, Math.round(estimateMs) + this.config.digTimeoutSlackMs));
+    let digTimer: NodeJS.Timeout | undefined;
+    try {
+      await raceWithAbort(
+        Promise.race([
+          bot.dig(block, true),
+          new Promise<never>((_resolve, reject) => {
+            digTimer = setTimeout(() => {
+              try {
+                bot.stopDigging();
+              } catch {
+                // The client may already have finished; the dig result still decides.
+              }
+              reject(
+                new MinecraftAdapterError(
+                  `Digging ${blockName} exceeded ${digDeadline} ms and was aborted.`,
+                  "DIG_TIMEOUT",
+                ),
+              );
+            }, digDeadline);
+          }),
+        ]),
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof MinecraftAdapterError) throw error;
+      if (signal.aborted) throw error;
+      throw new MinecraftAdapterError(
+        `Digging failed: ${error instanceof Error ? error.message : String(error)}`,
+        "DIG_FAILED",
+      );
+    } finally {
+      if (digTimer) clearTimeout(digTimer);
+    }
+    return Math.round(digDeadline);
   }
 
   private async executeCollectBlock(
@@ -1491,13 +1595,14 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const parsed = minecraftCollectBlockInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid collection target.", "INVALID_ACTION_INPUT");
     this.requireOverworld(bot, "Log collection", "UNSUPPORTED_DIMENSION");
-    if (!bot.collectBlock) {
-      throw new MinecraftAdapterError("Collect-block plugin is unavailable.", "COLLECTOR_UNAVAILABLE");
+    if (!bot.pathfinder) {
+      throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
     }
-    const block = this.blockAtCoordinates(bot, parsed.data.x, parsed.data.y, parsed.data.z);
-    if (!block || block.name !== parsed.data.blockName) {
+    const { x, y, z, blockName: itemName, dangerRadius } = parsed.data;
+    const block = this.blockAtCoordinates(bot, x, y, z);
+    if (!block || block.name !== itemName) {
       throw new MinecraftAdapterError(
-        `Expected ${parsed.data.blockName} at the requested position, but the block is unknown or different.`,
+        `Expected ${itemName} at the requested position, but the block is unknown or different.`,
         "RESOURCE_TARGET_CHANGED",
       );
     }
@@ -1509,31 +1614,54 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       );
     }
     this.requireSurvivalMode(bot, "Log collection", "GAME_MODE_BLOCKS_COLLECTION");
-    if (!bot.canDigBlock(block)) {
+    // Harvestability is a property of the block and the held tool, so it is checked here. Reach is not: canDigBlock
+    // is false until the bot is near the block, and the walk below is what brings it into reach.
+    if (!block.diggable || !block.canHarvest(bot.heldItem?.type ?? null)) {
       throw new MinecraftAdapterError("Minecraft client reports that this block cannot be harvested.", "BLOCK_NOT_HARVESTABLE");
     }
-    if (hasVisibleHostileNear(bot, block.position.offset(0.5, 0.5, 0.5), parsed.data.dangerRadius)) {
+    if (hasVisibleHostileNear(bot, block.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
       throw new MinecraftAdapterError(
-        `A currently visible hostile is within ${parsed.data.dangerRadius} blocks of the resource target.`,
+        `A currently visible hostile is within ${dangerRadius} blocks of the resource target.`,
         "RESOURCE_TARGET_THREATENED",
       );
     }
 
-    const itemName = parsed.data.blockName;
+    // Collection is walk-then-dig, the same path as mine-block. mineflayer-collectblock is not used: its mineBlock()
+    // checks pathfinder.movements.safeToBreak(), which is false here because navigation runs with canDig = false,
+    // and in that case it drops the target and resolves with nothing dug. Measured on a live 1.20.4 session.
     const inventoryBefore = inventoryCount(bot, itemName);
-    await this.watchMovementProgress(
-      bot,
-      bot.collectBlock.collect(block, { ignoreNoPath: false }),
-      signal,
-      MINECRAFT_COLLECT_BLOCK_CAPABILITY,
-    );
-    // collect-block may resolve just before the server's inventory packet arrives. Wait briefly, then
-    // require both independent postconditions: the exact target changed and the requested item entered
-    // inventory. A merely issued dig or a nearby pickup can no longer be reported as a gathered log.
-    const remainingBlock = this.blockAtCoordinates(bot, parsed.data.x, parsed.data.y, parsed.data.z);
+    const reach = 4;
+    if (block.position.distanceTo(bot.entity.position) > reach) {
+      const elevated = y - bot.entity.position.y > 2;
+      await this.navigateWithProgressWatchdog(
+        bot,
+        new pathfinderApi.goals.GoalNear(x, y, z, elevated ? 3 : 1.5),
+        signal,
+      );
+    }
+    if (block.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(block)) {
+      throw new MinecraftAdapterError("The log is still out of reach after navigation.", "BLOCK_OUT_OF_REACH");
+    }
+    // The walk can take many seconds. A hostile that closed in during it stops the dig, as it would have before the walk.
+    if (hasVisibleHostileNear(bot, block.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the resource target.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
+    if (!block.canHarvest(bot.heldItem?.type ?? null)) {
+      throw new MinecraftAdapterError("Minecraft client reports that this block cannot be harvested.", "BLOCK_NOT_HARVESTABLE");
+    }
+    const digDeadline = await this.digWithDeadline(bot, block, itemName, signal);
+    // The drop can lag the block change, and must be walked onto. Then require both independent postconditions: the
+    // exact target changed and the requested item entered inventory. A block that broke without its item is not a log.
+    const remainingBlock = this.blockAtCoordinates(bot, x, y, z);
     const blockRemoved = !remainingBlock || remainingBlock.name !== itemName;
+    const pickupAttempts = blockRemoved
+      ? await this.pickUpNearbyDrops(bot, { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, itemName, inventoryBefore, signal)
+      : 0;
     const inventoryAfter = blockRemoved
-      ? await this.waitForInventoryGain(bot, itemName, inventoryBefore, 1_500, signal)
+      ? await this.waitForInventoryGain(bot, itemName, inventoryBefore, this.config.dropSettleMs, signal)
       : inventoryCount(bot, itemName);
     const inventoryGained = inventoryAfter > inventoryBefore;
     const confirmed = blockRemoved && inventoryGained;
@@ -1542,11 +1670,14 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       confirmation: "target_block_removed_and_inventory_delta_checked",
       details: {
         itemName,
-        coordinates: { x: parsed.data.x, y: parsed.data.y, z: parsed.data.z },
+        coordinates: { x, y, z },
         inventoryBefore,
         inventoryAfter,
         inventoryGained,
         blockRemoved,
+        tool: bot.heldItem?.name ?? null,
+        digDeadlineMs: digDeadline,
+        pickupAttempts,
       },
     };
   }
@@ -1724,7 +1855,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const before = inventoryCount(bot, itemName);
     await this.watchMovementProgress(
       bot,
-      bot.pathfinder.goto(new pathfinderApi.goals.GoalBlock(x, y, z)),
+      () => bot.pathfinder!.goto(new pathfinderApi.goals.GoalBlock(x, y, z)),
       signal,
       MINECRAFT_PICKUP_ITEM_CAPABILITY,
     );
@@ -1785,7 +1916,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (distance > 3) {
       await this.watchMovementProgress(
         bot,
-        bot.pathfinder.goto(new pathfinderApi.goals.GoalNear(x, y, z, 2)),
+        () => bot.pathfinder!.goto(new pathfinderApi.goals.GoalNear(x, y, z, 2)),
         signal,
         MINECRAFT_HARVEST_BERRIES_CAPABILITY,
       );
@@ -1870,6 +2001,51 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         elapsedMs: Date.now() - startedAt,
       },
     };
+  }
+
+  /**
+   * Picks up the item drop a broken block left behind. A broken block drops its item at the block centre, where it
+   * is picked up only by touching it: standing in reach of the block is not enough (measured live: a log broke 2
+   * blocks from the bot and stayed on the ground). Walks to each item entity within `radius` of the block centre
+   * until the inventory gains the item, bounded to a few drops. Failures here are not action failures: the caller's
+   * inventory check decides confirmation.
+   */
+  private async pickUpNearbyDrops(
+    bot: Bot,
+    blockCentre: { x: number; y: number; z: number },
+    itemName: string,
+    before: number,
+    signal: AbortSignal,
+    radius = 2.5,
+  ): Promise<number> {
+    let attempts = 0;
+    // The item entity can arrive a moment after the block change: give it a short window first.
+    await this.waitForInventoryGain(bot, itemName, before, 600, signal);
+    for (let round = 0; round < 3 && inventoryCount(bot, itemName) <= before; round += 1) {
+      const drops = Object.values(bot.entities)
+        .filter((entity) => entity.name === "item")
+        .filter((entity) => Math.hypot(
+          entity.position.x - blockCentre.x,
+          entity.position.y - blockCentre.y,
+          entity.position.z - blockCentre.z,
+        ) <= radius)
+        .sort((a, b) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position));
+      if (drops.length === 0) break;
+      const drop = drops[0]!;
+      attempts += 1;
+      try {
+        await this.navigateWithProgressWatchdog(
+          bot,
+          new pathfinderApi.goals.GoalNear(drop.position.x, drop.position.y, drop.position.z, 0.5),
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted) throw error;
+        break;
+      }
+      await this.waitForInventoryGain(bot, itemName, before, 600, signal);
+    }
+    return attempts;
   }
 
   private async waitForInventoryGain(
@@ -2010,7 +2186,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         "RESOURCE_TARGET_THREATENED",
       );
     }
-    if (!block.diggable || !bot.canDigBlock(block)) {
+    // Reach is not checked here: canDigBlock is false until the bot is near the block, and the walk below is what
+    // brings it into reach. The reach test after the walk is the one that decides whether digging may start.
+    if (!block.diggable) {
       throw new MinecraftAdapterError("The client reports this block cannot be dug.", "BLOCK_NOT_DIGGABLE");
     }
     const drop = minecraftMiningRequirements[blockName]?.drop ?? blockName;
@@ -2056,50 +2234,13 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         signal,
       );
     }
-    if (block.position.distanceTo(bot.entity.position) > reach + 1) {
+    if (block.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(block)) {
       throw new MinecraftAdapterError("The block is still out of reach after navigation.", "BLOCK_OUT_OF_REACH");
     }
 
     const inventoryBefore = inventoryCount(bot, drop);
-    const tier = bestPickaxeTier([{ name: bot.heldItem?.name ?? "" }]).tier;
-    const estimateMs =
-      typeof bot.digTime === "function"
-        ? bot.digTime(block)
-        : estimatedDigSeconds(blockName, tier) * 1_000;
-    const digDeadline = Math.max(5_000, Math.min(90_000, Math.round(estimateMs) + this.config.digTimeoutSlackMs));
-    let digTimer: NodeJS.Timeout | undefined;
-    try {
-      await raceWithAbort(
-        Promise.race([
-          bot.dig(block, true),
-          new Promise<never>((_resolve, reject) => {
-            digTimer = setTimeout(() => {
-              try {
-                bot.stopDigging();
-              } catch {
-                // The client may already have finished; the dig result still decides.
-              }
-              reject(
-                new MinecraftAdapterError(
-                  `Digging ${blockName} exceeded ${digDeadline} ms and was aborted.`,
-                  "DIG_TIMEOUT",
-                ),
-              );
-            }, digDeadline);
-          }),
-        ]),
-        signal,
-      );
-    } catch (error) {
-      if (error instanceof MinecraftAdapterError) throw error;
-      if (signal.aborted) throw error;
-      throw new MinecraftAdapterError(
-        `Digging failed: ${error instanceof Error ? error.message : String(error)}`,
-        "DIG_FAILED",
-      );
-    } finally {
-      if (digTimer) clearTimeout(digTimer);
-    }
+    const digDeadline = await this.digWithDeadline(bot, block, blockName, signal);
+    await this.pickUpNearbyDrops(bot, { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, drop, inventoryBefore, signal);
 
     const inventoryAfter = await this.waitForInventoryGain(bot, drop, inventoryBefore, this.config.dropSettleMs, signal);
     const remaining = this.blockAtCoordinates(bot, x, y, z);
@@ -2473,12 +2614,10 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   ): Promise<AdapterActionOutcome> {
     const parsed = minecraftSwimToSurfaceInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid swim request.", "INVALID_ACTION_INPUT");
-    const bodyInWater = (): boolean | null => {
-      const flag = (bot.entity as unknown as { isInWater?: unknown }).isInWater;
-      return typeof flag === "boolean" ? flag : null;
-    };
+    // Out of water means the body AND the head are observed out of water. Unknown counts as still in water, so a
+    // swim is never confirmed on a missing reading.
     const stillInWater = (): boolean =>
-      bodyInWater() !== false || this.headInWater(bot, bot.entity.position) !== false;
+      this.bodyInWater(bot, bot.entity.position) !== false || this.headInWater(bot, bot.entity.position) !== false;
     const startedAt = performance.now();
     if (!stillInWater()) {
       return {
