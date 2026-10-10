@@ -17,6 +17,7 @@ import {
   type TrainingPaths,
   type TrainingState,
 } from "./state.js";
+import { readTrainingDefaults } from "./defaults.js";
 
 /**
  * Runs training and evaluation as separate processes and reports their state to the Control Center.
@@ -36,6 +37,8 @@ export interface TrainingManagerOptions {
    * and write files and never leaves the process; without this the root is shown as given.
    */
   readonly displayRoot?: string;
+  /** Saved default (benchmark result). Used for workers and exploration when the start does not set them. */
+  readonly defaultsFile?: string;
 }
 
 export type TrainingStartOptions = ControlCenterTrainingStart;
@@ -305,13 +308,21 @@ export class TrainingManager implements TrainingControl {
         return { ok: false, message: `A fresh start archives the existing run in ${this.displayRoot} (${current?.totalEpisodes ?? 0} episode(s), ${artifacts.checkpoints} checkpoint(s)). Review the consequences and confirm it explicitly; nothing was changed.` };
       }
     }
+    let saved: Awaited<ReturnType<typeof readTrainingDefaults>> = null;
+    try {
+      saved = this.options.defaultsFile ? await readTrainingDefaults(this.options.defaultsFile) : null;
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
     const args = ["train", "--dir", this.options.root];
     if (options.episodesPerStage !== undefined) args.push("--episodes-per-stage", String(options.episodesPerStage));
     if (options.maxEpisodes !== undefined) args.push("--max-episodes", String(options.maxEpisodes));
     if (options.maxMinutes !== undefined) args.push("--max-minutes", String(options.maxMinutes));
     if (options.fresh) args.push("--fresh");
     // A resumed run keeps the rate it was collecting experience with; a fresh one starts from the default.
-    args.push("--explore", String(options.explorationRate ?? (options.fresh ? undefined : current?.explorationRate) ?? DEFAULT_TRAINING_EXPLORATION_RATE));
+    // Priority: what this start asks for, then the rate the run was collecting with, then the saved benchmark default.
+    args.push("--explore", String(options.explorationRate ?? (options.fresh ? undefined : current?.explorationRate) ?? saved?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE));
+    args.push("--workers", String(saved?.workers ?? 1));
     if (options.stageIds !== undefined) args.push("--stages", options.stageIds.join(","));
     await writeControlCommand(this.paths, "run");
     this.launchError = null;

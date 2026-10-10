@@ -112,7 +112,16 @@ export function planBenchmark(context: PlanContext, options: BenchmarkPlanOption
     label: `Exploration-rate benchmark (${name})`,
     source: "offline",
     command: process.execPath,
-    args: [cli, path.join("src", "training", "benchmark-cli.ts"), "--name", name, "--out", experiments],
+    args: [
+      cli,
+      path.join("src", "training", "benchmark-cli.ts"),
+      "--name",
+      name,
+      "--out",
+      experiments,
+      "--defaults-file",
+      path.join(context.dataDirectory, "training-defaults.json"),
+    ],
     cwd: context.root,
     // Four candidates, each a full training run plus its held-out evaluation: allow several hours.
     timeoutMs: 6 * 60 * 60_000,

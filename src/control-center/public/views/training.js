@@ -165,18 +165,26 @@ const GATE_TEXT = { promotable: "promotable", "not-promotable": "not promotable"
 
 /** Exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
 export function benchmarksCard(listing) {
-  const subtitle = "Compares exploration rates on the offline simulator (npm run train:benchmark -- --name NAME). A winner is promotable and beats the baseline by at least the margin.";
+  const subtitle = "Step 1 times 1–4 workers (about 20 s each), step 2 compares exploration rates on the offline simulator with the chosen worker count. The winning settings are saved as the default.";
   const start = button("Start benchmark", {
     command: "runBenchmark",
     tone: "primary",
-    title: "Runs four exploration rates one after another on the offline simulator",
-    data: { confirm: "Start a benchmark? It runs several full training runs one after another on the offline simulator and can take hours. You can cancel it from the Tests & Evaluation tab." },
+    title: "Measures worker counts, then runs four exploration rates one after another on the offline simulator",
+    data: { confirm: "Start a benchmark? It first times each worker count (about 20 seconds each), then runs several full training runs one after another on the offline simulator. It can take hours. You can cancel it from the Tests & Evaluation tab." },
   });
+  const saved = listing?.savedDefault
+    ? notice(
+        "info",
+        `Current default: ${listing.savedDefault.workers} worker${listing.savedDefault.workers === 1 ? "" : "s"}, exploration rate ${fmtNumber(listing.savedDefault.explorationRate, 2)}`,
+        `Saved ${fmtDateTime(listing.savedDefault.savedAt)}${listing.savedDefault.benchmark ? ` by benchmark ${listing.savedDefault.benchmark}` : ""}. New runs use it unless they choose otherwise.`,
+      )
+    : notice("neutral", "No default saved yet", "Run a benchmark to choose the worker count and exploration rate. Until then, one worker and the standard rate are used.");
   if (!listing || !listing.reports?.length) {
-    return card({ title: "Exploration-rate benchmarks", subtitle }, empty("No benchmark yet", "A benchmark runs several trainings one after another and shows the comparison here."), h("footer", { class: "button-row" }, start));
+    return card({ title: "Benchmarks", subtitle }, saved, empty("No benchmark yet", "A benchmark measures the worker counts, then compares exploration rates and shows the comparison here."), h("footer", { class: "button-row" }, start));
   }
   return card(
-    { title: "Exploration-rate benchmarks", subtitle, actions: start },
+    { title: "Benchmarks", subtitle, actions: start },
+    saved,
     ...listing.reports.map((report) =>
       h(
         "section",
@@ -187,6 +195,21 @@ export function benchmarksCard(listing) {
           : h(
               "div",
               null,
+              report.probe
+                ? table({
+                    dense: true,
+                    caption: `Worker throughput (chosen: ${report.workers ?? "?"})`,
+                    columns: [
+                      { label: "Workers", align: "right", cell: (r) => r.workers },
+                      { label: "Episodes / min", align: "right", cell: (r) => (r.episodesPerMinute === null ? unknown() : fmtNumber(r.episodesPerMinute, 0)) },
+                      { label: "CPU", align: "right", cell: (r) => (r.cpuPercent === null ? unknown() : fmtPercent(r.cpuPercent / 100, 0)) },
+                      { label: "Peak RAM", align: "right", cell: (r) => (r.peakRssMb === null ? unknown() : `${fmtNumber(r.peakRssMb, 0)} MB`) },
+                      { label: "Result", cell: (r) => (r.eligible ? (r.workers === report.workers ? "chosen" : "ok") : r.reason ?? "not used") },
+                    ],
+                    rows: report.probe.map((value, index) => ({ key: `${report.file}-probe-${index}`, value })),
+                    empty: { title: "No probe" },
+                  })
+                : null,
               report.winner
                 ? notice("info", `Winner: exploration rate ${report.winner}`, report.decision ?? null)
                 : notice("neutral", "No winner", report.decision ?? "No candidate passed the gate and the margin."),

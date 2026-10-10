@@ -15,7 +15,7 @@ test("the plan runs the CLI with a fixed argument list, into the data folder the
     const plan = planBenchmark({ root, dataDirectory: data }, { name: "rates-1", now: new Date("2026-10-10T10:00:00Z") });
     assert.equal(plan.kind, "benchmark");
     assert.ok(plan.args.includes("src/training/benchmark-cli.ts") || plan.args.some((arg) => arg.endsWith("benchmark-cli.ts")));
-    assert.deepEqual(plan.args.slice(-4), ["--name", "rates-1", "--out", path.join(data, "experiments")]);
+    assert.deepEqual(plan.args.slice(-6), ["--name", "rates-1", "--out", path.join(data, "experiments"), "--defaults-file", path.join(data, "training-defaults.json")]);
     assert.equal(plan.cwd, root);
     assert.match(plan.display, /benchmark-cli\.ts --name rates-1/);
   } finally {

@@ -30,6 +30,7 @@ import { DEFAULT_SIMULATED_SCENARIO, SessionRequestError, createSessionFactory, 
 import { TrainingDirectoryNameError, TrainingHub } from "./training-hub.js";
 import { TestServerController, describeProbe, probePort } from "./test-server.js";
 import { readBenchmarkListing } from "./benchmark-view.js";
+import { defaultsPathFor } from "../training/defaults.js";
 import { NO_SESSION_VIEW, type ConnectRequest, type SessionMode, type SessionView } from "./types.js";
 
 /**
@@ -618,7 +619,7 @@ export class GameMindApp {
     const evaluationReportPath = path.join(this.dataDirectory, "eval", "offline-report.json");
     const raw: NonNullable<ControlCenterHost["queries"]> = {
       testServer: async () => this.testServer.refresh(),
-      benchmarks: () => readBenchmarkListing(path.join(this.dataDirectory, "experiments")),
+      benchmarks: () => readBenchmarkListing(path.join(this.dataDirectory, "experiments"), 5, defaultsPathFor(this.dataDirectory)),
       events: (params) => {
         const category = params.get("category");
         const level = params.get("level");

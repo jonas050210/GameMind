@@ -7,8 +7,12 @@
  * The benchmark never overwrites an earlier benchmark or experiment name.
  */
 import { mkdir, stat, writeFile } from "node:fs/promises";
+import { arch, cpus, platform, release, totalmem } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_TRAINING_EXPLORATION_RATE } from "./curriculum.js";
+import { readTrainingDefaults, saveTrainingDefaults, type TrainingDefaults } from "./defaults.js";
 import { runHeadlessExperiment, type HeadlessExperimentReport } from "./experiment.js";
+import { chooseWorkerCount, probeWorkerCounts, type ProbeResult } from "./throughput-probe.js";
 
 export interface BenchmarkCandidate {
   /** Short identifier, used in the experiment directory name. Letters, digits, '.', '_' and '-'. */
@@ -26,7 +30,20 @@ export interface BenchmarkOptions {
   readonly evaluationSeeds: number;
   /** Minimum held-out success gain over the baseline, in fraction points (0.02 = two points). */
   readonly margin: number;
-  readonly logger?: { info(obj: unknown, msg?: string): void };
+  /** Workers for the candidate runs when no probe is requested. Default 1. */
+  readonly workers?: number;
+  /**
+   * When set, first measure throughput for each worker count (a short timed run each) and use the chosen count for
+   * every candidate. Omit to skip the probe.
+   */
+  readonly probe?: {
+    readonly workerCounts: readonly number[];
+    readonly seconds: number;
+    readonly warmupSeconds: number;
+  };
+  /** Where the winning settings are saved as the default. Omit to report them without saving. */
+  readonly defaultsFile?: string;
+  readonly logger?: { info(obj: unknown, msg?: string): void; warn?(obj: unknown, msg?: string): void };
 }
 
 export interface BenchmarkEntry {
@@ -49,9 +66,15 @@ export interface BenchmarkReport {
   readonly name: string;
   readonly createdAt: string;
   readonly config: Omit<BenchmarkOptions, "logger">;
+  /** Throughput per worker count, or null when the probe was skipped. */
+  readonly probe: readonly ProbeResult[] | null;
+  /** Workers used for every candidate run. */
+  readonly workers: number;
   readonly entries: readonly BenchmarkEntry[];
   readonly winner: string | null;
   readonly decision: string;
+  /** The default that was saved (or would have been, without a defaults file). */
+  readonly defaults: TrainingDefaults | null;
 }
 
 const NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -127,6 +150,20 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<Benchmark
     if (error instanceof Error && error.message.includes("already exists")) throw error;
   }
 
+  // Step 1: how many workers. The probe is a short timed run per count; it decides speed and stability only.
+  const probe = options.probe
+    ? await probeWorkerCounts({
+        workerCounts: options.probe.workerCounts,
+        seconds: options.probe.seconds,
+        warmupSeconds: options.probe.warmupSeconds,
+        workDir: join(outDir, options.name, "probe"),
+        ...(options.logger ? { logger: options.logger as never } : {}),
+      })
+    : null;
+  const chosenWorkers = probe ? (chooseWorkerCount(probe) ?? 1) : (options.workers ?? 1);
+  options.logger?.info({ workers: chosenWorkers, probed: probe !== null }, "benchmark worker count chosen");
+
+  // Step 2: exploration candidates, each trained with the chosen worker count under the same budget.
   const entries: BenchmarkEntry[] = [];
   for (const candidate of options.candidates) {
     const experimentName = `${options.name}--${candidate.id}`;
@@ -140,6 +177,7 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<Benchmark
         maxEpisodes: options.maxEpisodes,
         explorationRate: candidate.explorationRate,
         evaluationSeeds: options.evaluationSeeds,
+        workers: chosenWorkers,
         ...(options.logger ? { logger: options.logger } : {}),
       });
       entries.push({ candidate, status: "completed", error: null, experiment: summarise(report, directory) });
@@ -155,14 +193,51 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<Benchmark
   }
 
   const { winner, decision } = chooseBenchmarkWinner(entries, options.margin);
+
+  // Step 3: the default. A winner sets the exploration rate. Without a winner the previous rate stays, because the
+  // benchmark did not show that another one is better. The worker count is always taken from this run's probe.
+  const completed = entries.some((entry) => entry.status === "completed");
+  let defaults: TrainingDefaults | null = null;
+  if (completed) {
+    const previous = options.defaultsFile ? await readTrainingDefaults(options.defaultsFile) : null;
+    const winningCandidate = winner ? entries.find((entry) => entry.candidate.id === winner)?.candidate : undefined;
+    const explorationRate = winningCandidate?.explorationRate ?? previous?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE;
+    const createdAt = new Date().toISOString();
+    defaults = {
+      schemaVersion: 1,
+      workers: chosenWorkers,
+      explorationRate,
+      savedAt: createdAt,
+      benchmark: options.name,
+      decision: `${decision} Workers: ${chosenWorkers}${probe ? " (chosen by the throughput probe)" : " (set without a probe)"}.`,
+      probe: probe
+        ? probe.map((result) => ({
+            workers: result.workers,
+            status: result.status,
+            episodesPerMinute: result.episodesPerMinute,
+            cpuPercent: result.cpuPercent,
+            peakRssMb: result.peakRssMb,
+            respawns: result.respawns,
+            eligible: result.eligible,
+            reason: result.reason,
+          }))
+        : null,
+      machine: { platform: `${platform()} ${release()} ${arch()}`, cpus: cpus().length, memoryGb: Math.round((totalmem() / 1073741824) * 10) / 10, node: process.version },
+    };
+    if (options.defaultsFile) await saveTrainingDefaults(options.defaultsFile, defaults);
+  }
+
   const { logger: _logger, ...config } = options;
   const report: BenchmarkReport = {
     name: options.name,
     createdAt: new Date().toISOString(),
     config,
+    probe,
+    workers: chosenWorkers,
     entries,
     winner,
     decision,
+    defaults,
   };
   await mkdir(join(outDir, "benchmarks"), { recursive: true });
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx" });
