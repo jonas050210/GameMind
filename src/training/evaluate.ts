@@ -6,6 +6,7 @@ import type { PolicyWeights } from "../core/learning/policy-weights.js";
 import { runEvaluationOnce, evaluationSeeds, type EvaluationRun, type EvaluationRunOptions } from "../testing/eval/harness.js";
 import { evaluationScenarios, type EvaluationScenario } from "../testing/eval/scenarios.js";
 import { MinecraftTaskDecisionModel } from "../games/minecraft/decision-model.js";
+import { PROGRESS_DEFINITION } from "../games/minecraft/progress-evidence.js";
 import { DEFAULT_POLICY_WEIGHT_CONFIG } from "../core/learning/policy-weights.js";
 import { acquireTrainingLock, type LockEnvironment } from "./lock.js";
 import { assertSeedSplit, TRAINING_SEED_BASE } from "./curriculum.js";
@@ -82,7 +83,15 @@ export interface TrainingEvaluationReport {
   /** What the comparison established; absent in reports written before it existed. */
   readonly conclusion?: EvaluationConclusion;
   /** Identity of the held-out set (scenarios, seeds, decision model): two reports are comparable only when it matches. */
-  readonly evaluationSet?: { readonly id: string; readonly scenarios: number; readonly seedsPerScenario: number; readonly runs: number; readonly decisionModel: string };
+  readonly evaluationSet?: {
+    readonly id: string;
+    readonly scenarios: number;
+    readonly seedsPerScenario: number;
+    readonly runs: number;
+    readonly decisionModel: string;
+    /** The definition of progress and wasted actions the figures were measured under; absent in older reports (v1). */
+    readonly progressDefinition?: string;
+  };
   /** What the candidate holds. Weights only exist for contexts with at least `minSamples` verified attempts. */
   readonly candidateContent?: { readonly learnedContexts: number; readonly minSamples: number };
   /** How often the candidate chose differently from the baseline on the same world. */
@@ -198,9 +207,18 @@ export function wilsonInterval(successes: number, total: number, z = 1.96): Wils
   return { low: round(Math.max(0, centre - margin)), high: round(Math.min(1, centre + margin)) };
 }
 
-function evaluationSetId(scenarios: readonly EvaluationScenario[], seeds: readonly number[], decisionModel: string): string {
+/**
+ * Identity of a held-out evaluation set. Two reports are comparable only when it matches, so it includes everything that
+ * changes what a number means: the scenarios, the seeds, the decision model and the definition of progress and waste.
+ */
+export function evaluationSetId(
+  scenarios: readonly EvaluationScenario[],
+  seeds: readonly number[],
+  decisionModel: string,
+  progressDefinition: string = PROGRESS_DEFINITION,
+): string {
   return createHash("sha256")
-    .update(JSON.stringify({ scenarios: scenarios.map((scenario) => scenario.id), seeds, decisionModel }))
+    .update(JSON.stringify({ scenarios: scenarios.map((scenario) => scenario.id), seeds, decisionModel, progressDefinition }))
     .digest("hex")
     .slice(0, 12);
 }
@@ -347,7 +365,7 @@ async function evaluateCheckpointLocked(options: EvaluateCheckpointOptions): Pro
     deltas,
     verdict,
     conclusion: analysis.conclusion,
-    evaluationSet: { id: setId, scenarios: scenarios.length, seedsPerScenario: seeds.length, runs: baseline.metrics.runs, decisionModel },
+    evaluationSet: { id: setId, scenarios: scenarios.length, seedsPerScenario: seeds.length, runs: baseline.metrics.runs, decisionModel, progressDefinition: PROGRESS_DEFINITION },
     candidateContent: { learnedContexts, minSamples: DEFAULT_POLICY_WEIGHT_CONFIG.minSamples },
     behaviour: analysis.behaviour,
     paired: analysis.paired,

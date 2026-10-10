@@ -776,6 +776,49 @@ test("offline checks start through the job runner, one at a time, with the reaso
   });
 });
 
+function checkpointReport(evaluationSet: Record<string, unknown> | null): Record<string, unknown> {
+  const measure = (successRate: number, wasted: number) => ({ successRate, runs: 260, interval: { low: 0.68, high: 0.78 }, meanWastedActions: wasted, medianActions: 5 });
+  return {
+    checkpointId: "ckpt-000003",
+    generatedAt: "2026-10-09T10:00:00.000Z",
+    verdict: "not-promotable",
+    conclusion: "identical-behaviour",
+    weightsId: "w-1",
+    learnedContexts: 2,
+    evaluationSet,
+    baseline: measure(0.7346, 0.64),
+    candidate: measure(0.7346, 0.64),
+    deltas: { successRate: 0, medianActions: 0, meanWastedActions: 0, unsafeActions: 0, deaths: 0 },
+    behaviour: { pairedRuns: 260, runsWithDifferentChoices: 0, scenariosWithDifferentChoices: 0 },
+    paired: { candidateBetter: 0, baselineBetter: 0, tied: 260 },
+    baselineStability: { evaluationSetId: "abc", stable: true, firstRecordedAt: "2026-10-09T10:00:00.000Z", note: "First baseline recorded for this evaluation set; later evaluations must reproduce it." },
+    reasons: ["No measured gain."],
+    heldOut: { seeds: 10, disjointFromTraining: true, note: "Held-out worlds." },
+    scenarios: [],
+  };
+}
+
+test("the checkpoint comparison says which definition of progress and waste its figures use, and flags reports that predate it", async () => {
+  const withDefinition = server(undefined, {
+    evaluation: { ...clone(real.queries.evaluation as object), offline: { checkpointReports: [checkpointReport({ id: "aaa111", scenarios: 26, seedsPerScenario: 10, runs: 260, decisionModel: "m", progressDefinition: "verified-world-progress.v2" })] } },
+  });
+  await openEvaluation(withDefinition, async ({ page }) => {
+    const text = page.visibleText("eval-compare");
+    assert.match(text, /Progress definition\s*verified-world-progress\.v2/);
+    assert.match(text, /no item or food gained, no new ground explored, not closer to the target, no healing, no retreat/, "the wasted-action note describes the current rules");
+    assert.doesNotMatch(text, /no inventory or hunger gain/, "the old definition is not described as current");
+    assert.match(text, /26 scenarios × 10 seeds = 260 runs \(id aaa111\)/);
+  });
+  const legacy = server(undefined, {
+    evaluation: { ...clone(real.queries.evaluation as object), offline: { checkpointReports: [checkpointReport({ id: "bbb222", scenarios: 26, seedsPerScenario: 10, runs: 260, decisionModel: "m" })] } },
+  });
+  await openEvaluation(legacy, async ({ page }) => {
+    const text = page.visibleText("eval-compare");
+    assert.match(text, /Progress definition\s*v1 · item and food gains only/);
+    assert.match(text, /not comparable with newer reports/);
+  });
+});
+
 test("live verification stays disabled until the operator confirms, and world-changing checks need a second confirmation", async () => {
   const stub = server();
   await openEvaluation(stub, async ({ page, settle }) => {

@@ -77,7 +77,7 @@ function compare(ctx) {
   const rows = [
     ["Success rate", fmtPercent(report.baseline.successRate), fmtPercent(report.candidate.successRate), `${fmtSigned(report.deltas.successRate * 100, 1, " pts")}`, deltaTone(report.deltas.successRate), report.baseline.interval ? `95% interval ${fmtPercent(report.baseline.interval.low, 0)}–${fmtPercent(report.baseline.interval.high, 0)} → ${fmtPercent(report.candidate.interval.low, 0)}–${fmtPercent(report.candidate.interval.high, 0)}` : ""],
     ["Median actions per run (efficiency)", fmtNumber(report.baseline.medianActions, 1), fmtNumber(report.candidate.medianActions, 1), fmtSigned(report.deltas.medianActions, 1), deltaTone(report.deltas.medianActions, true), "fewer is better"],
-    ["Mean wasted actions", fmtNumber(report.baseline.meanWastedActions, 2), fmtNumber(report.candidate.meanWastedActions, 2), fmtSigned(report.deltas.meanWastedActions, 2), deltaTone(report.deltas.meanWastedActions, true), "actions with no inventory or hunger gain"],
+    ["Mean wasted actions", fmtNumber(report.baseline.meanWastedActions, 2), fmtNumber(report.candidate.meanWastedActions, 2), fmtSigned(report.deltas.meanWastedActions, 2), deltaTone(report.deltas.meanWastedActions, true), "actions whose result the next observation does not show helping: no item or food gained, no new ground explored, not closer to the target, no healing, no retreat"],
     ["Unsafe actions", "—", "—", fmtSigned(report.deltas.unsafeActions, 0), deltaTone(report.deltas.unsafeActions, true), "any increase blocks promotion"],
     ["Deaths", "—", "—", fmtSigned(report.deltas.deaths, 0), deltaTone(report.deltas.deaths, true), "any increase blocks promotion"],
   ];
@@ -89,6 +89,7 @@ function compare(ctx) {
     kv([
       ["Verdict from the existing gate", report.verdict === "promotable" ? badge("PROMOTABLE", "good") : badge("NOT PROMOTABLE", "neutral"), "The label comes only from the gate's criteria; nothing here promotes anything."],
       ["Evaluation set", report.evaluationSet ? `${report.evaluationSet.scenarios} scenarios × ${report.evaluationSet.seedsPerScenario} seeds = ${report.evaluationSet.runs} runs (id ${report.evaluationSet.id})` : null],
+      ["Progress definition", report.evaluationSet ? (report.evaluationSet.progressDefinition ?? "v1 · item and food gains only (this report was written before the current definition, so its wasted-action figures are not comparable with newer reports)") : null],
       ["Held-out seeds", `${report.heldOut.seeds} seeds, disjoint from training: ${report.heldOut.disjointFromTraining ? "yes" : "no"}`],
       ["Learned contexts in candidate", orUnknown(report.learnedContexts, fmtNumber)],
       ["Runs where the candidate chose differently", report.behaviour ? `${fmtNumber(report.behaviour.runsWithDifferentChoices)} of ${fmtNumber(report.behaviour.pairedRuns)} (${fmtNumber(report.behaviour.scenariosWithDifferentChoices)} scenarios)` : null],
