@@ -187,6 +187,11 @@ export class MinecraftSession {
     return this.resources.runtime;
   }
 
+  /** The gated skill runtime of this session, for one-off commands such as orienting the bot. */
+  get skills(): SkillRuntime {
+    return this.resources.skills;
+  }
+
   get isActive(): boolean {
     return this.phase !== "shutdown";
   }
