@@ -1,6 +1,7 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { runProbe, type ProbeRequest } from "./app/probe.js";
 import { runCommandLine } from "./app/run-app.js";
 import type { ConnectRequest } from "./app/types.js";
 import { createLogger } from "./core/logger.js";
@@ -472,6 +473,7 @@ Usage:
   npm run dev -- --demo-task [gather-logs|craft-wooden-pickaxe|secure-food]
   npm run dev -- --sim food-remote-berries --seed 101
   npm run dev -- --host 127.0.0.1                      (persistent session + Control Center)
+  npm run dev -- --host 127.0.0.1 --one-shot           (connect, print the first observation, disconnect)
   npm run dev -- --task craft-wooden-pickaxe --host 127.0.0.1
   npm run dev -- --task mine-stone --resource iron_ore --count 4 --host 127.0.0.1 --open-browser
   npm run dev -- --task secure-food --target-hunger 18 --host 127.0.0.1 --one-shot
@@ -914,7 +916,9 @@ async function runLive(options: CliOptions, logger: ReturnType<typeof createLogg
         ...(startupTask ? { startupTask } : {}),
       }
     : null;
-  if (options.lookYaw !== undefined) return runLookOnly(options, logger, connect);
+  if (options.lookYaw !== undefined) return runProbeCommand(options, logger, connect, { kind: "look", yaw: options.lookYaw, pitch: options.lookPitch });
+  // One-shot, no task, no dashboard: there is nothing to run, so report what the agent sees instead of connecting and leaving silently.
+  if (connect && mode === "one-shot" && !startupTask && !serve) return runProbeCommand(options, logger, connect, { kind: "observe" });
   return runCommandLine({
     root: process.cwd(),
     ...(options.dataDirectory ? { dataDirectory: resolve(options.dataDirectory) } : {}),
@@ -935,8 +939,12 @@ async function runLive(options: CliOptions, logger: ReturnType<typeof createLogg
   });
 }
 
-/** `--look-yaw`: connect, turn the bot once, report, disconnect. A one-shot by nature, so it never keeps a session. */
-async function runLookOnly(options: CliOptions, logger: ReturnType<typeof createLogger>, connect: ConnectRequest | null): Promise<number> {
+/**
+ * The shortest live runs, for "can I reach that server and what does the agent see?": connect, do one small step, print one
+ * report, disconnect. `--look-yaw` turns the bot once; `--one-shot` with no task and no Control Center prints the first
+ * observation. Both are one-shots by nature, so they never keep a session.
+ */
+async function runProbeCommand(options: CliOptions, logger: ReturnType<typeof createLogger>, connect: ConnectRequest | null, probe: ProbeRequest): Promise<number> {
   const { createSessionFactory } = await import("./app/session-factory.js");
   const { MinecraftSession } = await import("./app/session.js");
   const { AppEventLog } = await import("./app/event-log.js");
@@ -950,25 +958,16 @@ async function runLookOnly(options: CliOptions, logger: ReturnType<typeof create
     traceDirectory: resolve(options.traceDirectory),
     memoryDirectory: resolve(options.memoryDirectory),
   });
+  const request: ConnectRequest = { ...connect, mode: "one-shot", autonomy: false };
   const session = new MinecraftSession({
-    id: "look-only",
-    request: { ...connect, mode: "one-shot", autonomy: false },
-    resources: factory({ ...connect, mode: "one-shot", autonomy: false }),
+    id: probe.kind === "look" ? "look-only" : "observe-only",
+    request,
+    resources: factory(request),
     events,
     logger,
     host: { training: null },
   });
-  try {
-    await session.start();
-    const result = await session.skills.run("minecraft.orient", { yaw: options.lookYaw, pitch: options.lookPitch });
-    console.log(JSON.stringify({ type: "skill-result", ...result }, null, 2));
-    return result.action.status === "succeeded" ? 0 : 1;
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    return 1;
-  } finally {
-    await session.stop("orientation complete");
-  }
+  return runProbe(session, probe);
 }
 
 function packageVersion(): string {
