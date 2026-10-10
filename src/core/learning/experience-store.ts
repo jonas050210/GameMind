@@ -1,5 +1,6 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { writeFileAtomic } from "../atomic-file.js";
 import { episodeSchema, type Episode } from "./episode.js";
 
 /**
@@ -90,9 +91,7 @@ export class ExperienceStore {
     const raw = await readFile(this.filePath, "utf8");
     const lines = raw.split("\n").filter((line) => line.trim().length > 0);
     const kept = lines.slice(drop).join("\n");
-    const temporary = `${this.filePath}.tmp`;
-    await writeFile(temporary, kept.length > 0 ? `${kept}\n` : "", "utf8");
-    await rename(temporary, this.filePath);
+    await writeFileAtomic(this.filePath, kept.length > 0 ? `${kept}\n` : "");
   }
 
   async load(limit?: number): Promise<LoadedEpisodes> {

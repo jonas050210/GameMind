@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { temporaryPathFor } from "../../core/atomic-file.js";
 
 /**
  * The operator's world seed, kept in `data/world-config.json`. It is entered by hand: the live session does not
@@ -61,7 +62,7 @@ export class WorldSeedStore {
     const seed = normalizeWorldSeed(raw);
     const payload = { schemaVersion: 1, seed, updatedAt: new Date().toISOString() };
     mkdirSync(dirname(this.path), { recursive: true });
-    const temporary = `${this.path}.${process.pid}.tmp`;
+    const temporary = temporaryPathFor(this.path);
     writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
     renameSync(temporary, this.path);
     this.seed = seed;

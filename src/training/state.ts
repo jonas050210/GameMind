@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
+import { writeFileAtomic } from "../core/atomic-file.js";
 
 /**
  * Persisted training state. It is written after every episode with an atomic rename, so the Control Center
@@ -173,10 +174,7 @@ export async function archiveTrainingArtifacts(paths: TrainingPaths, now: Date, 
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(join(path, ".."), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temporary, path);
+  await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export async function readTrainingState(paths: TrainingPaths): Promise<TrainingState | null> {

@@ -11,8 +11,9 @@
  *     context count, reward statistics).
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { writeFileAtomic } from "../atomic-file.js";
 import type { PolicyWeights } from "./policy-weights.js";
 import type { RewardAggregate } from "./reward.js";
 
@@ -230,11 +231,8 @@ export class PolicyCheckpointStore {
   async persist(): Promise<void> {
     if (!this.checkpointDir) return;
     const data = JSON.stringify(this.snapshot(), null, 2);
-    await mkdir(this.checkpointDir, { recursive: true });
     const filePath = path.join(this.checkpointDir, "policy-checkpoints.json");
-    const tmp = `${filePath}.tmp`;
-    await writeFile(tmp, `${data}\n`, "utf8");
-    await rename(tmp, filePath);
+    await writeFileAtomic(filePath, `${data}\n`);
   }
 
   async load(): Promise<void> {

@@ -1,6 +1,7 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { writeFileAtomic } from "../atomic-file.js";
 import type { Logger } from "pino";
 import {
   episodeContextKey,
@@ -15,7 +16,7 @@ import { ExperienceStore, InMemoryExperienceStore, type ExperienceStoreLike } fr
 import { DEFAULT_FAILURE_MEMORY_CONFIG, FailureMemory, type FailureMemoryConfig, type FailureMemorySnapshot } from "./failure-memory.js";
 import { BASELINE_POLICY_WEIGHTS, DEFAULT_POLICY_WEIGHT_CONFIG, derivePolicyWeights, parsePolicyWeights, type PolicyWeightConfig, type PolicyWeights } from "./policy-weights.js";
 import { classifyFailure, type FailureKind } from "../failure-taxonomy.js";
-import { admitsProvenance, applyEpisode, conservativeSuccessRate, emptySkillStat, foldEpisodes, parseSkillStatistics, type SkillStat, type SkillStatistics } from "./skill-statistics.js";
+import { admitsProvenance, applyEpisode, conservativeSuccessRate, emptySkillStat, foldEpisodes, parseSkillStatistics, type SkillStatistics } from "./skill-statistics.js";
 import { classifyOutcome } from "./outcome.js";
 import { episodeProvenanceOf } from "./episode.js";
 import { ExperiencePolicyAdvisor, type PolicyAdvisor } from "./policy-advisor.js";
@@ -662,10 +663,7 @@ export class ExperienceLearner {
     if (!this.stateFile) return;
     const serialized = JSON.stringify(this.state, null, 2);
     try {
-      await mkdir(path.dirname(this.stateFile), { recursive: true });
-      const temporary = `${this.stateFile}.tmp`;
-      await writeFile(temporary, `${serialized}\n`, "utf8");
-      await rename(temporary, this.stateFile);
+      await writeFileAtomic(this.stateFile, `${serialized}\n`);
     } catch (error) {
       this.logger?.warn({ err: error, stateFile: this.stateFile }, "Could not persist learning state");
     }

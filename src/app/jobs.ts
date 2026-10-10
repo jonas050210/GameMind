@@ -1,6 +1,7 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { writeFileAtomic } from "../core/atomic-file.js";
 import type { AppEventLog } from "./event-log.js";
 import { redactText, type RedactionContext } from "./redact.js";
 
@@ -298,11 +299,8 @@ export class JobRunner {
     const directory = this.options.historyDirectory;
     if (!directory) return;
     try {
-      await mkdir(directory, { recursive: true });
       const target = path.join(directory, `${view.kind}.json`);
-      const temporary = `${target}.${process.pid}.tmp`;
-      await writeFile(temporary, JSON.stringify({ ...view, outputTail: view.outputTail.slice(-60) }, null, 2), "utf8");
-      await rename(temporary, target);
+      await writeFileAtomic(target, JSON.stringify({ ...view, outputTail: view.outputTail.slice(-60) }, null, 2));
     } catch {
       // Losing history must never fail a job.
     }
