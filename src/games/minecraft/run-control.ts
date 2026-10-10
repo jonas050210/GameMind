@@ -41,6 +41,7 @@ function roadmapView(service: RoadmapService, loop: AgentLoopPerformance | null)
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import { LibraryExecutor, createMinecraftLibraryRegistry } from "./library.js";
+import { createRuntimePerformanceSampler } from "./runtime-performance.js";
 import type { Submission, TaskOrigin, TaskScheduler } from "./task-scheduler.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
@@ -118,7 +119,7 @@ export interface ControlCenterSource {
   /** Operator-entered world seed (manual; never auto-detected). */
   readonly worldSeed?: import("./world-seed.js").WorldSeedStore | null;
   /** Training and evaluation as separate processes; null when the host has no training support. */
-  readonly training?: import("../../training/manager.js").TrainingManager | null;
+  readonly training?: import("../../training/manager.js").TrainingControl | null;
 }
 
 const BAND_LABELS = ["safety", "survival", "progress"] as const;
@@ -312,49 +313,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
   commands: ControlCenterCommands;
 } {
   const { runtime, memory, learner, safety, traceSink, control } = source;
-  const logicalCpus = Math.max(1, typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length);
-  let priorSampleAt = performance.now();
-  let priorCpu = process.cpuUsage();
-  let priorEventLoop = performance.eventLoopUtilization();
-
-  function sampleRuntimePerformance(): ControlCenterRuntimePerformance {
-    const now = performance.now();
-    const cpu = process.cpuUsage();
-    const eventLoop = performance.eventLoopUtilization();
-    const eventLoopDelta = performance.eventLoopUtilization(priorEventLoop, eventLoop);
-    const sampleWindowMs = Math.max(0, now - priorSampleAt);
-    const cpuTimeMs = ((cpu.user - priorCpu.user) + (cpu.system - priorCpu.system)) / 1_000;
-    const cpuCapacityPercent = sampleWindowMs > 0
-      ? Math.max(0, Math.min(100, cpuTimeMs / (sampleWindowMs * logicalCpus) * 100))
-      : 0;
-    const processMemory = process.memoryUsage();
-    const load = os.loadavg()[0] ?? null;
-    priorSampleAt = now;
-    priorCpu = cpu;
-    priorEventLoop = eventLoop;
-    return {
-      sampledAt: new Date().toISOString(),
-      sampleWindowMs,
-      nodeVersion: process.version,
-      platform: process.platform,
-      architecture: process.arch,
-      logicalCpus,
-      process: {
-        cpuCapacityPercent,
-        eventLoopUtilizationPercent: Math.max(0, Math.min(100, eventLoopDelta.utilization * 100)),
-        rssBytes: processMemory.rss,
-        heapUsedBytes: processMemory.heapUsed,
-        heapTotalBytes: processMemory.heapTotal,
-        externalBytes: processMemory.external,
-        uptimeSeconds: process.uptime(),
-      },
-      host: {
-        totalMemoryBytes: os.totalmem(),
-        freeMemoryBytes: os.freemem(),
-        loadAverage1m: process.platform === "win32" || !Number.isFinite(load) ? null : load,
-      },
-    };
-  }
+  const sampleRuntimePerformance = createRuntimePerformanceSampler();
 
   const noBroker = (): ControlCommandResult => ({
     ok: false,
@@ -833,35 +792,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         })),
       }
         : null,
-      learning: {
-        enabled: learning?.enabled ?? false,
-        runs: learning?.runs ?? 0,
-        episodes: learning?.episodes ?? 0,
-        contexts: learning?.contexts ?? [],
-        activePolicy: learning?.activePolicy ?? null,
-        candidatePolicy: learning?.candidatePolicy ?? { id: "baseline-v1", contexts: 0 },
-        blockedTargets: learning?.failureMemory ?? [],
-        history: (learning?.history ?? []).map((entry) => ({
-          runId: entry.runId,
-          at: entry.at,
-          note: entry.note,
-          promoted: entry.promoted,
-        })),
-        lastRun: control.result?.learning
-          ? {
-              episodes: control.result.learning.episodes,
-              successes: control.result.learning.successes,
-              failures: control.result.learning.failures,
-              blockedTargets: control.result.learning.blockedTargets,
-            }
-          : null,
-        evaluation: await readEvaluationSummary(source.evaluationReportPath ?? null),
-        reward: learning?.reward ?? null,
-        classPatterns: learning?.classPatterns ?? [],
-        checkpoints: learning?.checkpoints ?? null,
-        experiments: learning?.experiments ?? [],
-        rlReadiness: learning?.rlReadiness ?? null,
-      },
+      learning: buildLearningView(learning, control.result?.learning ?? null, await readEvaluationSummary(source.evaluationReportPath ?? null)),
       capabilities: runtime.adapter.capabilities.map((capability) => ({
         name: capability.name,
         risk: capability.risk,
@@ -938,6 +869,41 @@ export function createControlCenterSource(source: ControlCenterSource): {
   }
 
   return { snapshot, commands };
+}
+
+/**
+ * The learning panel's data from a learner snapshot. A pure function of its inputs so the same view is built for a live
+ * session and for the app when no session exists: the policy store is on disk either way.
+ */
+export function buildLearningView(
+  learning: ReturnType<ExperienceLearner["snapshot"]> | null,
+  lastRun: { readonly episodes: number; readonly successes: number; readonly failures: number; readonly blockedTargets: number } | null,
+  evaluation: EvaluationSummary | null,
+): NonNullable<ControlCenterSnapshot["learning"]> {
+  return {
+    enabled: learning?.enabled ?? false,
+    runs: learning?.runs ?? 0,
+    episodes: learning?.episodes ?? 0,
+    contexts: learning?.contexts ?? [],
+    activePolicy: learning?.activePolicy ?? null,
+    candidatePolicy: learning?.candidatePolicy ?? { id: "baseline-v1", contexts: 0 },
+    blockedTargets: learning?.failureMemory ?? [],
+    history: (learning?.history ?? []).map((entry) => ({
+      runId: entry.runId,
+      at: entry.at,
+      note: entry.note,
+      promoted: entry.promoted,
+    })),
+    lastRun: lastRun
+      ? { episodes: lastRun.episodes, successes: lastRun.successes, failures: lastRun.failures, blockedTargets: lastRun.blockedTargets }
+      : null,
+    evaluation,
+    reward: learning?.reward ?? null,
+    classPatterns: learning?.classPatterns ?? [],
+    checkpoints: learning?.checkpoints ?? null,
+    experiments: learning?.experiments ?? [],
+    rlReadiness: learning?.rlReadiness ?? null,
+  };
 }
 
 /** Rebuilds a session fact for the dashboard from whatever the observation carried. */

@@ -5,7 +5,7 @@ import { DEFAULT_OBSERVATION_INTERVAL_MS, FastObservationLoop, type ObservationT
 import { RuntimeMetrics } from "./runtime-metrics.js";
 import { describeReflex } from "./reflex.js";
 import { DEFAULT_WORLD_CONFIG_PATH, WorldSeedStore } from "./world-seed.js";
-import { TrainingManager } from "../../training/manager.js";
+import { TrainingManager, type TrainingControl } from "../../training/manager.js";
 import { RoadmapService, defaultRoadmapOptions } from "../../roadmap/service.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { WorldState } from "../../core/types.js";
@@ -173,7 +173,7 @@ export interface MinecraftRunHostOptions {
    * Training manager to use. Left unset the host creates one for `trainingDirectory` and disposes it on close;
    * a supervisor that shares one manager across sessions passes it (or null) and keeps ownership.
    */
-  readonly training?: TrainingManager | null;
+  readonly training?: TrainingControl | null;
   /** How long close() waits for the running task to stop before closing anyway. Defaults to 10 s. */
   readonly drainTimeoutMs?: number;
   /** The CLI owns runner construction (it knows the clock); the host only asks for another one. */

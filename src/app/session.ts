@@ -5,7 +5,7 @@ import type { SkillRuntime } from "../core/skill-runtime.js";
 import type { SafetyBroker } from "../core/safety-broker.js";
 import type { RingBufferTraceSink } from "../core/trace.js";
 import type { ExperienceLearner } from "../core/learning/learner.js";
-import type { TrainingManager } from "../training/manager.js";
+import type { TrainingControl } from "../training/manager.js";
 import { attachMinecraftRunHost, type MinecraftRunHost, type MinecraftRunHostOptions } from "../games/minecraft/attach-control-center.js";
 import type { MinecraftObservation } from "../games/minecraft/observation.js";
 import type { WorldMemory } from "../games/minecraft/world-memory.js";
@@ -68,7 +68,7 @@ export interface SessionHostSettings {
   readonly worldConfigPath?: string;
   readonly companionMemoryDirectory?: string | null;
   readonly evaluationReportPath?: string | null;
-  readonly training?: TrainingManager | null;
+  readonly training?: TrainingControl | null;
 }
 
 export interface SessionOptions {

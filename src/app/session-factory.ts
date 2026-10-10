@@ -18,7 +18,10 @@ import type { ConnectRequest, SessionTarget } from "./types.js";
 export interface SessionFactoryDeps {
   readonly logger: Logger;
   readonly events: AppEventLog;
+  /** The store live sessions record into and learn from. */
   readonly learner: ExperienceLearner | null;
+  /** Simulated sessions record into their own store, so offline demos can never become evidence for a live policy. */
+  readonly simulatedLearner?: ExperienceLearner | null;
   readonly traceDirectory: string;
   readonly memoryDirectory: string;
   readonly env?: NodeJS.ProcessEnv;
@@ -144,7 +147,7 @@ export function createSimulatedResources(request: ConnectRequest, deps: SessionF
     skills,
     safety,
     ring,
-    learner: deps.learner,
+    learner: deps.simulatedLearner ?? null,
     target: null,
     offlineNote: "Simulated world: this is the offline evaluation adapter, not a Minecraft server.",
     evaluationScenarioIds: evaluationScenarios().map((candidate) => candidate.id),
@@ -152,7 +155,7 @@ export function createSimulatedResources(request: ConnectRequest, deps: SessionF
     createRunner: (extra) =>
       new MinecraftTaskRunner(runtime, skills, decisionModel, deps.logger, {
         clock: () => adapter.simulatedNowMs,
-        ...(deps.learner ? { learner: deps.learner } : {}),
+        ...(deps.simulatedLearner ? { learner: deps.simulatedLearner } : {}),
         worldKey,
         allowCombat: request.allowCombat === true,
         provenance: "simulator-demo",

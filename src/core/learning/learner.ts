@@ -13,8 +13,11 @@ import {
 } from "./episode.js";
 import { ExperienceStore, InMemoryExperienceStore, type ExperienceStoreLike } from "./experience-store.js";
 import { DEFAULT_FAILURE_MEMORY_CONFIG, FailureMemory, type FailureMemoryConfig, type FailureMemorySnapshot } from "./failure-memory.js";
-import { BASELINE_POLICY_WEIGHTS, derivePolicyWeights, parsePolicyWeights, type PolicyWeightConfig, type PolicyWeights } from "./policy-weights.js";
-import { foldEpisodes, parseSkillStatistics, type SkillStatistics } from "./skill-statistics.js";
+import { BASELINE_POLICY_WEIGHTS, DEFAULT_POLICY_WEIGHT_CONFIG, derivePolicyWeights, parsePolicyWeights, type PolicyWeightConfig, type PolicyWeights } from "./policy-weights.js";
+import { classifyFailure, type FailureKind } from "../failure-taxonomy.js";
+import { admitsProvenance, applyEpisode, conservativeSuccessRate, emptySkillStat, foldEpisodes, parseSkillStatistics, type SkillStat, type SkillStatistics } from "./skill-statistics.js";
+import { classifyOutcome } from "./outcome.js";
+import { episodeProvenanceOf } from "./episode.js";
 import { ExperiencePolicyAdvisor, type PolicyAdvisor } from "./policy-advisor.js";
 import { computeReward, DEFAULT_REWARD_CONFIG, type RewardBreakdown, type RewardConfig, type RewardInput } from "./reward.js";
 import { ClassFailureMemory, deriveClassPatternKey, type ClassFailureMemoryConfig } from "./class-failure-memory.js";
@@ -27,7 +30,13 @@ import { assessRLReadiness } from "./rl-readiness.js";
  * table only becomes the *active* policy once `PolicyGate` has accepted it against the baseline.
  */
 
-export const LEARNING_STATE_SCHEMA_VERSION = 1 as const;
+/**
+ * Version 2 derives statistics from verified, attributable evidence only (see `classifyOutcome`) and records which
+ * episode provenances they were folded from. A version 1 state is not trusted for its numbers: they were computed
+ * under the old rule. It is migrated by recomputing from the append-only episode log, which is never modified, and
+ * the promoted policy and run history it carried are kept.
+ */
+export const LEARNING_STATE_SCHEMA_VERSION = 2 as const;
 
 export interface LearningRunContext {
   readonly runId: string;
@@ -59,6 +68,8 @@ export interface LearningState {
   readonly failureMemory: FailureMemorySnapshot;
   readonly candidateWeights: PolicyWeights;
   readonly activeWeights: PolicyWeights | null;
+  /** Provenances the statistics were folded from; null means every episode. A mismatch with the learner's rebuilds them. */
+  readonly evidenceProvenance: readonly EpisodeProvenance[] | null;
   readonly history: readonly {
     readonly runId: string;
     readonly at: string;
@@ -77,6 +88,71 @@ export interface ExperienceLearnerOptions {
   readonly useCandidateWeights?: boolean;
   readonly logger?: Logger | null;
   readonly enabled?: boolean;
+  /**
+   * Which episodes may shape the weights and the failure memory. Unset means all of them (offline tools and tests).
+   * A live agent passes `["live"]`: experience recorded by the simulator, by training or by demos stays in the log
+   * and is shown, but it is not evidence about the real game.
+   */
+  readonly evidenceProvenance?: readonly EpisodeProvenance[];
+}
+
+export interface LearnerContextDetail {
+  readonly key: string;
+  readonly skillId: string;
+  readonly goalClass: string;
+  readonly distanceBand: string;
+  readonly threat: string;
+  readonly vitality: string;
+  readonly attempts: number;
+  readonly successes: number;
+  readonly successRate: number | null;
+  readonly conservativeSuccessRate: number | null;
+  readonly weight: number | null;
+  readonly weightEvidence: number | null;
+  readonly weightStatus: "learned" | "neutral" | "insufficient-evidence";
+  readonly minSamples: number;
+  readonly contradictedConfirmations: number;
+  readonly safetyDenials: number;
+  readonly excluded: number;
+  readonly topFailures: readonly { readonly code: string; readonly count: number }[];
+  readonly meanDurationMs: number;
+  readonly progressRate: number | null;
+}
+
+export interface LearnerFailureDetail {
+  readonly code: string;
+  readonly count: number;
+  readonly kind: FailureKind;
+  readonly label: string;
+  readonly hint: string | null;
+  readonly retryable: boolean;
+}
+
+export interface LearnerDetail {
+  readonly enabled: boolean;
+  readonly evidenceProvenance: readonly EpisodeProvenance[] | null;
+  readonly totals: {
+    readonly runs: number;
+    readonly episodes: number;
+    readonly byProvenance: Record<string, { episodes: number; runs: number; successes: number; failures: number; excluded: number; usedAsEvidence: boolean }>;
+  };
+  readonly policy: {
+    readonly activeId: string | null;
+    readonly activeContexts: number;
+    readonly candidateId: string;
+    readonly candidateSource: "baseline" | "experience";
+    readonly candidateContexts: number;
+    readonly minSamples: number;
+    readonly weightRange: readonly [number, number];
+    /** Which weights steer decisions right now: the promoted policy, the candidate (opt-in), or none (baseline). */
+    readonly influencesDecisions: "active" | "candidate" | "none";
+  };
+  readonly contexts: readonly LearnerContextDetail[];
+  readonly failures: readonly LearnerFailureDetail[];
+  readonly excluded: { readonly total: number; readonly reasons: Readonly<Record<string, number>> };
+  readonly contradictions: { readonly total: number };
+  readonly recentRuns: readonly { readonly runId: string; readonly at: string; readonly taskId: string; readonly provenance: EpisodeProvenance; readonly episodes: number; readonly successes: number; readonly failures: number; readonly excluded: number; readonly lastFailureCode: string | null; readonly worldKey: string | null }[];
+  readonly history: LearningState["history"];
 }
 
 export interface LearningRunReport {
@@ -103,6 +179,7 @@ export function emptyLearningState(): LearningState {
     failureMemory: { version: "gamemind-failure-memory-v1", config: DEFAULT_FAILURE_MEMORY_CONFIG, entries: [] },
     candidateWeights: BASELINE_POLICY_WEIGHTS,
     activeWeights: null,
+    evidenceProvenance: null,
     history: [],
   };
 }
@@ -121,6 +198,7 @@ export class ExperienceLearner {
   private readonly classFailure: ClassFailureMemory;
   private readonly checkpointStore: PolicyCheckpointStore;
   private readonly experimentStore: ExperimentStore;
+  private readonly evidenceProvenance: readonly EpisodeProvenance[] | null;
   private state: LearningState = emptyLearningState();
   private runContext: LearningRunContext | null = null;
   private runEpisodes: Episode[] = [];
@@ -147,6 +225,8 @@ export class ExperienceLearner {
       this.stateFile ? { directory: path.dirname(this.stateFile) } : {},
     );
     this.experimentStore = new ExperimentStore();
+    this.evidenceProvenance = options.evidenceProvenance ? [...options.evidenceProvenance].sort() : null;
+    this.state = { ...emptyLearningState(), evidenceProvenance: this.evidenceProvenance };
   }
 
   static forDirectory(
@@ -206,29 +286,62 @@ export class ExperienceLearner {
       parsed = null;
     }
     const restored = parseLearningState(parsed);
-    if (restored) {
+    if (restored && sameFilter(restored.evidenceProvenance, this.evidenceProvenance)) {
       this.state = restored;
       this.failureMemory.restore(restored.failureMemory);
       return this.state;
     }
-    this.state = await this.rebuildFromStore(emptyLearningState());
+    // Either there is no usable state, it was written under the old evidence rule (version 1), or it was folded
+    // from a different set of provenances than this learner trusts. All three are recomputed from the episode log,
+    // which is the source of truth and is never rewritten. What the old state held that is not derived from
+    // episodes (the promoted policy and the run history) is carried over, and the old file is kept as a backup.
+    const legacy = parsed && typeof parsed === "object" ? legacyCarryOver(parsed as Record<string, unknown>) : null;
+    const base: LearningState = {
+      ...emptyLearningState(),
+      evidenceProvenance: this.evidenceProvenance,
+      ...(restored ? { activeWeights: restored.activeWeights, history: restored.history } : {}),
+      ...(legacy ? { activeWeights: legacy.activeWeights, history: legacy.history } : {}),
+    };
+    if (parsed && this.stateFile) await this.backupState(parsed, restored ? "evidence-filter" : `v${String((parsed as { schemaVersion?: unknown }).schemaVersion ?? "unknown")}`);
+    this.state = await this.rebuildFromStore(base);
+    if (parsed) await this.persist();
     return this.state;
+  }
+
+  /** Keeps the state file that is about to be superseded, once per kind, so a migration can always be inspected or undone. */
+  private async backupState(previous: unknown, label: string): Promise<void> {
+    if (!this.stateFile) return;
+    const target = `${this.stateFile}.${label}.bak`;
+    try {
+      await readFile(target, "utf8");
+      return;
+    } catch {
+      // not backed up yet
+    }
+    try {
+      await writeFile(target, `${JSON.stringify(previous, null, 2)}\n`, "utf8");
+    } catch (error) {
+      this.logger?.warn({ err: error, target }, "Could not back up the previous learning state");
+    }
   }
 
   /** Self-healing path: recompute the whole learner from the append-only episode log. */
   private async rebuildFromStore(base: LearningState): Promise<LearningState> {
-    const { episodes } = await this.store.load();
-    if (episodes.length === 0) return base;
+    const { episodes: all } = await this.store.load();
+    const episodes = all.filter((episode) => admitsProvenance(episode, this.evidenceProvenance ?? undefined));
+    if (all.length === 0) return base;
     const stats = foldEpisodes(episodes);
     const memory = new FailureMemory(this.failureMemory.config);
     const runIds = [...new Set(episodes.map((episode) => episode.runId))];
     runIds.forEach((runId, index) => {
       for (const episode of episodes.filter((candidate) => candidate.runId === runId)) {
-        if (episode.outcome.status === "succeeded" && episode.outcome.progress) {
+        const verdict = classifyOutcome(episode.outcome).verdict;
+        if (verdict === "excluded") continue;
+        if (verdict === "success" && episode.outcome.progress) {
           memory.recordSuccess({ worldKey: episode.worldKey, targetKey: episode.targetKey, runIndex: index });
           continue;
         }
-        if (episode.outcome.status === "succeeded") continue;
+        if (verdict === "success") continue;
         memory.recordFailure({
           worldKey: episode.worldKey,
           targetKey: episode.targetKey,
@@ -238,6 +351,7 @@ export class ExperienceLearner {
         });
       }
     });
+    this.failureMemory.restore(memory.snapshot(runIds.length));
     const weights = derivePolicyWeights(stats, {
       config: this.weightConfig,
       episodes: episodes.length,
@@ -245,12 +359,13 @@ export class ExperienceLearner {
     });
     return {
       ...base,
-      runs: runIds.length,
-      episodes: episodes.length,
-      lastRunId: runIds.at(-1) ?? null,
+      runs: all.length === 0 ? 0 : [...new Set(all.map((episode) => episode.runId))].length,
+      episodes: all.length,
+      lastRunId: all.at(-1)?.runId ?? null,
       stats,
       failureMemory: memory.snapshot(runIds.length),
       candidateWeights: weights,
+      evidenceProvenance: this.evidenceProvenance,
     };
   }
 
@@ -384,55 +499,21 @@ export class ExperienceLearner {
     const stats = { ...state.stats };
     let successes = 0;
     let failures = 0;
+    let excludedCount = 0;
     for (const episode of episodes) {
+      const verdict = classifyOutcome(episode.outcome).verdict;
+      if (verdict === "success") successes += 1;
+      else if (verdict === "failure") failures += 1;
+      else excludedCount += 1;
+      // Episodes outside the trusted provenances are logged (above) but are not evidence for this learner.
+      if (!admitsProvenance(episode, this.evidenceProvenance ?? undefined)) continue;
       const key = episodeContextKey(episode.features);
-      const previous = stats[key] ?? {
-        attempts: 0,
-        successes: 0,
-        progressCount: 0,
-        contradictedConfirmations: 0,
-        safetyDenials: 0,
-        failureCodes: {},
-        ewmaDurationMs: 0,
-        ewmaGain: 0,
-        totalDistance: 0,
-        distanceSamples: 0,
-        lastSequence: 0,
-      };
-      const success = episode.outcome.status === "succeeded" && episode.outcome.confirmed;
-      if (success) successes += 1;
-      else failures += 1;
-      const failureCodes = { ...previous.failureCodes };
-      if (!success && episode.outcome.failureCode) {
-        failureCodes[episode.outcome.failureCode] =
-          (failureCodes[episode.outcome.failureCode] ?? 0) + 1;
-      }
-      stats[key] = {
-        attempts: previous.attempts + 1,
-        successes: previous.successes + (success ? 1 : 0),
-        progressCount: previous.progressCount + (episode.outcome.progress ? 1 : 0),
-        contradictedConfirmations:
-          previous.contradictedConfirmations + (episode.outcome.verified === false ? 1 : 0),
-        safetyDenials: previous.safetyDenials + (episode.outcome.safetyDenied ? 1 : 0),
-        failureCodes,
-        ewmaDurationMs:
-          previous.attempts === 0
-            ? episode.outcome.durationMs
-            : 0.25 * episode.outcome.durationMs + 0.75 * previous.ewmaDurationMs,
-        ewmaGain:
-          previous.attempts === 0
-            ? Math.max(0, episode.outcome.itemsGained) + Math.max(0, episode.outcome.foodDelta)
-            : 0.25 *
-                (Math.max(0, episode.outcome.itemsGained) + Math.max(0, episode.outcome.foodDelta)) +
-              0.75 * previous.ewmaGain,
-        totalDistance: previous.totalDistance + episode.features.distance,
-        distanceSamples: previous.distanceSamples + 1,
-        lastSequence: Math.max(previous.lastSequence, episode.sequence),
-      };
-      // Failure memory: only world-anchored targets are remembered, and a later success at the same
-      // target weakens the lesson instead of leaving a permanent ban.
-      if (episode.targetKey && episode.worldKey) {
-        if (episode.outcome.status !== "succeeded") {
+      stats[key] = applyEpisode(stats[key] ?? emptySkillStat(), episode);
+      // Failure memory: only world-anchored targets are remembered, only for outcomes that say something about the
+      // target (a dropped connection or a safety refusal does not make a tree a bad tree), and a later success at the
+      // same target weakens the lesson instead of leaving a permanent ban.
+      if (verdict !== "excluded" && episode.targetKey && episode.worldKey) {
+        if (verdict === "failure") {
           this.failureMemory.recordFailure({
             worldKey: episode.worldKey,
             targetKey: episode.targetKey,
@@ -468,6 +549,7 @@ export class ExperienceLearner {
       failureMemory: this.failureMemory.snapshot(runs),
       candidateWeights,
       activeWeights: state.activeWeights,
+      evidenceProvenance: this.evidenceProvenance,
       history: [
         {
           runId,
@@ -476,7 +558,7 @@ export class ExperienceLearner {
           promoted: report.promoted ?? false,
           note:
             report.note ??
-            `${successes} successful / ${failures} failed actions${pruned > 0 ? `, ${pruned} stale failure memories pruned` : ""}`,
+            `${successes} verified successful / ${failures} failed actions${excludedCount > 0 ? `, ${excludedCount} excluded (not evidence about the choice)` : ""}${pruned > 0 ? `, ${pruned} stale failure memories pruned` : ""}`,
         },
         ...state.history,
       ].slice(0, HISTORY_LIMIT),
@@ -718,6 +800,110 @@ export class ExperienceLearner {
     };
   }
 
+  /**
+   * Everything the Learning panel shows that `snapshot()` does not carry: per-context evidence with the weight it
+   * produced, the failure codes behind the numbers, how much of the log each provenance contributed, which outcomes
+   * were excluded from the evidence and why, and the most recent runs. Computed from the state and the episode log;
+   * nothing here is stored, so it cannot drift from them.
+   */
+  async detail(): Promise<LearnerDetail> {
+    await this.load();
+    const { episodes } = await this.store.load();
+    const config = { ...DEFAULT_POLICY_WEIGHT_CONFIG, ...this.weightConfig };
+    const weights = this.state.candidateWeights;
+    const byProvenance: LearnerDetail["totals"]["byProvenance"] = {};
+    const runs = new Map<string, { runId: string; at: string; taskId: string; provenance: EpisodeProvenance; episodes: number; successes: number; failures: number; excluded: number; lastFailureCode: string | null; worldKey: string | null }>();
+    for (const episode of episodes) {
+      const provenance = episodeProvenanceOf(episode).provenance;
+      const verdict = classifyOutcome(episode.outcome);
+      const bucket = (byProvenance[provenance] ??= { episodes: 0, runs: 0, successes: 0, failures: 0, excluded: 0, usedAsEvidence: admitsProvenance(episode, this.evidenceProvenance ?? undefined) });
+      bucket.episodes += 1;
+      if (verdict.verdict === "success") bucket.successes += 1;
+      else if (verdict.verdict === "failure") bucket.failures += 1;
+      else bucket.excluded += 1;
+      const run = runs.get(episode.runId) ?? { runId: episode.runId, at: episode.timestamp, taskId: episode.taskId, provenance, episodes: 0, successes: 0, failures: 0, excluded: 0, lastFailureCode: null, worldKey: episode.worldKey };
+      run.episodes += 1;
+      run.at = episode.timestamp;
+      if (verdict.verdict === "success") run.successes += 1;
+      else if (verdict.verdict === "failure") run.failures += 1;
+      else run.excluded += 1;
+      if (verdict.verdict !== "success") run.lastFailureCode = verdict.reason ?? episode.outcome.failureCode;
+      runs.set(episode.runId, run);
+    }
+    for (const run of runs.values()) {
+      const bucket = byProvenance[run.provenance];
+      if (bucket) bucket.runs += 1;
+    }
+    const contexts: LearnerContextDetail[] = Object.entries(this.state.stats)
+      .map(([key, stat]): LearnerContextDetail => {
+        const [skillId = "", goalClass = "", distanceBand = "", threat = "", vitality = ""] = key.split("|");
+        const entry = weights.entries[key] ?? null;
+        const successRate = stat.attempts === 0 ? null : Math.round((stat.successes / stat.attempts) * 1_000) / 1_000;
+        const topFailures = Object.entries(stat.failureCodes).sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0])).slice(0, 4).map(([code, count]) => ({ code, count }));
+        return {
+          key,
+          skillId,
+          goalClass,
+          distanceBand,
+          threat,
+          vitality,
+          attempts: stat.attempts,
+          successes: stat.successes,
+          successRate,
+          conservativeSuccessRate: stat.attempts === 0 ? null : Math.round(conservativeSuccessRate(stat) * 1_000) / 1_000,
+          weight: entry ? entry.weight : null,
+          weightEvidence: entry ? entry.evidence : null,
+          weightStatus: entry ? "learned" : stat.attempts < config.minSamples ? "insufficient-evidence" : "neutral",
+          minSamples: config.minSamples,
+          contradictedConfirmations: stat.contradictedConfirmations,
+          safetyDenials: stat.safetyDenials,
+          excluded: stat.excluded ?? 0,
+          topFailures,
+          meanDurationMs: Math.round(stat.ewmaDurationMs),
+          progressRate: stat.attempts === 0 ? null : Math.round((stat.progressCount / stat.attempts) * 1_000) / 1_000,
+        };
+      })
+      .sort((left, right) => right.attempts - left.attempts || left.key.localeCompare(right.key));
+    const failureTotals = new Map<string, number>();
+    const excludedReasons: Record<string, number> = {};
+    let excludedTotal = 0;
+    let contradicted = 0;
+    for (const stat of Object.values(this.state.stats)) {
+      for (const [code, count] of Object.entries(stat.failureCodes)) failureTotals.set(code, (failureTotals.get(code) ?? 0) + count);
+      for (const [reason, count] of Object.entries(stat.excludedReasons ?? {})) excludedReasons[reason] = (excludedReasons[reason] ?? 0) + count;
+      excludedTotal += stat.excluded ?? 0;
+      contradicted += stat.contradictedConfirmations;
+    }
+    const failures: LearnerFailureDetail[] = [...failureTotals.entries()]
+      .map(([code, count]) => {
+        const classified = classifyFailure(code);
+        return { code, count, kind: classified.kind, label: classified.label, hint: classified.hint, retryable: classified.retryable };
+      })
+      .sort((left, right) => right.count - left.count || left.code.localeCompare(right.code))
+      .slice(0, 20);
+    return {
+      enabled: this.enabled,
+      evidenceProvenance: this.evidenceProvenance ? [...this.evidenceProvenance] : null,
+      totals: { runs: this.state.runs, episodes: this.state.episodes, byProvenance },
+      policy: {
+        activeId: this.state.activeWeights?.id ?? null,
+        activeContexts: this.state.activeWeights ? Object.keys(this.state.activeWeights.entries).length : 0,
+        candidateId: weights.id,
+        candidateSource: weights.source,
+        candidateContexts: Object.keys(weights.entries).length,
+        minSamples: config.minSamples,
+        weightRange: [config.minWeight, config.maxWeight],
+        influencesDecisions: this.useCandidateWeights ? "candidate" : this.state.activeWeights ? "active" : "none",
+      },
+      contexts,
+      failures,
+      excluded: { total: excludedTotal, reasons: excludedReasons },
+      contradictions: { total: contradicted },
+      recentRuns: [...runs.values()].slice(-20).reverse(),
+      history: this.state.history,
+    };
+  }
+
   private emptyReport(runId: string, episodes: number, total: number): LearningRunReport {
     return {
       runId,
@@ -733,6 +919,20 @@ export class ExperienceLearner {
       contexts: 0,
     };
   }
+}
+
+function sameFilter(left: readonly string[] | null, right: readonly string[] | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.length === right.length && left.every((entry, index) => entry === right[index]);
+}
+
+/** The parts of an older state that are not derived from episodes and must survive a recomputation. */
+function legacyCarryOver(raw: Record<string, unknown>): { activeWeights: PolicyWeights | null; history: LearningState["history"] } | null {
+  const activeWeights = parsePolicyWeights(raw.activeWeights);
+  const history = Array.isArray(raw.history)
+    ? raw.history.filter((entry): entry is LearningState["history"][number] => typeof entry === "object" && entry !== null && typeof (entry as { runId?: unknown }).runId === "string").slice(0, HISTORY_LIMIT)
+    : [];
+  return { activeWeights: activeWeights && Object.keys(activeWeights.entries).length > 0 ? activeWeights : null, history };
 }
 
 function parseLearningState(value: unknown): LearningState | null {
@@ -756,6 +956,7 @@ function parseLearningState(value: unknown): LearningState | null {
     failureMemory,
     candidateWeights: weights,
     activeWeights: activeWeights && Object.keys(activeWeights.entries).length > 0 ? activeWeights : null,
+    evidenceProvenance: Array.isArray(raw.evidenceProvenance) ? ([...raw.evidenceProvenance].sort() as EpisodeProvenance[]) : null,
     history: Array.isArray(raw.history)
       ? raw.history
           .filter(

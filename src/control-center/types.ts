@@ -7,6 +7,9 @@
  */
 
 import type { SchedulerSnapshot } from "../games/minecraft/task-scheduler.js";
+import type { AppEvent } from "../app/event-log.js";
+import type { JobView } from "../app/jobs.js";
+import type { SessionMode, SessionView } from "../app/types.js";
 
 export interface ControlCenterConnection {
   readonly adapterStatus: string;
@@ -628,6 +631,42 @@ export interface ControlCenterSnapshot {
   readonly scheduler?: SchedulerSnapshot | null;
   /** Whether the agent starts its own tasks when idle. Null when the host cannot say. */
   readonly autonomyEnabled?: boolean | null;
+  /** The running app: version, bind address, platform, data folders. Absent when a run is served without the app. */
+  readonly app?: ControlCenterAppView | null;
+  /** The session lifecycle, including "no session yet". Absent when a run is served without the app. */
+  readonly session?: SessionView | null;
+  /** The newest entries of the searchable event log. */
+  readonly events?: ControlCenterEventsView | null;
+  /** Offline tests, offline evaluation and live verification started from the Control Center. */
+  readonly jobs?: ControlCenterJobsView | null;
+}
+
+export interface ControlCenterAppView {
+  readonly name: "GameMind";
+  readonly version: string;
+  readonly pid: number;
+  readonly startedAt: string;
+  readonly uptimeMs: number;
+  readonly bind: { readonly host: string; readonly port: number; readonly localOnly: boolean; readonly url: string };
+  readonly platform: { readonly os: string; readonly wsl: boolean; readonly wslVersion: number | null; readonly distro: string | null; readonly node: string };
+  /** Folders shown relative to the project; absolute paths never reach the page. */
+  readonly directories: { readonly data: string; readonly learning: string | null; readonly worldMemory: string; readonly traces: string; readonly training: string };
+  readonly defaultMode: SessionMode;
+  readonly learning: { readonly enabled: boolean; readonly evidence: readonly string[] | null };
+  /** URLs this process has asked a browser to open; proves a state change did not open another tab. */
+  readonly browserOpened: readonly string[];
+  readonly shuttingDown: boolean;
+}
+
+export interface ControlCenterEventsView {
+  readonly latestSeq: number;
+  readonly total: number;
+  readonly items: readonly AppEvent[];
+}
+
+export interface ControlCenterJobsView {
+  readonly busy: boolean;
+  readonly items: readonly JobView[];
 }
 
 /** Folded view of the offline evaluation report, read from disk by the host. */

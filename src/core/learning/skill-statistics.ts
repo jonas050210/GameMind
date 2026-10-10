@@ -1,4 +1,5 @@
-import { episodeContextKey, type Episode, type EpisodeFeatures } from "./episode.js";
+import { episodeContextKey, episodeProvenanceOf, type Episode, type EpisodeFeatures, type EpisodeProvenance } from "./episode.js";
+import { classifyOutcome } from "./outcome.js";
 
 /**
  * Incremental statistics over experience, keyed by a coarse context key. Everything here is a pure
@@ -9,8 +10,12 @@ import { episodeContextKey, type Episode, type EpisodeFeatures } from "./episode
 export const SKILL_STAT_VERSION = "gamemind-skill-stats-v1" as const;
 
 export interface SkillStat {
+  /** Evidence-bearing attempts only: successes plus failures that say something about the choice. */
   attempts: number;
   successes: number;
+  /** Outcomes that were not about the choice (session lost, safety refusal, game mode, interruption). Never part of a rate. */
+  excluded?: number;
+  excludedReasons?: Record<string, number>;
   progressCount: number;
   contradictedConfirmations: number;
   safetyDenials: number;
@@ -53,16 +58,35 @@ export function episodeGain(episode: Episode): number {
   );
 }
 
-function updateStat(stat: SkillStat, episode: Episode): SkillStat {
+/**
+ * Folds one episode into a context's statistics. This is the only place the evidence rule is applied: the
+ * incremental learner, the rebuild from the episode log and the tests all call it, so they cannot drift apart.
+ */
+export function applyEpisode(stat: SkillStat, episode: Episode): SkillStat {
   const { outcome, features } = episode;
-  const success = outcome.status === "succeeded" && outcome.confirmed;
+  const verdict = classifyOutcome(outcome);
+  if (verdict.verdict === "excluded") {
+    const reasons = { ...(stat.excludedReasons ?? {}) };
+    const label = verdict.reason ?? "excluded";
+    reasons[label] = (reasons[label] ?? 0) + 1;
+    return {
+      ...stat,
+      excluded: (stat.excluded ?? 0) + 1,
+      excludedReasons: reasons,
+      safetyDenials: stat.safetyDenials + (outcome.safetyDenied ? 1 : 0),
+      lastSequence: Math.max(stat.lastSequence, episode.sequence),
+    };
+  }
+  const success = verdict.verdict === "success";
   const gain = episodeGain(episode);
   const failureCodes = { ...stat.failureCodes };
-  if (!success && outcome.failureCode) {
-    failureCodes[outcome.failureCode] = (failureCodes[outcome.failureCode] ?? 0) + 1;
+  if (!success) {
+    const code = verdict.reason ?? outcome.failureCode;
+    if (code) failureCodes[code] = (failureCodes[code] ?? 0) + 1;
   }
   const attempts = stat.attempts + 1;
   return {
+    ...stat,
     attempts,
     successes: stat.successes + (success ? 1 : 0),
     progressCount: stat.progressCount + (outcome.progress ? 1 : 0),
@@ -81,18 +105,37 @@ function updateStat(stat: SkillStat, episode: Episode): SkillStat {
   };
 }
 
-export function foldEpisodes(episodes: readonly Episode[]): SkillStatistics {
+export { emptyStat as emptySkillStat };
+
+export interface FoldOptions {
+  /**
+   * Only episodes with one of these provenances contribute. Left unset every episode does. A live policy folds `live`
+   * only, so offline simulator runs (some of them deliberately unsolvable) cannot shape what a live agent prefers.
+   */
+  readonly provenance?: readonly EpisodeProvenance[] | undefined;
+}
+
+/** True when the episode's provenance is admitted by the filter (no filter admits everything). */
+export function admitsProvenance(episode: Pick<Episode, "provenance" | "runId" | "worldKey" | "sessionId">, filter: readonly EpisodeProvenance[] | undefined): boolean {
+  if (!filter) return true;
+  return filter.includes(episodeProvenanceOf(episode).provenance);
+}
+
+export function foldEpisodes(episodes: readonly Episode[], options: FoldOptions = {}): SkillStatistics {
   const stats: Record<string, SkillStat> = {};
   for (const episode of episodes) {
+    if (!admitsProvenance(episode, options.provenance)) continue;
     const key = episodeContextKey(episode.features);
-    stats[key] = updateStat(stats[key] ?? emptyStat(), episode);
+    stats[key] = applyEpisode(stats[key] ?? emptyStat(), episode);
   }
   return stats;
 }
 
 export interface StatSummary {
   readonly key: string;
+  /** Evidence-bearing attempts (see `classifyOutcome`); excluded outcomes are counted separately. */
   readonly attempts: number;
+  readonly excluded: number;
   readonly successes: number;
   readonly successRate: number;
   readonly progressRate: number;
@@ -113,6 +156,7 @@ export function summariseStats(stats: SkillStatistics): StatSummary[] {
       return {
         key,
         attempts: stat.attempts,
+        excluded: stat.excluded ?? 0,
         successes: stat.successes,
         successRate: smoothedSuccessRate(stat),
         progressRate: stat.attempts === 0 ? 0 : stat.progressCount / stat.attempts,
@@ -167,6 +211,8 @@ export function parseSkillStatistics(value: unknown): SkillStatistics {
       progressCount: numberOr(stat.progressCount, 0),
       contradictedConfirmations: numberOr(stat.contradictedConfirmations, 0),
       safetyDenials: numberOr(stat.safetyDenials, 0),
+      ...(typeof stat.excluded === "number" ? { excluded: stat.excluded } : {}),
+      ...(stat.excludedReasons ? { excludedReasons: toStringCounts(stat.excludedReasons) } : {}),
       failureCodes: toStringCounts(stat.failureCodes),
       ewmaDurationMs: numberOr(stat.ewmaDurationMs, 0),
       ewmaGain: numberOr(stat.ewmaGain, 0),

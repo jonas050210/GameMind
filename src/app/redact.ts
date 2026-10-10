@@ -28,7 +28,7 @@ export function defaultRedactionContext(root: string, secrets: readonly string[]
 
 const TOKEN_PATTERNS: readonly RegExp[] = [
   /\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-  /\b((?:access|refresh|id|auth|session|api)[_-]?token|x-gamemind-token|authorization|password|passwd|secret|client[_-]?secret)(["']?\s*[:=]\s*["']?)[^\s"',;]{4,}/gi,
+  /\b((?:(?:access|refresh|id|auth|session|api)[_-]?)?token|x-gamemind-token|authorization|password|passwd|secret|client[_-]?secret)(["']?\s*[:=]\s*["']?)[^\s"',;]{4,}/gi,
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g,
   /\b[A-Fa-f0-9]{40,}\b/g,
 ];
@@ -90,5 +90,22 @@ export function redactDeep<T>(value: T, context: RedactionContext, depth = 0): T
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
     output[key] = /token|password|secret|authorization/i.test(key) ? "[redacted]" : redactDeep(item, context, depth + 1);
   }
+  return output as T;
+}
+
+/**
+ * Redacts every string value inside a JSON-like structure, leaving keys and non-strings alone. This is the last gate
+ * before a snapshot or a query result leaves the process: a path or a token that slipped into an error message, a report
+ * location or a job's output is rewritten here even if the code that produced it did not think about it. Strings with
+ * no path separator and no credential-looking text are returned untouched without running any pattern.
+ */
+export function redactStrings<T>(value: T, context: RedactionContext, depth = 0): T {
+  if (typeof value === "string") {
+    return (/[\\/]|token|bearer|secret|password/i.test(value) ? redactText(value, context) : value) as unknown as T;
+  }
+  if (depth > 12 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => redactStrings(item, context, depth + 1)) as unknown as T;
+  const output: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) output[key] = redactStrings(item, context, depth + 1);
   return output as T;
 }

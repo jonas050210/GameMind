@@ -16,7 +16,7 @@ import type { SkillRuntime } from "../../core/skill-runtime.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { SafetyBroker } from "../../core/safety-broker.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
-import type { TrainingManager } from "../../training/manager.js";
+import type { TrainingControl } from "../../training/manager.js";
 import type { WorldSeedStore } from "./world-seed.js";
 import type { ControlCenterCommands } from "../../control-center/types.js";
 import type { MinecraftObservation } from "./observation.js";
@@ -170,7 +170,7 @@ export interface LibraryHandlerContext {
   readonly safety: SafetyBroker | null;
   readonly control: LibraryRunControl;
   readonly learner: ExperienceLearner | null;
-  readonly training: TrainingManager | null;
+  readonly training: TrainingControl | null;
   readonly worldSeed: WorldSeedStore | null;
   readonly advertisedCapabilities: readonly string[];
   readonly combatSwitchAvailable: boolean;

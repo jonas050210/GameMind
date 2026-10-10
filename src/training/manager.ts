@@ -9,6 +9,7 @@ import type { ControlCenterTraining, ControlCenterTrainingDeltas, ControlCenterT
 import { DEFAULT_TRAINING_EXPLORATION_RATE, TRAINING_STAGES } from "./curriculum.js";
 import { readTrainingLock, type TrainingLockHolder } from "./lock.js";
 import { describeTrainingArtifacts } from "./trainer.js";
+import type { TrainingEvaluationReport } from "./evaluate.js";
 import {
   readTrainingState,
   trainingPaths,
@@ -116,7 +117,23 @@ interface ChildRunMetadata {
   readonly terminationMarker: string;
 }
 
-export class TrainingManager {
+/**
+ * The training operations the Control Center and the Library use. `TrainingManager` is the implementation for one
+ * directory; the app's hub implements the same surface over several directories while allowing one run at a time.
+ */
+export interface TrainingControl {
+  start(options?: TrainingStartOptions): Promise<ControlCommandResult>;
+  pause(): Promise<ControlCommandResult>;
+  resume(): Promise<ControlCommandResult>;
+  stop(): Promise<ControlCommandResult>;
+  evaluate(checkpointId?: string): Promise<ControlCommandResult>;
+  snapshot(): Promise<ControlCenterTraining>;
+  preflight(): Promise<TrainingPreflight>;
+  /** Asks any active run to stop and waits (bounded) for its process to exit, killing it if it does not. */
+  dispose(): Promise<void>;
+}
+
+export class TrainingManager implements TrainingControl {
   private trainer: ChildProcess | null = null;
   private evaluator: ChildProcess | null = null;
   /** Why the most recent trainer failed to start or exited non-zero, when its state file has no error. */
@@ -368,10 +385,43 @@ export class TrainingManager {
     return { ok: true, message: "Evaluation started; the verdict appears here when it finishes." };
   }
 
-  /** Asks an active trainer to stop after its current episode. The process is not killed mid-episode. */
-  async dispose(): Promise<void> {
+  /**
+   * Asks an active trainer to stop after its current episode, then waits for its process to exit. A trainer that has not
+   * exited within the grace period is terminated, so closing the app never leaves a training or evaluation child behind.
+   */
+  async dispose(graceMs = 8_000): Promise<void> {
     const state = await this.readState();
     if (this.isTrainingActive(state)) await writeControlCommand(this.paths, "stop");
+    await Promise.all([this.reap(this.trainer, graceMs), this.reap(this.evaluator, graceMs)]);
+  }
+
+  private async reap(child: ChildProcess | null, graceMs: number): Promise<void> {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(grace);
+        clearTimeout(hard);
+        resolve();
+      };
+      child.once("exit", done);
+      const grace = setTimeout(() => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          /* already gone */
+        }
+      }, graceMs);
+      const hard = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        resolve();
+      }, graceMs + 4_000);
+      grace.unref();
+      hard.unref();
+    });
   }
 
   private async readState(): Promise<TrainingState | null> {
@@ -522,6 +572,31 @@ export class TrainingManager {
       rewardTrend: [...(state?.recent ?? [])].reverse().map((entry) => entry.reward),
       stopReason: state?.stopReason ?? null,
     };
+  }
+
+  /**
+   * The newest checkpoint evaluation reports in this directory, newest first. Reports are the files the evaluator wrote;
+   * unreadable or foreign files are skipped, and nothing is recomputed here.
+   */
+  async evaluationReports(limit = 8): Promise<TrainingEvaluationReport[]> {
+    let names: string[] = [];
+    try {
+      const { readdir } = await import("node:fs/promises");
+      names = (await readdir(this.paths.evaluations)).filter((name) => name.startsWith("ckpt-") && name.endsWith(".json"));
+    } catch {
+      return [];
+    }
+    names.sort().reverse();
+    const reports: TrainingEvaluationReport[] = [];
+    for (const name of names.slice(0, Math.max(1, limit))) {
+      try {
+        const parsed = JSON.parse(await readFile(join(this.paths.evaluations, name), "utf8")) as TrainingEvaluationReport;
+        if (parsed && parsed.schemaVersion === 1 && typeof parsed.checkpointId === "string") reports.push(parsed);
+      } catch {
+        // a torn or foreign file is not a report
+      }
+    }
+    return reports;
   }
 
   private async readDeltas(reportPath: string): Promise<ControlCenterTrainingDeltas | null> {
