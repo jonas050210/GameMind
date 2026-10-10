@@ -14,6 +14,7 @@ import type { MinecraftTaskResult } from "../games/minecraft/task-runner.js";
 import type { SchedulerEvent } from "../games/minecraft/task-scheduler.js";
 import { PersistentWorldMemory } from "../games/minecraft/persistent-world-memory.js";
 import type { AppEventLog, AppEventInput, AppEventSource } from "./event-log.js";
+import type { ReportDetails } from "./task-report.js";
 import { diagnoseConnectionFailure, type ConnectionDiagnosis, type PlatformInfo, type WindowsHostCandidates } from "./platform.js";
 import {
   diagnosisToErrorView,
@@ -47,6 +48,8 @@ export interface SessionResources {
   readonly offlineNote: string | null;
   readonly evaluationScenarioIds: readonly string[];
   readonly onTaskFinished?: MinecraftRunHostOptions["onTaskFinished"];
+  /** Extra facts for a printed task report. Only the simulator has any (its clock and world statistics); a live world has none. */
+  reportDetails?(): ReportDetails;
   /** Known only after the first observation, because the dimension is part of a world's identity. */
   worldKeyFor(dimension: string | null): string;
   /** Opens (or creates) the persistent memory for a world; null when memory is not persisted. */
@@ -198,6 +201,19 @@ export class MinecraftSession {
 
   get currentPhase(): SessionPhase {
     return this.phase;
+  }
+
+  /**
+   * What this session's world adds to a printed task report. Never throws: a report that cannot gather its extras is
+   * still a report, so a failing provider yields none rather than losing the task's result.
+   */
+  reportDetails(): ReportDetails {
+    try {
+      return this.resources.reportDetails?.() ?? {};
+    } catch (error) {
+      this.logger.warn({ err: error }, "The task report could not gather the world's details and is printed without them");
+      return {};
+    }
   }
 
   /** Resolves with the startup task's outcome (or null outcome when none was requested) once it has ended. */

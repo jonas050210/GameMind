@@ -5,7 +5,7 @@ import type { ExperienceLearner } from "../core/learning/learner.js";
 import { createMinecraftAgent } from "../games/minecraft/create-agent.js";
 import { MinecraftTaskDecisionModel } from "../games/minecraft/decision-model.js";
 import { DEFAULT_MINECRAFT_CONFIG, MinecraftAdapter, minecraftAdapterConfigFromEnv, type MinecraftAdapterConfig } from "../games/minecraft/minecraft-adapter.js";
-import { MinecraftTaskRunner, type MinecraftTaskResult } from "../games/minecraft/task-runner.js";
+import { MinecraftTaskRunner } from "../games/minecraft/task-runner.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "../games/minecraft/capabilities.js";
 import { PersistentWorldMemory } from "../games/minecraft/persistent-world-memory.js";
 import { evaluationScenarios } from "../testing/eval/scenarios.js";
@@ -13,6 +13,7 @@ import { SimulatedMinecraftAdapter } from "../testing/simulated-minecraft/adapte
 import type { AppEventLog } from "./event-log.js";
 import { EventLogTraceSink } from "./trace-events.js";
 import type { SessionResources } from "./session.js";
+import type { ReportDetails, TaskReporter } from "./task-report.js";
 import type { ConnectRequest, SessionTarget } from "./types.js";
 
 export interface SessionFactoryDeps {
@@ -26,7 +27,7 @@ export interface SessionFactoryDeps {
   readonly memoryDirectory: string;
   readonly env?: NodeJS.ProcessEnv;
   /** Prints a task report; used for tasks an operator starts from the Control Center. */
-  readonly report?: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
+  readonly report?: TaskReporter;
 }
 
 /** Thrown for a request that cannot be turned into a session at all; the message is shown to the operator. */
@@ -122,6 +123,15 @@ export function createLiveResources(request: ConnectRequest, deps: SessionFactor
 
 export const DEFAULT_SIMULATED_SCENARIO = "explore-remote-log";
 
+/**
+ * What the simulator itself measured: its own clock and the damage, lowest health and starvation it applied. These
+ * belong to the printed report of an offline run only; a live world has no simulated clock and reports nothing like them.
+ */
+function simulatedReportDetails(adapter: SimulatedMinecraftAdapter): ReportDetails {
+  const { damageTaken, minHealth, starvationTicks } = adapter.world.stats;
+  return { simulatedElapsedMs: adapter.simulatedNowMs, worldStats: { damageTaken, minHealth, starvationTicks } };
+}
+
 /** Builds a session over the deterministic offline simulator. Everything it reports is labelled simulated. */
 export function createSimulatedResources(request: ConnectRequest, deps: SessionFactoryDeps, adapterOverride?: SimulatedMinecraftAdapter): SessionResources {
   const scenarioId = request.scenarioId ?? DEFAULT_SIMULATED_SCENARIO;
@@ -151,7 +161,8 @@ export function createSimulatedResources(request: ConnectRequest, deps: SessionF
     target: null,
     offlineNote: "Simulated world: this is the offline evaluation adapter, not a Minecraft server.",
     evaluationScenarioIds: evaluationScenarios().map((candidate) => candidate.id),
-    ...(deps.report ? { onTaskFinished: (result, source) => { if (source === "control-center") deps.report?.(result, source); } } : {}),
+    reportDetails: () => simulatedReportDetails(adapter),
+    ...(deps.report ? { onTaskFinished: (result, source) => { if (source === "control-center") deps.report?.(result, source, simulatedReportDetails(adapter)); } } : {}),
     createRunner: (extra) =>
       new MinecraftTaskRunner(runtime, skills, decisionModel, deps.logger, {
         clock: () => adapter.simulatedNowMs,

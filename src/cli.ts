@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { runProbe, type ProbeRequest } from "./app/probe.js";
 import { runCommandLine } from "./app/run-app.js";
+import { failureClassification, liveTaskReport, simulatedTaskReport, type ReportDetails, type ReportSource } from "./app/task-report.js";
 import type { ConnectRequest } from "./app/types.js";
 import { createLogger } from "./core/logger.js";
 import { FanOutTraceSink, JsonlTraceSink, RingBufferTraceSink, TraceRecorder } from "./core/trace.js";
@@ -29,30 +30,8 @@ import { createFakeMinecraftFixture, FakeMinecraftAdapter } from "./testing/fake
 import { evaluationScenarios } from "./testing/eval/scenarios.js";
 import { loadScenario } from "./testing/scenario.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
-import { classifyFailure } from "./core/failure-taxonomy.js";
 
 type TaskChoice = ControlCenterTaskKind;
-
-/**
- * The failure category the Control Center shows, attached to the CLI report too so stdout and the
- * dashboard can never disagree about whether a stop was a safety refusal, a missing capability, a
- * connection fault or a task that ran out of budget.
- */
-function failureClassification(result: MinecraftTaskResult): Record<string, unknown> {
-  if (result.status === "succeeded" && result.failure === null) return {};
-  const classified = classifyFailure(result.failure?.code ?? null, result.failure?.message ?? null);
-  return {
-    classification: {
-      status: result.status,
-      kind: classified.kind,
-      label: classified.label,
-      code: classified.code,
-      owner: classified.owner,
-      retryable: classified.retryable,
-      ...(classified.hint ? { hint: classified.hint } : {}),
-    },
-  };
-}
 
 type PolicyChoice = "status" | "promote" | "reject";
 
@@ -839,21 +818,10 @@ async function runSimulatedScenario(
       : baseTask;
   const serve = options.controlCenterDisabled ? false : options.modeGiven ? (options.mode === "persistent" ? true : options.controlCenter) : options.controlCenter;
   const mode = options.modeGiven ? options.mode : serve ? "persistent" : "one-shot";
-  const report = (result: MinecraftTaskResult, source: "cli" | "control-center"): void => {
+  const report = (result: MinecraftTaskResult, source: ReportSource, details?: ReportDetails): void => {
     console.log(
       JSON.stringify(
-        {
-          type: "sim-task-report",
-          simulatedWorld: true,
-          startedBy: source,
-          scenarioId,
-          seed,
-          description: scenario.description,
-          expectation: scenario.expectation,
-          ...(demo ? { offlineDemo: true } : {}),
-          ...result,
-          ...failureClassification(result),
-        },
+        simulatedTaskReport({ id: scenarioId, seed, description: scenario.description, expectation: scenario.expectation, demo }, result, source, details),
         null,
         2,
       ),
@@ -898,8 +866,8 @@ function liveRunShape(options: CliOptions): { mode: "persistent" | "one-shot"; s
 }
 
 function taskReport(options: CliOptions) {
-  return (result: MinecraftTaskResult, source: "cli" | "control-center"): void => {
-    console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result, ...failureClassification(result) }, null, 2));
+  return (result: MinecraftTaskResult, source: ReportSource): void => {
+    console.log(JSON.stringify(liveTaskReport(result, source), null, 2));
   };
 }
 

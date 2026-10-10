@@ -9,6 +9,7 @@ import { AppEventLog } from "./event-log.js";
 import { defaultRedactionContext } from "./redact.js";
 import { MinecraftSession, SessionStartError, DEFAULT_RECONNECT_POLICY } from "./session.js";
 import { createSessionFactory } from "./session-factory.js";
+import type { TaskReporter } from "./task-report.js";
 import type { ConnectRequest, SessionMode } from "./types.js";
 
 /**
@@ -35,7 +36,7 @@ export interface RunAppRequest {
   readonly reconnectAttempts?: number;
   readonly instanceLock: boolean;
   /** Printed by the CLI for every finished task; lets the caller keep its report format. */
-  readonly report: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
+  readonly report: TaskReporter;
   /** Describes the requested task for error lines (for example "gather-logs"). */
   readonly taskDescription: string;
   /** Whether a finished task counts as a failed run for the exit code. Default: anything but `succeeded`. */
@@ -188,7 +189,7 @@ export async function runCommandLine(request: RunAppRequest): Promise<number> {
       const startup = await session.startup;
       if (startup) {
         if (startup.result) {
-          request.report(startup.result, "cli");
+          request.report(startup.result, "cli", session.reportDetails());
           if (startup.result.status !== "succeeded") out(summariseTask(startup.result, request.taskDescription));
           if ((request.isFailure ?? defaultIsFailure)(startup.result) && request.mode === "one-shot") exitCode = 1;
         } else if (startup.error) {
@@ -268,7 +269,7 @@ async function runHeadless(request: RunAppRequest, out: (line: string) => void):
     }
     const startup = await session.startup;
     if (startup?.result) {
-      request.report(startup.result, "cli");
+      request.report(startup.result, "cli", session.reportDetails());
       if (startup.result.status !== "succeeded") out(summariseTask(startup.result, request.taskDescription));
       if ((request.isFailure ?? defaultIsFailure)(startup.result)) exitCode = 1;
     } else if (startup?.error) {

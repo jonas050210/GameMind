@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { AppEventLog } from "../../src/app/event-log.js";
 import { defaultRedactionContext } from "../../src/app/redact.js";
-import { MinecraftSession, type ReconnectPolicy, type SessionOptions } from "../../src/app/session.js";
+import { MinecraftSession, type ReconnectPolicy, type SessionOptions, type SessionResources } from "../../src/app/session.js";
 import { createSimulatedResources } from "../../src/app/session-factory.js";
 import type { ConnectRequest } from "../../src/app/types.js";
 import { evaluationScenarios } from "../../src/testing/eval/scenarios.js";
@@ -42,6 +42,8 @@ export interface SessionFixtureOptions {
   readonly sleep?: SessionOptions["sleep"];
   readonly scenarioId?: string;
   readonly stepTimeoutMs?: number;
+  /** Replaces what the factory built, for a test that needs a world which behaves differently (for example one whose report details fail). */
+  readonly tweakResources?: (resources: SessionResources) => SessionResources;
 }
 
 export async function createSessionFixture(options: SessionFixtureOptions = {}): Promise<SessionFixture> {
@@ -52,11 +54,12 @@ export async function createSessionFixture(options: SessionFixtureOptions = {}):
   const adapter = new FlakyAdapter({ definition: scenario.world(101) });
   adapter.failConnects = options.failConnects ?? 0;
   const request: ConnectRequest = { source: "simulated", scenarioId: scenario.id, seed: 101, ...options.request };
-  const resources = createSimulatedResources(
+  const built = createSimulatedResources(
     request,
     { logger: logs.logger, events, learner: null, traceDirectory: path.join(directory, "traces"), memoryDirectory: path.join(directory, "memory") },
     adapter,
   );
+  const resources = options.tweakResources ? options.tweakResources(built) : built;
   const session = new MinecraftSession({
     id: "test-session",
     request,
