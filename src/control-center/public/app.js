@@ -91,9 +91,12 @@ function render() {
   if (!snapshot) return;
   document.title = `${snapshot.agent.taskId ?? "GameMind"} · Control Center`;
   renderHeader(snapshot);
+  renderSituationBar(snapshot);
+  renderThreats(snapshot);
   renderRun(snapshot);
   renderCompanion(snapshot);
   renderGoal(snapshot);
+  renderProgression(snapshot);
   renderSafety(snapshot);
   renderLearning(snapshot);
   renderWorld(snapshot);
@@ -211,6 +214,120 @@ function renderBlocker(snapshot) {
   if (blocker.hint) host.append(node("p", "blocker-hint", blocker.hint));
   if (blocker.at) host.append(node("p", "blocker-at", `recorded ${ago(blocker.at)} (${clock(blocker.at)})`));
   el("blocker-note").textContent = blocker.headline ?? "";
+}
+
+function renderSituationBar(snapshot) {
+  const world = snapshot.world ?? {};
+  const health = typeof world.health === "number" ? world.health : null;
+  const food = typeof world.food === "number" ? world.food : null;
+  const air = typeof world.airTicks === "number" ? world.airTicks : null;
+
+  // Health
+  const healthEl = el("sit-health-value");
+  const healthBar = el("sit-health-bar");
+  if (healthEl) {
+    healthEl.textContent = health === null ? "—/20" : `${num(health, 1)}/20`;
+    if (healthBar) healthBar.style.width = health === null ? "0%" : `${Math.round((health / 20) * 100)}%`;
+    const healthItem = el("sit-health");
+    if (healthItem) healthItem.dataset.tone = health === null ? "warn" : health < 8 ? "bad" : health < 14 ? "warn" : "good";
+  }
+
+  // Hunger
+  const hungerEl = el("sit-hunger-value");
+  const hungerBar = el("sit-hunger-bar");
+  if (hungerEl) {
+    hungerEl.textContent = food === null ? "—/20" : `${num(food)}/20`;
+    if (hungerBar) hungerBar.style.width = food === null ? "0%" : `${Math.round((food / 20) * 100)}%`;
+    const hungerItem = el("sit-hunger");
+    if (hungerItem) hungerItem.dataset.tone = food === null ? "warn" : food < 6 ? "bad" : food < 12 ? "warn" : "good";
+  }
+
+  // Air
+  const airEl = el("sit-air-value");
+  const airBar = el("sit-air-bar");
+  if (airEl) {
+    airEl.textContent = air === null ? "—" : `${num(air)}/300`;
+    if (airBar) airBar.style.width = air === null ? "0%" : `${Math.round((air / 300) * 100)}%`;
+    const airItem = el("sit-air");
+    if (airItem) airItem.dataset.tone = air === null ? "warn" : air < 100 ? "bad" : "good";
+  }
+
+  // Weapon
+  const weaponEl = el("sit-weapon-value");
+  if (weaponEl) {
+    const hand = world.equipment?.hand;
+    weaponEl.textContent = hand && hand !== "null" ? String(hand) : "None";
+  }
+
+  // Safety
+  const safetyEl = el("sit-safety-value");
+  const safetyItem = el("sit-safety");
+  if (safetyEl) {
+    const safety = snapshot.safety;
+    if (safety?.tripped) {
+      safetyEl.textContent = "Tripped";
+      if (safetyItem) safetyItem.dataset.tone = "bad";
+    } else if (safety?.paused) {
+      safetyEl.textContent = "Paused";
+      if (safetyItem) safetyItem.dataset.tone = "warn";
+    } else {
+      safetyEl.textContent = "OK";
+      if (safetyItem) safetyItem.dataset.tone = "good";
+    }
+  }
+
+  // Task
+  const taskEl = el("sit-task-value");
+  if (taskEl) {
+    const agent = snapshot.agent ?? {};
+    if (agent.autonomous) {
+      taskEl.textContent = "Autonomous";
+    } else if (agent.taskId) {
+      taskEl.textContent = `${agent.taskKind ?? "task"} (${agent.actionsUsed ?? 0}/${agent.maxActions ?? "?"})`;
+    } else {
+      taskEl.textContent = "None";
+    }
+  }
+
+  // Threats
+  const threatsEl = el("sit-threats-value");
+  if (threatsEl) {
+    const entities = world.entities ?? [];
+    const hostiles = entities.filter((e) => e.hostile);
+    threatsEl.textContent = hostiles.length === 0 ? "None" : `${hostiles.length} hostile${hostiles.length > 1 ? "s" : ""}`;
+    const threatsItem = el("sit-threats");
+    if (threatsItem) threatsItem.dataset.tone = hostiles.length === 0 ? "good" : hostiles.length <= 2 ? "warn" : "bad";
+  }
+
+  // Decision
+  const decisionEl = el("sit-decision-value");
+  if (decisionEl) {
+    const goal = snapshot.goal;
+    decisionEl.textContent = goal?.goalId ?? (snapshot.agent?.blocker?.kind !== "none" ? "Blocked" : "Idle");
+  }
+}
+
+function renderThreats(snapshot) {
+  const container = el("threat-list");
+  if (!container) return;
+  clear(container);
+  const entities = snapshot.world?.entities ?? [];
+  const hostiles = entities.filter((e) => e.hostile).sort((a, b) => a.distance - b.distance);
+  if (hostiles.length === 0) {
+    container.append(node("div", "threat-empty", "No hostile entities detected."));
+    return;
+  }
+  for (const hostile of hostiles) {
+    const level = hostile.distance < 6 ? "high" : hostile.distance < 12 ? "medium" : "low";
+    const item = node("div", "threat-item");
+    item.dataset.level = level;
+    const name = node("span", "threat-name", hostile.name.replace(/_/g, " "));
+    const dist = node("span", "threat-distance", `${num(hostile.distance, 1)} blocks`);
+    item.append(name, dist);
+    container.append(item);
+  }
+  const hint = el("threat-hint");
+  if (hint) hint.textContent = `${hostiles.length} hostile(s) observed`;
 }
 
 function renderCompanion(snapshot) {
@@ -343,6 +460,86 @@ function renderGoal(snapshot) {
   }
 }
 
+function renderProgression(snapshot) {
+  const host = el("progression-panel");
+  if (!host) return;
+  clear(host);
+  const progression = snapshot.progression;
+  const landmarks = snapshot.landmarks;
+  if (!progression && !landmarks?.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+
+  if (progression) {
+    // Current milestone header
+    const header = node("div", "progression-header");
+    header.append(
+      node("span", "progression-label", "Active milestone"),
+      node("span", "progression-name", progression.currentMilestoneName || progression.currentMilestone),
+    );
+    host.append(header);
+
+    // Milestone progress list
+    const list = node("div", "progression-list");
+    for (const milestone of progression.milestones) {
+      const item = node("div", "progression-item");
+      if (milestone.completed) item.classList.add("completed");
+      if (milestone.id === progression.currentMilestone) item.classList.add("current");
+      item.append(
+        node("span", "progression-status", milestone.completed ? "✓" : "○"),
+        node("span", "progression-title", milestone.name),
+        node("span", "progression-desc", milestone.description),
+      );
+      list.append(item);
+    }
+    host.append(list);
+
+    // Inventory summary
+    const inv = progression.inventorySummary;
+    if (inv) {
+      const summary = node("div", "progression-inventory");
+      const items = [
+        `Logs: ${inv.logs}`,
+        `Planks: ${inv.planks}`,
+        `Cobble: ${inv.cobblestone}`,
+        `Food: ${inv.food}`,
+        inv.hasWoodenPickaxe ? "🪓 Wooden" : "",
+        inv.hasStonePickaxe ? "⛏ Stone" : "",
+        inv.hasIronPickaxe ? "💎 Iron" : "",
+      ].filter(Boolean);
+      summary.append(node("span", "progression-inv-label", "Inventory: "));
+      summary.append(node("span", "progression-inv-items", items.join(" · ")));
+      host.append(summary);
+    }
+  }
+
+  // Landmarks section
+  if (landmarks && landmarks.length > 0) {
+    const lmHeader = node("div", "progression-header");
+    lmHeader.append(
+      node("span", "progression-label", `Landmarks (${landmarks.length})`),
+    );
+    host.append(lmHeader);
+    const lmList = node("div", "progression-list");
+    for (const lm of landmarks.slice(0, 10)) {
+      const item = node("div", "progression-item");
+      const icon = lm.type === "danger-zone" ? "⚠" : lm.type === "resource-vein" ? "💎" : lm.type === "shelter" ? "🏠" : lm.type === "village" ? "🏘" : "📍";
+      item.append(
+        node("span", "progression-status", icon),
+        node("span", "progression-title", lm.label),
+        node("span", "progression-desc", `(${lm.position.x}, ${lm.position.y}, ${lm.position.z}) · ${lm.type}`),
+      );
+      lmList.append(item);
+    }
+    if (landmarks.length > 10) {
+      lmList.append(node("div", "progression-desc", `... and ${landmarks.length - 10} more`));
+    }
+    host.append(lmList);
+  }
+}
+
 function renderSafety(snapshot) {
   const safety = snapshot.safety ?? {};
   const metrics = el("safety-metrics");
@@ -452,6 +649,132 @@ function renderLearning(snapshot) {
   el("learning-hint").textContent = learning.lastRun
     ? `last run: ${learning.lastRun.episodes} episodes, ${learning.lastRun.successes} succeeded, ${learning.lastRun.failures} failed`
     : "waiting for the first finished run";
+
+  // Reward signal section
+  renderRewardSection(learning);
+  // Class-level failure patterns
+  renderClassPatterns(learning);
+  // Policy checkpoints
+  renderCheckpoints(learning);
+  // Experiments
+  renderExperiments(learning);
+  // RL readiness
+  renderRLReadiness(learning);
+}
+
+function renderRewardSection(learning) {
+  const reward = learning.reward ?? null;
+  const metrics = el("reward-metrics");
+  if (!metrics) return;
+  clear(metrics);
+  if (!reward || reward.totalEpisodes === 0) {
+    metrics.append(node("p", "hint", "No reward data yet — rewards are computed when episodes are recorded with the enhanced learner."));
+    return;
+  }
+  metrics.append(
+    metric("Mean reward", reward.meanReward.toFixed(3), { tone: reward.meanReward > 0 ? "good" : reward.meanReward < 0 ? "bad" : null }),
+    metric("EWMA reward", reward.ewmaReward.toFixed(3), { note: "exponentially weighted recent trend" }),
+    metric("Positive rate", pct(reward.positiveRate), { note: `${reward.totalEpisodes} episodes scored` }),
+  );
+  const bar = el("reward-bar-fill");
+  if (bar) {
+    // Map reward from [-1, 3] to [0%, 100%]
+    const pct = Math.max(0, Math.min(100, ((reward.meanReward + 1) / 4) * 100));
+    bar.style.width = `${pct}%`;
+    bar.style.background = pct > 60 ? "var(--accent-green, #4ade80)" : pct > 30 ? "var(--accent-yellow, #fbbf24)" : "var(--accent-red, #ef4444)";
+  }
+}
+
+function renderClassPatterns(learning) {
+  const patterns = learning.classPatterns ?? [];
+  const tbody = document.querySelector("#class-patterns tbody");
+  if (!tbody) return;
+  clear(tbody);
+  if (patterns.length === 0) {
+    const tr = node("tr");
+    const td = node("td");
+    td.colSpan = 4;
+    td.textContent = "No class-level patterns yet";
+    td.className = "hint";
+    tr.append(td);
+    tbody.append(tr);
+    return;
+  }
+  for (const pattern of patterns.slice(0, 10)) {
+    const tr = node("tr");
+    tr.append(node("td", "mono", pattern.patternKey));
+    tr.append(node("td", null, String(pattern.attempts)));
+    tr.append(node("td", null, String(pattern.distinctTargets)));
+    tr.append(node("td", null, pattern.blocked ? chip("blocked") : chip("watching")));
+    tbody.append(tr);
+  }
+}
+
+function renderCheckpoints(learning) {
+  const checkpoints = learning.checkpoints ?? null;
+  const container = el("checkpoints-list");
+  if (!container) return;
+  clear(container);
+  if (!checkpoints || checkpoints.total === 0) {
+    container.append(node("p", "hint", "No policy checkpoints yet — checkpoints are saved when candidate policies are derived."));
+    return;
+  }
+  container.append(node("p", null, `${checkpoints.total} checkpoint(s) · active: ${checkpoints.activeId ?? "baseline"}`));
+  const list = node("div", "list");
+  for (const cp of checkpoints.recent) {
+    const item = node("div", "list-item");
+    item.append(node("b", "mono", cp.id), chip(cp.id === checkpoints.activeId ? "active" : "archived"));
+    item.append(node("p", null, `${cp.reason} · ${ago(cp.createdAt)}`));
+    list.append(item);
+  }
+  container.append(list);
+}
+
+function renderExperiments(learning) {
+  const experiments = learning.experiments ?? [];
+  const container = el("experiments-list");
+  if (!container) return;
+  clear(container);
+  if (experiments.length === 0) {
+    container.append(node("p", "hint", "No experiments recorded yet."));
+    return;
+  }
+  const list = node("div", "list");
+  for (const exp of experiments) {
+    const item = node("div", "list-item");
+    item.append(node("b", "mono", exp.name), chip(exp.promoted ? "promoted" : exp.status));
+    list.append(item);
+  }
+  container.append(list);
+}
+
+function renderRLReadiness(learning) {
+  const rl = learning.rlReadiness ?? null;
+  const container = el("rl-readiness");
+  if (!container) return;
+  clear(container);
+  if (!rl) {
+    container.append(node("p", "hint", "RL readiness not assessed. Run the assessment after live testing data is available."));
+    return;
+  }
+  const pctScore = Math.round((rl.score / rl.maxScore) * 100);
+  container.append(node("p", null, `Score: ${rl.score}/${rl.maxScore} (${pctScore}%)`));
+  if (rl.ready.length > 0) {
+    container.append(node("h4", null, "Ready:"));
+    const ul = node("ul");
+    for (const item of rl.ready) {
+      ul.append(node("li", null, `✓ ${item}`));
+    }
+    container.append(ul);
+  }
+  if (rl.blockers.length > 0) {
+    container.append(node("h4", null, "Blockers:"));
+    const ul = node("ul");
+    for (const item of rl.blockers) {
+      ul.append(node("li", null, `✗ ${item}`));
+    }
+    container.append(ul);
+  }
 }
 
 function renderWorld(snapshot) {
@@ -865,6 +1188,38 @@ function wireControls() {
     } catch {
       // Ignore unavailable storage.
     }
+  }
+  // Tab switching
+  for (const tabBtn of document.querySelectorAll(".tab-btn")) {
+    tabBtn.addEventListener("click", () => {
+      const tab = tabBtn.dataset.tab;
+      for (const btn of document.querySelectorAll(".tab-btn")) btn.classList.remove("active");
+      for (const panel of document.querySelectorAll(".tab-panel")) panel.classList.remove("active");
+      tabBtn.classList.add("active");
+      const panel = el(`tab-${tab}`);
+      if (panel) panel.classList.add("active");
+    });
+  }
+  // Emergency stop button - confirmation
+  const panicBtn = el("panic-btn");
+  if (panicBtn) {
+    panicBtn.addEventListener("click", (e) => {
+      if (!panicBtn.dataset.confirmed) {
+        panicBtn.dataset.confirmed = "1";
+        panicBtn.textContent = "⚠ CONFIRM EMERGENCY STOP";
+        panicBtn.style.background = "#b91c1c";
+        setTimeout(() => {
+          delete panicBtn.dataset.confirmed;
+          panicBtn.textContent = "⚠ EMERGENCY STOP";
+          panicBtn.style.background = "";
+        }, 3000);
+        e.stopImmediatePropagation();
+        return;
+      }
+      delete panicBtn.dataset.confirmed;
+      panicBtn.textContent = "⚠ EMERGENCY STOP";
+      panicBtn.style.background = "";
+    });
   }
 }
 

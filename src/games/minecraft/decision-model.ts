@@ -55,14 +55,15 @@ import { describeSessionField, isSurvivalLike, type SessionFieldInfo } from "./l
 import { blockKey, WorldMemory, type ItemSighting } from "./world-memory.js";
 export { isHostileMinecraftEntity } from "./threats.js";
 
-const FOOD_PRIORITY_THRESHOLD = 10;
-const LOW_FOOD_EXPLORATION_THRESHOLD = 6;
+const FOOD_PRIORITY_THRESHOLD = 14; // Lowered from 10: proactive eating before hunger becomes critical
+const LOW_FOOD_EXPLORATION_THRESHOLD = 8; // Raised from 6: explore for food earlier
 const CRITICAL_FOOD_THRESHOLD = 4;
 const REGEN_FOOD_THRESHOLD = 18;
-const REST_HEALTH_THRESHOLD = 12;
-const REST_TARGET_HEALTH = 16;
+const REST_HEALTH_THRESHOLD = 14; // Raised from 12: rest earlier to prevent death
+const REST_TARGET_HEALTH = 18; // Raised from 16: heal to safer level
 const REST_CHUNK_MS = 10_000;
 const CRITICAL_HEALTH_THRESHOLD = 6;
+const POST_COMBAT_REST_HEALTH = 14; // Rest after combat if health below this
 const MAX_CRAFTING_TABLE_DISTANCE = 4.5;
 const HYSTERESIS_BONUS = 25;
 /** Axis-aligned recovery waypoints sit this many blocks away: far enough to change the shortest route. */
@@ -83,6 +84,14 @@ const MIN_WEAPON_DAMAGE = 4;
 const MAX_COMBAT_ATTEMPTS_PER_RUN = 3;
 /** Ticks before full darkness at which shelter is prepared. */
 const NIGHT_APPROACH_TICKS = 12_000;
+/** Creepers explode within this radius; the agent must keep this distance at minimum. */
+const CREEPER_EXPLOSION_RADIUS = 5;
+/** If a creeper is closer than this, the agent always flees regardless of combat status. */
+const CREEPER_FLEE_DISTANCE = 6;
+/** Threat score multiplier for creepers (they explode and kill). */
+const CREEPER_THREAT_MULTIPLIER = 3;
+/** Threat score multiplier for skeletons (ranged attacks, hard to close distance). */
+const SKELETON_THREAT_MULTIPLIER = 1.5;
 
 /** Priority bands: lower bands always win. Progress never outranks a survival or safety need. */
 export const BAND_SAFETY = 0;
@@ -230,6 +239,10 @@ interface KnownBlock {
 interface Threats {
   readonly visibleHostiles: MinecraftObservation["entities"];
   readonly nearby: MinecraftObservation["entities"];
+  /** Overall threat score: higher means more dangerous situation. */
+  readonly threatScore: number;
+  /** Whether a creeper is present and close enough to be an immediate explosion risk. */
+  readonly creeperImmediate: boolean;
 }
 
 function inventoryCount(state: MinecraftObservation, itemName: string): number {
@@ -331,7 +344,37 @@ function assessThreats(state: MinecraftObservation, memory: WorldMemory, dangerR
   const nearby = visibleHostiles.filter(
     (entity) => distance(entity.position, state.player.position) <= dangerRadius || (approachingIds.has(entity.id) && entity.distance <= dangerRadius * 1.5),
   );
-  return { visibleHostiles, nearby };
+
+  // Compute threat score based on entity types, distances, and counts.
+  let threatScore = 0;
+  let creeperImmediate = false;
+  for (const hostile of visibleHostiles) {
+    const name = hostile.name.toLowerCase();
+    const dist = hostile.distance;
+    // Distance factor: closer = more dangerous (inverse square).
+    const distFactor = Math.max(0.1, 1 / Math.max(1, dist * dist / 16));
+    // Type multiplier: some hostiles are far more dangerous.
+    let typeMultiplier = 1;
+    if (name === "creeper") {
+      typeMultiplier = CREEPER_THREAT_MULTIPLIER;
+      if (dist < CREEPER_FLEE_DISTANCE) creeperImmediate = true;
+    } else if (name === "skeleton" || name === "stray" || name === "bogged") {
+      typeMultiplier = SKELETON_THREAT_MULTIPLIER;
+    } else if (name === "warden" || name === "enderman") {
+      typeMultiplier = 2.5;
+    } else if (name === "witch" || name === "pillager" || name === "vindicator") {
+      typeMultiplier = 1.3;
+    }
+    // Approaching hostiles are more threatening.
+    const approachFactor = approachingIds.has(hostile.id) ? 1.3 : 1;
+    threatScore += distFactor * typeMultiplier * approachFactor;
+  }
+  // More hostiles = higher total threat.
+  if (visibleHostiles.length > 1) {
+    threatScore *= 1 + (visibleHostiles.length - 1) * 0.3;
+  }
+
+  return { visibleHostiles, nearby, threatScore, creeperImmediate };
 }
 
 function knownBlocks(state: MinecraftObservation, memory: WorldMemory, names: ReadonlySet<string>): KnownBlock[] {
@@ -792,6 +835,39 @@ function mineCandidates(
   let blockedByTool = 0;
   let threatened = 0;
   let beyond = 0;
+
+  // Check for dropped items matching the mining drop — free pickups from previous mining or world drops.
+  if (available(context, "minecraft.pickup-item")) {
+    for (const drop of state.itemDrops) {
+      if (drop.name !== options.dropItem) continue;
+      const targetKey = `drop:${drop.name}@${Math.floor(drop.position.x)},${Math.floor(drop.position.y)},${Math.floor(drop.position.z)}`;
+      if (isExcluded(context, targetKey)) continue;
+      if (nearbyDanger(drop.position, state.entities.filter((entity) => isHostileMinecraftEntity(entity.name, entity.type)), options.dangerRadius)) {
+        threatened += 1;
+        continue;
+      }
+      if (drop.distance > options.maxDistance) {
+        beyond += 1;
+        continue;
+      }
+      candidates.push({
+        goalId: `pickup:${drop.name}`,
+        priorityBand: BAND_PROGRESS,
+        score: 550 - drop.distance,
+        skillId: "minecraft.pickup-item",
+        input: {
+          x: Math.floor(drop.position.x),
+          y: Math.floor(drop.position.y),
+          z: Math.floor(drop.position.z),
+          itemName: drop.name,
+          dangerRadius: options.dangerRadius,
+        },
+        targetKey,
+        rationale: `Pick up ${drop.count} dropped ${drop.name} (${drop.distance.toFixed(1)} blocks away); free mining progress.`,
+      });
+    }
+  }
+
   for (const block of blocks) {
     const goalId = `mine:${block.name}`;
     if (isExcluded(context, block.key)) {
@@ -808,7 +884,7 @@ function mineCandidates(
       const approach = approachCandidate(
         { name: block.name, key: block.key, position: block.position, distance: block.distance },
         options.task,
-        { visibleHostiles: [], nearby: [] },
+        { visibleHostiles: [], nearby: [], threatScore: 0, creeperImmediate: false },
         context,
         BAND_PROGRESS,
         "approach",
@@ -915,6 +991,65 @@ const minecraftDroppableJunkList = [
   "diorite",
   "cobbled_deepslate",
 ] as const;
+
+/**
+ * Items worth picking up regardless of the current task: resources the agent will likely need soon.
+ * Food is handled separately by foodSourceCandidates during survival-band evaluation.
+ */
+const USEFUL_DROP_ITEMS = new Set([
+  "oak_log", "birch_log", "spruce_log", "jungle_log", "acacia_log", "dark_oak_log",
+  "cobblestone", "stone", "coal", "raw_iron", "iron_ingot",
+  "oak_planks", "birch_planks", "spruce_planks",
+  "stick", "crafting_table", "furnace",
+  "wooden_pickaxe", "stone_pickaxe", "iron_pickaxe",
+  "wooden_sword", "stone_sword", "iron_sword",
+]);
+
+/**
+ * Generates a pickup candidate for the nearest useful dropped item that isn't already the task target.
+ * Returns null when no useful drop is nearby or all are threatened/excluded.
+ */
+function usefulDropCandidate(
+  state: MinecraftObservation,
+  threats: Threats,
+  task: MinecraftTask,
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  const player = state.player.position;
+  let best: DecisionCandidate | null = null;
+  let bestDist = Infinity;
+
+  for (const drop of state.itemDrops) {
+    if (!USEFUL_DROP_ITEMS.has(drop.name)) continue;
+    // Skip if this drop is already the primary task target (handled by task-specific candidates)
+    if (task.kind === "gather_resource" && drop.name === task.resourceName) continue;
+    if (task.kind === "mine_resource" && drop.name === (miningDropFor(task.resourceName) ?? task.resourceName)) continue;
+
+    const targetKey = `useful-drop:${drop.name}@${Math.floor(drop.position.x)},${Math.floor(drop.position.y)},${Math.floor(drop.position.z)}`;
+    if (context.excludedTargets.has(targetKey)) continue;
+    if (nearbyDanger(drop.position, threats.visibleHostiles, task.dangerRadius)) continue;
+    if (drop.distance > task.maxTargetDistance) continue;
+    if (drop.distance >= bestDist) continue;
+
+    bestDist = drop.distance;
+    best = {
+      goalId: `pickup:${drop.name}`,
+      priorityBand: BAND_PROGRESS,
+      score: 520 - drop.distance,
+      skillId: "minecraft.pickup-item",
+      input: {
+        x: Math.floor(drop.position.x),
+        y: Math.floor(drop.position.y),
+        z: Math.floor(drop.position.z),
+        itemName: drop.name,
+        dangerRadius: task.dangerRadius,
+      },
+      targetKey,
+      rationale: `Pick up ${drop.count} dropped ${drop.name} (${drop.distance.toFixed(1)} blocks away); free resource for future use.`,
+    };
+  }
+  return best;
+}
 
 function needsFood(state: MinecraftObservation, task: MinecraftTask): boolean {
   const hunger = state.player.food;
@@ -1082,6 +1217,17 @@ function explorationCandidate(
   if (threats.visibleHostiles.some((hostile) => distance(hostile.position, player) <= task.dangerRadius * 2)) return null;
   const origin = context.origin ?? { x: player.x, z: player.z };
   const terrain = buildLocalTerrainModel(state);
+  // Build known resource and danger data from current observation + memory
+  const knownResources = [
+    ...(state.resourceSightings ?? []).map((s) => ({ position: { x: s.position.x, z: s.position.z }, resourceName: s.name })),
+    ...(state.minableSightings ?? []).map((s) => ({ position: { x: s.position.x, z: s.position.z }, resourceName: s.name })),
+  ];
+  const knownDangers = [
+    ...memory.hostileSightings().map((h) => ({ position: { x: h.position.x, z: h.position.z } })),
+    ...state.nearbyBlocks
+      .filter((b) => b.name === "lava" || b.name === "magma_block" || b.name === "campfire")
+      .map((b) => ({ position: { x: b.position.x, z: b.position.z } })),
+  ];
   const waypoint = chooseExplorationWaypoint(memory, {
     from: { x: player.x, z: player.z },
     origin,
@@ -1096,6 +1242,8 @@ function explorationCandidate(
       // Unknown is the point of exploration; only currently observed hazards/obstacles penalise a leg.
       return route.risk - route.unknownColumns * 0.35;
     },
+    ...(knownResources.length > 0 ? { knownResourceLocations: knownResources } : {}),
+    ...(knownDangers.length > 0 ? { knownDangerZones: knownDangers } : {}),
   });
   if (!waypoint) return null;
   const legsLeft = task.maxExplorationLegs - legsUsed;
@@ -1124,14 +1272,18 @@ function restCandidate(
   const restUsed = context.restMsUsed ?? 0;
   const budget = task.maxRestMs - restUsed;
   if (budget < 1_000) return null;
+  // Post-combat recovery: if we recently had hostiles nearby but they left, rest more aggressively.
+  const recentCombat = threats.threatScore > 0;
+  const targetHealth = recentCombat ? Math.max(REST_TARGET_HEALTH, POST_COMBAT_REST_HEALTH) : REST_TARGET_HEALTH;
+  const urgency = recentCombat ? 3 : 2;
   return {
     goalId: "rest:recover-health",
     priorityBand: BAND_SURVIVAL,
-    score: 500 + (REST_HEALTH_THRESHOLD - health) * 2,
+    score: 500 + (REST_HEALTH_THRESHOLD - health) * urgency,
     skillId: "minecraft.rest",
-    input: { durationMs: Math.min(REST_CHUNK_MS, budget), targetHealth: REST_TARGET_HEALTH, dangerRadius: task.dangerRadius },
+    input: { durationMs: Math.min(REST_CHUNK_MS, budget), targetHealth, dangerRadius: task.dangerRadius },
     targetKey: null,
-    rationale: `Health is ${health}/20 with food ${food}/20; stand still in a hostile-free state so natural regeneration can work (${Math.round(budget / 1000)} s of rest budget left).`,
+    rationale: `Health is ${health}/20 with food ${food}/20; stand still in a hostile-free state so natural regeneration can work (${Math.round(budget / 1000)} s of rest budget left${recentCombat ? "; recovering after combat" : ""}).`,
   };
 }
 
@@ -1149,6 +1301,39 @@ function gatherCandidates(
   const candidates: DecisionCandidate[] = [];
   const currentCount = itemCount(state, task.resourceName);
   const terrain = buildLocalTerrainModel(state);
+
+  // Check for dropped items matching the target resource — these are free pickups.
+  if (available(context, "minecraft.pickup-item")) {
+    for (const drop of state.itemDrops) {
+      if (drop.name !== task.resourceName) continue;
+      const targetKey = `drop:${drop.name}@${Math.floor(drop.position.x)},${Math.floor(drop.position.y)},${Math.floor(drop.position.z)}`;
+      if (context.excludedTargets.has(targetKey)) continue;
+      if (nearbyDanger(drop.position, threats.visibleHostiles, task.dangerRadius)) {
+        threatened += 1;
+        continue;
+      }
+      if (drop.distance > task.maxTargetDistance) {
+        beyond += 1;
+        continue;
+      }
+      candidates.push({
+        goalId: `pickup:${drop.name}`,
+        priorityBand: BAND_PROGRESS,
+        score: 550 - drop.distance,
+        skillId: "minecraft.pickup-item",
+        input: {
+          x: Math.floor(drop.position.x),
+          y: Math.floor(drop.position.y),
+          z: Math.floor(drop.position.z),
+          itemName: drop.name,
+          dangerRadius: task.dangerRadius,
+        },
+        targetKey,
+        rationale: `Pick up ${drop.count} dropped ${drop.name} (${drop.distance.toFixed(1)} blocks away); free progress toward ${currentCount}/${task.targetCount}.`,
+      });
+    }
+  }
+
   for (const block of blocks) {
     const goalId = `collect:${task.resourceName}`;
     if (context.excludedTargets.has(block.key)) {
@@ -1873,6 +2058,21 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     }
 
     if (threats.nearby.length > 0) {
+      // Creeper immediate danger: always flee, never fight, regardless of combat status.
+      if (threats.creeperImmediate) {
+        const flee = fleeCandidates(state, threats.nearby, context);
+        if (flee.length > 0) {
+          noteProgressOvertaken("creeper is within explosion radius; immediate retreat is required before anything else");
+          const choice = selectBest(flee, previousGoalKey);
+          return record(
+            null,
+            choice.selected,
+            choice.alternatives,
+            "A creeper is within explosion range; maximum-distance retreat takes priority over everything.",
+          );
+        }
+      }
+
       const defend = defendCandidate(state, task, threats, context);
       if (defend) {
         noteProgressOvertaken("defending against the nearby hostile comes before gathering");
@@ -1976,7 +2176,7 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     const shelterReason: "hurt" | "night" | null =
       healthValue !== null && healthValue <= REST_HEALTH_THRESHOLD && threats.visibleHostiles.length === 0
         ? "hurt"
-        : nightPressure(state) !== "day" && threats.visibleHostiles.length > 0
+        : nightPressure(state) !== "day"
           ? "night"
           : null;
     if (shelterReason && task.kind !== "build_shelter") {
@@ -2035,6 +2235,15 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     if (freeInventory) {
       return record(null, freeInventory, [], freeInventory.rationale);
     }
+
+    // 5b. Free useful-item pickup: any task benefits from picking up dropped resources.
+    if (available(context, "minecraft.pickup-item")) {
+      const usefulDrop = usefulDropCandidate(state, threats, task, context);
+      if (usefulDrop) {
+        return record(null, usefulDrop, [], usefulDrop.rationale);
+      }
+    }
+
     if (task.kind === "gather_resource") {
       return this.decideGather(state, memory, task, threats, context, record);
     }

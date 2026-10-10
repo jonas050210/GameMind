@@ -30,7 +30,9 @@
     "task:demo:mine": "tsx src/cli.ts --sim mine-stone-with-pickaxe --seed 101",
     "task:minecraft:mine": "tsx src/cli.ts --task mine-stone",
     "task:minecraft:shelter": "tsx src/cli.ts --task build-shelter",
-    "policy:status": "tsx src/cli.ts --policy status"
+    "policy:status": "tsx src/cli.ts --policy status",
+    "test:live": "tsx src/testing/live/live-test-runner.ts",
+    "test:live:quick": "tsx src/testing/live/live-test-runner.ts --scenario live-connection"
   },
   "dependencies": {
     "mineflayer": "4.39.0",

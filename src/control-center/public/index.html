@@ -4,25 +4,25 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#101719" />
+    <meta name="theme-color" content="#0a0e12" />
     <title>GameMind Operations</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <!-- Bootstrap values are substituted by the Control Center server when this page is served. -->
     <script id="boot-data" type="application/json">{"token":"__CONTROL_TOKEN__","banner":"__BANNER__","title":"__TITLE__"}</script>
     <div class="ambient" aria-hidden="true"></div>
 
-    <header class="titlebar ops-header">
-      <div class="identity">
+    <!-- HEADER: Connection, Agent State, Emergency Stop -->
+    <header class="ops-header">
+      <div class="header-left">
         <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <div class="names">
-          <p class="eyebrow">AUTONOMOUS AGENT / JAVA EDITION</p>
+          <p class="eyebrow">AUTONOMOUS AGENT</p>
           <h1 id="title">GameMind</h1>
           <p id="subtitle">Operations Control Center</p>
         </div>
       </div>
-      <div class="status-strip">
+      <div class="header-status">
         <div class="pill" id="connection-pill" data-state="unknown">
           <span class="dot"></span><span id="connection-text">connecting…</span>
         </div>
@@ -31,30 +31,81 @@
         </div>
         <div class="clock" id="updated">—</div>
       </div>
+      <div class="header-actions">
+        <button class="btn emergency-btn" id="panic-btn" data-command="panic" title="Emergency Stop: Trip + Stop Task + Disarm Combat">⚠ EMERGENCY STOP</button>
+      </div>
     </header>
+
+    <!-- SITUATION BAR: Always visible survival status -->
+    <div class="situation-bar" id="situation-bar">
+      <div class="sit-item" id="sit-health" data-tone="good">
+        <span class="sit-icon">❤</span>
+        <span class="sit-label">Health</span>
+        <span class="sit-value" id="sit-health-value">—</span>
+        <div class="sit-bar"><div class="sit-bar-fill" id="sit-health-bar"></div></div>
+      </div>
+      <div class="sit-item" id="sit-hunger" data-tone="good">
+        <span class="sit-icon">🍗</span>
+        <span class="sit-label">Hunger</span>
+        <span class="sit-value" id="sit-hunger-value">—</span>
+        <div class="sit-bar"><div class="sit-bar-fill" id="sit-hunger-bar"></div></div>
+      </div>
+      <div class="sit-item" id="sit-air" data-tone="good">
+        <span class="sit-icon">💨</span>
+        <span class="sit-label">Air</span>
+        <span class="sit-value" id="sit-air-value">—</span>
+        <div class="sit-bar"><div class="sit-bar-fill" id="sit-air-bar"></div></div>
+      </div>
+      <div class="sit-item" id="sit-weapon">
+        <span class="sit-icon">⚔</span>
+        <span class="sit-label">Weapon</span>
+        <span class="sit-value" id="sit-weapon-value">—</span>
+      </div>
+      <div class="sit-item" id="sit-safety" data-tone="good">
+        <span class="sit-icon">🛡</span>
+        <span class="sit-label">Safety</span>
+        <span class="sit-value" id="sit-safety-value">—</span>
+      </div>
+      <div class="sit-item" id="sit-task">
+        <span class="sit-icon">📋</span>
+        <span class="sit-label">Task</span>
+        <span class="sit-value" id="sit-task-value">—</span>
+      </div>
+      <div class="sit-item" id="sit-threats">
+        <span class="sit-icon">⚠</span>
+        <span class="sit-label">Threats</span>
+        <span class="sit-value" id="sit-threats-value">None</span>
+      </div>
+      <div class="sit-item" id="sit-decision">
+        <span class="sit-icon">🧭</span>
+        <span class="sit-label">Action</span>
+        <span class="sit-value" id="sit-decision-value">—</span>
+      </div>
+    </div>
 
     <p class="banner" id="banner" hidden></p>
 
     <main class="dashboard-grid">
-      <section class="column column-ops" aria-label="Agent controls">
+      <!-- LEFT COLUMN: Controls + Blocker + Task + Companion -->
+      <section class="column column-ops">
         <article class="card run-card">
           <header class="card-head">
             <div><span class="section-index">01 / CONTROL</span><h2>Run control</h2></div>
             <span class="hint" id="run-hint"></span>
           </header>
           <div class="metrics" id="run-metrics"></div>
-          <div class="progress" role="progressbar" aria-label="Task action budget used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
+          <div class="progress" role="progressbar" aria-label="Task action budget" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
           <div class="controls">
-            <button data-command="pause" data-payload="paused from the Control Center" class="btn">Pause</button>
-            <button data-command="resume" class="btn primary">Resume</button>
-            <button data-command="trip" data-payload="manual trip from the Control Center" class="btn danger">Safety trip</button>
-            <button data-command="resetTrip" class="btn">Reset trip</button>
-            <button data-command="stopTask" data-payload="stopped from the Control Center" class="btn">Stop task</button>
+            <button data-command="pause" data-payload="paused from the Control Center" class="btn">⏸ Pause</button>
+            <button data-command="resume" class="btn primary">▶ Resume</button>
+            <button data-command="trip" data-payload="manual trip from the Control Center" class="btn danger">⛔ Trip</button>
+            <button data-command="resetTrip" class="btn">↩ Reset trip</button>
+            <button data-command="stopTask" data-payload="stopped from the Control Center" class="btn warn">⏹ Stop task</button>
           </div>
           <div class="control-row">
             <label class="switch">
               <input type="checkbox" id="combat-toggle" data-command="enableCombat" />
-              <span class="track" aria-hidden="true"></span><span class="switch-label">Combat armed</span>
+              <span class="track" aria-hidden="true"></span><span class="switch-label">⚔ Combat armed</span>
             </label>
             <form class="budget" id="budget-form">
               <label for="budget-input">Action cap</label>
@@ -66,19 +117,15 @@
 
         <article class="card blocker-card">
           <header class="card-head">
-            <div><span class="section-index">02 / WHY</span><h2>Blocker</h2></div>
+            <div><span class="section-index">02 / STATUS</span><h2>Status</h2></div>
             <span class="hint" id="blocker-note"></span>
           </header>
           <div class="blocker" id="blocker" data-kind="none"></div>
-          <p class="micro-note">One classification per stoppage: a safety refusal, a missing capability, a
-            connection fault, missing perception, a planner decision or a task failure. The text is the
-            agent's own reason, not a paraphrase.</p>
         </article>
 
         <article class="card task-card">
           <header class="card-head">
-            <div><span class="section-index">03 / COMMAND</span><h2>Issue task</h2></div>
-            <span class="hint">validated, bounded actions</span>
+            <div><span class="section-index">03 / TASK</span><h2>Issue task</h2></div>
           </header>
           <form id="task-form" class="task-form">
             <label for="task-kind">Objective</label>
@@ -89,86 +136,64 @@
               <option value="secure-food">Secure food</option>
               <option value="build-shelter">Build shelter</option>
             </select>
-            <label for="task-resource">Target (optional)</label>
-            <input id="task-resource" type="text" maxlength="48" placeholder="Default objective target" autocomplete="off" />
+            <label for="task-resource">Target</label>
+            <input id="task-resource" type="text" maxlength="48" placeholder="Default" autocomplete="off" />
             <div class="task-submit-row">
-              <div><label for="task-count">Target count / hunger</label><input id="task-count" type="number" min="1" max="64" value="1" /></div>
-              <button class="btn primary" type="submit">Start task <span aria-hidden="true">↗</span></button>
+              <div><label for="task-count">Count</label><input id="task-count" type="number" min="1" max="64" value="1" /></div>
+              <button class="btn primary" type="submit">Start task</button>
             </div>
           </form>
-          <p class="micro-note">Operator command only. The task still passes planner validation, safety checks, and post-action verification.</p>
         </article>
 
         <article class="card chat-card">
           <header class="card-head">
-            <div><span class="section-index">04 / COMPANION</span><h2>Chat &amp; behavior</h2></div>
-            <span class="hint" id="companion-mode">mode unavailable</span>
+            <div><span class="section-index">04 / COMPANION</span><h2>Chat</h2></div>
+            <span class="hint" id="companion-mode">—</span>
           </header>
           <div id="companion-summary" class="companion-summary"></div>
           <div id="chat-history" class="chat-history" aria-live="polite"></div>
           <form id="chat-form" class="chat-form">
-            <label class="sr-only" for="chat-input">Companion command or request</label>
-            <input id="chat-input" maxlength="256" autocomplete="off" placeholder="#follow Player, #gather oak 4, or “we need wood”" />
+            <input id="chat-input" maxlength="256" autocomplete="off" placeholder="#follow, #gather oak 4, or 'we need wood'" />
             <button class="btn primary" type="submit">Send</button>
           </form>
-          <p class="micro-note">Commands use the same observed state, safety broker, skills, verification, and task runner as autonomous objectives.</p>
-        </article>
-
-        <article class="card decision-card">
-          <header class="card-head">
-            <div><span class="section-index">04 / INTENT</span><h2>AI decision</h2></div>
-            <span class="hint" id="goal-hint"></span>
-          </header>
-          <div class="intent-grid" id="intent-summary" aria-label="Synchronized agent intent"></div>
-          <div id="goal" class="goal"></div>
-          <details class="trace-details" id="alternatives-details" hidden>
-            <summary>Alternatives &amp; rejection reasons</summary><div id="alternatives"></div>
-          </details>
-          <details class="trace-details" id="decision-history-details" hidden>
-            <summary>Previous decisions</summary><div id="decision-history"></div>
-          </details>
-        </article>
-
-        <article class="card safety-card">
-          <header class="card-head">
-            <div><span class="section-index">05 / GUARDRAILS</span><h2>Safety broker</h2></div>
-            <span class="hint" id="safety-hint"></span>
-          </header>
-          <div class="metrics" id="safety-metrics"></div>
-          <div class="table-wrap">
-            <table id="verdicts">
-              <thead><tr><th>Capability</th><th>Risk</th><th>Verdict</th><th>Reason</th></tr></thead><tbody></tbody>
-            </table>
-          </div>
         </article>
       </section>
 
-      <section class="column column-world" aria-label="Minecraft world state">
+      <!-- CENTER COLUMN: World View + Decision + Threats -->
+      <section class="column column-world">
+        <article class="card threats-card">
+          <header class="card-head">
+            <div><span class="section-index">05 / THREATS</span><h2>Nearby threats</h2></div>
+            <span class="hint" id="threat-hint"></span>
+          </header>
+          <div class="threat-list" id="threat-list"></div>
+        </article>
+
         <article class="card world-card">
-          <header class="card-head world-head">
-            <div><span class="section-index">06 / LIVE GAME VIEW</span><h2>Observed world</h2></div>
+          <header class="card-head">
+            <div><span class="section-index">06 / WORLD</span><h2>Observed world</h2></div>
             <span class="hint" id="world-hint"></span>
           </header>
-          <p class="world-freshness" id="world-freshness" data-state="stale">no live observation</p>
+          <p class="world-freshness" id="world-freshness" data-state="stale">no observation</p>
           <div class="vitals" id="vitals"></div>
           <div class="map-panel">
-            <div class="map-topline"><span>VOXEL VIEW · OBSERVED BLOCKS ONLY</span><span id="map-meta">waiting for world state</span></div>
-            <canvas id="minimap" width="720" height="420" role="img" tabindex="0" aria-describedby="map-controls" aria-label="Interactive 3D voxel view of currently observed Minecraft blocks. Drag or use arrow keys to orbit; scroll or plus and minus to zoom."></canvas>
-            <div class="map-controls" id="map-controls"><span>Drag / arrows to orbit <b>·</b> scroll / + − to zoom</span><span>Only blocks in the current observation or in world memory are drawn</span></div>
+            <div class="map-topline"><span>VOXEL VIEW</span><span id="map-meta">waiting</span></div>
+            <canvas id="minimap" width="720" height="420" role="img" tabindex="0" aria-describedby="map-controls" aria-label="Interactive 3D voxel view of observed blocks"></canvas>
+            <div class="map-controls" id="map-controls"><span>Drag/arrows: orbit · scroll: zoom</span></div>
           </div>
           <ul class="legend">
             <li><span class="sw player"></span>agent</li>
-            <li><span class="sw solid"></span>observed block</li>
-            <li><span class="sw resource"></span>resource / objective</li>
-            <li><span class="sw hazard"></span>water / hazard</li>
-            <li><span class="sw memory"></span>last-seen memory</li>
-            <li><span class="sw hostile"></span>visible hostile</li>
+            <li><span class="sw solid"></span>block</li>
+            <li><span class="sw resource"></span>resource</li>
+            <li><span class="sw hazard"></span>hazard</li>
+            <li><span class="sw memory"></span>memory</li>
+            <li><span class="sw hostile"></span>hostile</li>
           </ul>
           <div class="observation-panel">
             <div class="observation-title"><span class="sub">Observation</span><span id="observation-meta" class="hint"></span></div>
             <div class="table-wrap observation-table-wrap">
               <table id="observations">
-                <thead><tr><th>Block identifier</th><th>World coordinates</th><th>Distance</th><th>Visibility</th><th>Evidence</th></tr></thead>
+                <thead><tr><th>Block</th><th>Position</th><th>Distance</th><th>Visibility</th></tr></thead>
                 <tbody></tbody>
               </table>
             </div>
@@ -180,59 +205,143 @@
           </div>
         </article>
 
-        <article class="card performance-card">
+        <article class="card decision-card">
           <header class="card-head">
-            <div><span class="section-index">07 / TELEMETRY</span><h2>Perception &amp; performance</h2></div>
-            <span class="hint" id="performance-hint"></span>
+            <div><span class="section-index">07 / DECISION</span><h2>AI decision</h2></div>
+            <span class="hint" id="goal-hint"></span>
           </header>
-          <div class="metrics performance-metrics" id="performance-metrics"></div>
-          <p class="micro-note">Process CPU/heap/RSS and host load are sampled on snapshot requests using low-cost Node counters; no profiler or Minecraft tick hook is enabled. Scan timings describe the latest adapter perception pass.</p>
+          <div class="intent-grid" id="intent-summary" aria-label="Agent intent"></div>
+          <div id="goal" class="goal"></div>
+          <details class="trace-details" id="alternatives-details" hidden>
+            <summary>Alternatives &amp; rejections</summary><div id="alternatives"></div>
+          </details>
+          <details class="trace-details" id="decision-history-details" hidden>
+            <summary>Previous decisions</summary><div id="decision-history"></div>
+          </details>
+        </article>
+
+        <article class="panel" id="progression-panel" hidden>
+          <header class="panel-header">
+            <div><span class="section-index">08 / PROGRESSION</span><h2>Autonomous milestones</h2></div>
+            <span class="hint">Long-term progression across task boundaries</span>
+          </header>
+          <div id="progression-panel"></div>
         </article>
       </section>
 
-      <section class="column column-activity" aria-label="Agent activity and learning">
-        <article class="card activity-card">
-          <header class="card-head">
-            <div><span class="section-index">08 / RECENT LOGS</span><h2>Actions &amp; recovery</h2></div>
-            <span class="hint" id="actions-hint"></span>
-          </header>
-          <ol class="timeline" id="actions"></ol>
-          <div class="divider"></div>
-          <h3 class="sub failures-head">Failures &amp; refusals</h3>
-          <ol class="timeline compact" id="failures"></ol>
-        </article>
+      <!-- RIGHT COLUMN: Safety + Actions + Learning (tabbed) -->
+      <section class="column column-activity">
+        <div class="tab-bar" role="tablist">
+          <button class="tab-btn active" data-tab="actions" role="tab">Actions</button>
+          <button class="tab-btn" data-tab="safety" role="tab">Safety</button>
+          <button class="tab-btn" data-tab="learning" role="tab">Learning</button>
+          <button class="tab-btn" data-tab="skills" role="tab">Skills</button>
+        </div>
 
-        <article class="card skill-card">
-          <header class="card-head">
-            <div><span class="section-index">09 / MEASURED SKILLS</span><h2>Execution performance</h2></div>
-            <span class="hint">derived from runtime traces</span>
-          </header>
-          <div class="table-wrap">
-            <table id="skills">
-              <thead><tr><th>Skill</th><th>Runs</th><th>Verified</th><th>Mean</th></tr></thead><tbody></tbody>
-            </table>
-          </div>
-        </article>
+        <div class="tab-panel active" id="tab-actions" role="tabpanel">
+          <article class="card activity-card">
+            <header class="card-head">
+              <div><span class="section-index">08 / LOGS</span><h2>Actions &amp; recovery</h2></div>
+              <span class="hint" id="actions-hint"></span>
+            </header>
+            <ol class="timeline" id="actions"></ol>
+            <h3 class="sub failures-head">Failures</h3>
+            <ol class="timeline compact" id="failures"></ol>
+          </article>
+        </div>
 
-        <article class="card learning-card">
+        <div class="tab-panel" id="tab-safety" role="tabpanel">
+          <article class="card safety-card">
+            <header class="card-head">
+              <div><span class="section-index">09 / GUARDRAILS</span><h2>Safety broker</h2></div>
+              <span class="hint" id="safety-hint"></span>
+            </header>
+            <div class="metrics" id="safety-metrics"></div>
+            <div class="table-wrap">
+              <table id="verdicts">
+                <thead><tr><th>Capability</th><th>Risk</th><th>Verdict</th><th>Reason</th></tr></thead><tbody></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+
+        <div class="tab-panel" id="tab-learning" role="tabpanel">
+          <article class="card learning-card">
+            <header class="card-head">
+              <div><span class="section-index">10 / EXPERIENCE</span><h2>Learning</h2></div>
+              <span class="hint" id="learning-hint"></span>
+            </header>
+            <div class="metrics" id="learning-metrics"></div>
+
+            <details class="learning-section" id="reward-section">
+              <summary>Reward Signal</summary>
+              <div class="metrics" id="reward-metrics"></div>
+              <div class="reward-bar-wrap">
+                <div class="reward-bar-label">Mean Reward</div>
+                <div class="reward-bar"><div class="reward-bar-fill" id="reward-bar-fill"></div></div>
+              </div>
+            </details>
+
+            <details class="learning-section" id="policy-section">
+              <summary>Policy Versions &amp; Checkpoints</summary>
+              <div id="checkpoints-list"></div>
+            </details>
+
+            <details class="learning-section" id="class-patterns-section">
+              <summary>Class-Level Failure Patterns</summary>
+              <div class="table-wrap">
+                <table id="class-patterns">
+                  <thead><tr><th>Pattern</th><th>Attempts</th><th>Targets</th><th>Status</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </details>
+
+            <details class="learning-section" id="experiments-section">
+              <summary>Experiments</summary>
+              <div id="experiments-list"></div>
+            </details>
+
+            <details class="learning-section" id="rl-readiness-section">
+              <summary>RL Readiness Assessment</summary>
+              <div id="rl-readiness"></div>
+            </details>
+
+            <div id="blocked"></div>
+            <div class="controls">
+              <button data-command="promotePolicy" class="btn">Promote</button>
+              <button data-command="rejectPolicy" class="btn">Roll back</button>
+            </div>
+          </article>
+        </div>
+
+        <div class="tab-panel" id="tab-skills" role="tabpanel">
+          <article class="card skill-card">
+            <header class="card-head">
+              <div><span class="section-index">11 / SKILLS</span><h2>Performance</h2></div>
+              <span class="hint">from traces</span>
+            </header>
+            <div class="table-wrap">
+              <table id="skills">
+                <thead><tr><th>Skill</th><th>Runs</th><th>Verified</th><th>Mean</th></tr></thead><tbody></tbody>
+              </table>
+            </div>
+          </article>
+        </div>
+
+        <article class="card performance-card">
           <header class="card-head">
-            <div><span class="section-index">10 / EXPERIENCE</span><h2>Learning &amp; evaluation</h2></div>
-            <span class="hint" id="learning-hint"></span>
+            <div><span class="section-index">12 / TELEMETRY</span><h2>Performance</h2></div>
+            <span class="hint" id="performance-hint"></span>
           </header>
-          <div class="metrics" id="learning-metrics"></div>
-          <div id="blocked"></div>
-          <div class="controls">
-            <button data-command="promotePolicy" class="btn">Promote candidate</button>
-            <button data-command="rejectPolicy" class="btn">Roll back policy</button>
-          </div>
-          <p class="micro-note">Experience statistics and heuristics only. Policy weights rank candidates; they never bypass safety or validation.</p>
+          <div class="metrics performance-metrics" id="performance-metrics"></div>
         </article>
       </section>
     </main>
 
     <footer class="ops-footer" id="footer">
       <span class="status-led" aria-hidden="true"></span><span id="toast" aria-live="polite" aria-atomic="true">Ready.</span><span class="spacer"></span>
-      <span class="hint">Polled snapshot · no sample telemetry</span>
+      <span class="hint">Polled snapshot</span>
     </footer>
 
     <script type="module" src="./app.js"></script>

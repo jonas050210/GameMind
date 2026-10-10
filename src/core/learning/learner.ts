@@ -15,6 +15,10 @@ import { DEFAULT_FAILURE_MEMORY_CONFIG, FailureMemory, type FailureMemoryConfig,
 import { BASELINE_POLICY_WEIGHTS, derivePolicyWeights, parsePolicyWeights, type PolicyWeightConfig, type PolicyWeights } from "./policy-weights.js";
 import { foldEpisodes, parseSkillStatistics, type SkillStatistics } from "./skill-statistics.js";
 import { ExperiencePolicyAdvisor, type PolicyAdvisor } from "./policy-advisor.js";
+import { computeReward, DEFAULT_REWARD_CONFIG, type RewardBreakdown, type RewardConfig, type RewardInput } from "./reward.js";
+import { ClassFailureMemory, deriveClassPatternKey, type ClassFailureMemoryConfig } from "./class-failure-memory.js";
+import { PolicyCheckpointStore, ExperimentStore, type ExperimentRecord } from "./checkpoint.js";
+import { assessRLReadiness } from "./rl-readiness.js";
 
 /**
  * The learner. It writes episodes, keeps running skill statistics and failure memory, and holds the
@@ -110,10 +114,20 @@ export class ExperienceLearner {
   private readonly useCandidateWeights: boolean;
   private readonly logger: Logger | null;
   private readonly enabled: boolean;
+  private readonly rewardConfig: RewardConfig;
+  private readonly classFailure: ClassFailureMemory;
+  private readonly checkpointStore: PolicyCheckpointStore;
+  private readonly experimentStore: ExperimentStore;
   private state: LearningState = emptyLearningState();
   private runContext: LearningRunContext | null = null;
   private runEpisodes: Episode[] = [];
   private loaded = false;
+
+  // Running reward statistics (computed from every recorded episode)
+  private rewardEpisodeCount = 0;
+  private rewardMean = 0;
+  private rewardEwma = 0;
+  private rewardPositiveCount = 0;
 
   constructor(options: ExperienceLearnerOptions = {}) {
     this.store = options.store ?? new InMemoryExperienceStore();
@@ -123,6 +137,12 @@ export class ExperienceLearner {
     this.useCandidateWeights = options.useCandidateWeights ?? false;
     this.logger = options.logger ?? null;
     this.enabled = options.enabled ?? true;
+    this.rewardConfig = DEFAULT_REWARD_CONFIG;
+    this.classFailure = new ClassFailureMemory();
+    this.checkpointStore = new PolicyCheckpointStore(
+      this.stateFile ? { directory: path.dirname(this.stateFile) } : {},
+    );
+    this.experimentStore = new ExperimentStore();
   }
 
   static forDirectory(
@@ -255,6 +275,74 @@ export class ExperienceLearner {
         outcome: draft.outcome,
       });
       this.runEpisodes.push(episode);
+
+      // Compute reward signal for this episode
+      try {
+        const rewardInput: RewardInput = {
+          status: draft.outcome.status,
+          confirmed: draft.outcome.confirmed,
+          progress: draft.outcome.progress,
+          safetyDenied: draft.outcome.safetyDenied,
+          itemsGained: draft.outcome.itemsGained,
+          itemsConsumed: draft.outcome.itemsConsumed,
+          healthDelta: draft.outcome.healthDelta,
+          foodDelta: draft.outcome.foodDelta,
+          durationMs: draft.outcome.durationMs,
+          distanceAfter: draft.outcome.distanceAfter,
+          health: draft.features.health,
+          hunger: draft.features.hunger,
+          goalClass: draft.features.goalClass,
+          skillId: draft.features.skillId,
+        };
+        const reward = computeReward(rewardInput, this.rewardConfig);
+
+        // Update running reward statistics
+        this.rewardEpisodeCount++;
+        this.rewardMean += (reward.total - this.rewardMean) / this.rewardEpisodeCount;
+        this.rewardEwma = this.rewardEpisodeCount === 1
+          ? reward.total
+          : 0.3 * reward.total + 0.7 * this.rewardEwma;
+        if (reward.total > 0) this.rewardPositiveCount++;
+      } catch {
+        // Reward computation must never break episode recording
+      }
+
+      // Update class-level failure memory for failures
+      try {
+        if (draft.outcome.status !== "succeeded" && draft.outcome.failureCode && draft.targetKey) {
+          const patternKey = deriveClassPatternKey(
+            draft.features.skillId,
+            draft.features.goalClass,
+            draft.outcome.failureCode,
+            null,
+            draft.features.timeOfDay !== "unknown" ? draft.features.timeOfDay : null,
+          );
+          this.classFailure.recordFailure({
+            patternKey,
+            skillId: draft.features.skillId,
+            goalClass: draft.features.goalClass,
+            condition: null,
+            targetKey: draft.targetKey,
+            runIndex: this.state.runs,
+          });
+        } else if (draft.outcome.status === "succeeded" && draft.outcome.progress && draft.targetKey) {
+          const patternKey = deriveClassPatternKey(
+            draft.features.skillId,
+            draft.features.goalClass,
+            null,
+            null,
+            draft.features.timeOfDay !== "unknown" ? draft.features.timeOfDay : null,
+          );
+          this.classFailure.recordSuccess({
+            patternKey,
+            targetKey: draft.targetKey,
+            runIndex: this.state.runs,
+          });
+        }
+      } catch {
+        // Class failure memory must never break episode recording
+      }
+
       return episode;
     } catch (error) {
       this.logger?.warn({ err: error }, "Episode draft was invalid; skipped");
@@ -379,6 +467,33 @@ export class ExperienceLearner {
     };
     await this.persist();
 
+    // Save checkpoint for this run's derived weights
+    try {
+      if (episodes.length > 0) {
+        this.checkpointStore.save(
+          candidateWeights,
+          {
+            episodes: this.state.episodes,
+            runs,
+            contexts: Object.keys(stats).length,
+            successes,
+            failures,
+            rewardStats: {
+              meanReward: this.rewardMean,
+              ewmaReward: this.rewardEwma,
+              positiveRate: this.rewardEpisodeCount > 0
+                ? this.rewardPositiveCount / this.rewardEpisodeCount : 0,
+            },
+          },
+          report.note ?? `run ${runId}`,
+        );
+        await this.checkpointStore.persist();
+      }
+    } catch {
+      // Checkpoint saving must never break the run report
+    }
+    this.classFailure.prune(runs);
+
     return {
       runId,
       episodes: episodes.length,
@@ -478,6 +593,35 @@ export class ExperienceLearner {
     }[];
     readonly history: LearningState["history"];
     readonly runEpisodes: number;
+    readonly reward: {
+      readonly meanReward: number;
+      readonly ewmaReward: number;
+      readonly positiveRate: number;
+      readonly totalEpisodes: number;
+    };
+    readonly classPatterns: readonly {
+      readonly patternKey: string;
+      readonly attempts: number;
+      readonly distinctTargets: number;
+      readonly blocked: boolean;
+    }[];
+    readonly checkpoints: {
+      readonly total: number;
+      readonly activeId: string | null;
+      readonly recent: readonly { readonly id: string; readonly reason: string; readonly createdAt: string }[];
+    };
+    readonly experiments: readonly {
+      readonly id: string;
+      readonly name: string;
+      readonly status: string;
+      readonly promoted: boolean;
+    }[];
+    readonly rlReadiness: {
+      readonly score: number;
+      readonly maxScore: number;
+      readonly ready: readonly string[];
+      readonly blockers: readonly string[];
+    };
   } {
     const stats = this.state.stats;
     let contradictedConfirmations = 0;
@@ -488,6 +632,8 @@ export class ExperienceLearner {
       safetyDenials += stat.safetyDenials;
       failures += Math.max(0, stat.attempts - stat.successes);
     }
+    const activePatterns = this.classFailure.activePatterns(this.state.runs);
+    const rlAssessment = assessRLReadiness();
     return {
       enabled: this.enabled,
       runs: this.state.runs,
@@ -518,6 +664,41 @@ export class ExperienceLearner {
       })),
       history: this.state.history,
       runEpisodes: this.runEpisodes.length,
+      reward: {
+        meanReward: Math.round(this.rewardMean * 10_000) / 10_000,
+        ewmaReward: Math.round(this.rewardEwma * 10_000) / 10_000,
+        positiveRate: this.rewardEpisodeCount > 0
+          ? Math.round((this.rewardPositiveCount / this.rewardEpisodeCount) * 1_000) / 1_000
+          : 0,
+        totalEpisodes: this.rewardEpisodeCount,
+      },
+      classPatterns: activePatterns.slice(0, 12).map((p) => ({
+        patternKey: p.patternKey,
+        attempts: p.attempts,
+        distinctTargets: p.distinctTargets,
+        blocked: p.blocked,
+      })),
+      checkpoints: {
+        total: this.checkpointStore.all.length,
+        activeId: this.checkpointStore.active?.policyId ?? null,
+        recent: this.checkpointStore.all.slice(-5).reverse().map((c) => ({
+          id: c.policyId,
+          reason: c.reason,
+          createdAt: c.createdAt,
+        })),
+      },
+      experiments: this.experimentStore.recent.map((e) => ({
+        id: e.id,
+        name: e.name,
+        status: e.status,
+        promoted: e.result?.promoted ?? false,
+      })),
+      rlReadiness: {
+        score: rlAssessment.score,
+        maxScore: rlAssessment.maxScore,
+        ready: rlAssessment.ready,
+        blockers: rlAssessment.blockers,
+      },
     };
   }
 

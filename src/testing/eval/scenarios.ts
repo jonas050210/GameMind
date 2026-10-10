@@ -445,6 +445,149 @@ export function evaluationScenarios(): EvaluationScenario[] {
         }),
       requiredGoals: ["avoid-hazard", "collect:", "explore:"],
     },
+    {
+      id: "gather-pickup-dropped-log",
+      family: "exploration",
+      description: "An oak_log item is dropped nearby; the agent should pick it up as free progress toward its gather target instead of ignoring it.",
+      expectation: "success",
+      minSuccessRate: 0.8,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          items: [dropAt("oak_log", 1, 3, 0)],
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-pickup-dropped-log",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 10,
+          maxExplorationLegs: 2,
+        }),
+    },
+    {
+      id: "mine-pickup-cobblestone",
+      family: "mining",
+      description: "A cobblestone drop sits nearby; during a mine_stone task the agent should pick it up as free progress.",
+      expectation: "success",
+      minSuccessRate: 0.8,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [{ x: 3, y: 64, z: 0, name: "stone" }],
+          items: [dropAt("cobblestone", 1, 2, 0)],
+          player: { inventory: [{ name: "wooden_pickaxe", count: 1 }] },
+        }),
+      task: () =>
+        mineResourceTaskSchema.parse({
+          id: "eval-mine-pickup-cobble",
+          resourceName: "stone",
+          targetCount: 1,
+          maxActions: 10,
+          maxExplorationLegs: 0,
+        }),
+    },
+    {
+      id: "autonomous-extended-survival",
+      family: "survival",
+      description: "Agent starts with nothing in a world with trees and berries; must survive a long autonomous run with 100 action budget.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [
+            logAt(5, 3),
+            logAt(-4, 2),
+            berryBushAt(8, -3, 3),
+          ],
+          player: { food: 12 },
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-extended-survival",
+          resourceName: "oak_log",
+          targetCount: 4,
+          maxActions: 100,
+          maxExplorationLegs: 16,
+          maxDurationMs: 600_000,
+        }),
+    },
+    {
+      id: "crafting-chain-stone-pickaxe",
+      family: "crafting",
+      description: "Agent has no tools in a world with trees and stone. Must chain gather wood → craft pickaxe → mine stone, demonstrating multi-step progression.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [
+            logAt(3, 2),
+            logAt(-3, -2),
+            logAt(5, -4),
+            logAt(-5, 3),
+            { x: 8, y: 64, z: 0, name: "stone" },
+          ],
+        }),
+      task: () =>
+        mineResourceTaskSchema.parse({
+          id: "eval-crafting-chain-stone",
+          resourceName: "stone",
+          targetCount: 1,
+          maxActions: 30,
+          maxExplorationLegs: 6,
+          maxDurationMs: 300_000,
+        }),
+    },
+    {
+      id: "autonomous-milestone-progression",
+      family: "crafting",
+      description: "Agent starts with nothing. Must advance through milestones: gather logs → craft tools → reach wooden-tools milestone. Tests the ProgressTracker's multi-task persistence.",
+      expectation: "safe",
+      minSuccessRate: 0,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          placements: [
+            logAt(2, 2),
+            logAt(-3, -2),
+            logAt(5, -4),
+            logAt(-5, 3),
+            logAt(7, 0),
+          ],
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-milestone-progression",
+          resourceName: "oak_log",
+          targetCount: 4,
+          maxActions: 40,
+          maxDurationMs: 120_000,
+          maxExplorationLegs: 12,
+        }),
+    },
+    {
+      id: "gather-pickup-useful-cobblestone",
+      family: "exploration",
+      description: "Agent is gathering logs but a cobblestone drop is nearby; it should pick up the cobblestone as free progress even though it's not the task target.",
+      expectation: "success",
+      minSuccessRate: 0.8,
+      world: (seed) =>
+        simulatedWorld({
+          seed,
+          items: [dropAt("cobblestone", 3, 3, 0)],
+          placements: [logAt(10, 8)],
+        }),
+      task: () =>
+        gatherResourceTaskSchema.parse({
+          id: "eval-pickup-useful-cobble",
+          resourceName: "oak_log",
+          targetCount: 1,
+          maxActions: 15,
+          maxExplorationLegs: 4,
+        }),
+    },
   ];
 }
 
