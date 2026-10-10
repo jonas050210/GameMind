@@ -125,11 +125,9 @@ export function taskFromControlCenterRequest(request: {
 
 export interface MinecraftRunHostOptions {
   readonly runtime: GameMindRuntime<MinecraftObservation>;
-  /** When supplied, enables the persistent companion/chat coordinator over the same gated skills. */
+  /** When supplied, enables the persistent companion coordinator over the same gated skills. */
   readonly skills?: SkillRuntime;
   readonly companionMemoryDirectory?: string | null;
-  /** Exact Minecraft username allowed to issue companion commands. Chat is ignored when unset. */
-  readonly minecraftCommander?: string | null;
   readonly logger: Logger;
   readonly safety: SafetyBroker | null;
   readonly traceSink: RingBufferTraceSink;
@@ -223,8 +221,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     readonly sessionChange?: { readonly at: string; readonly kind: string; readonly detail: string } | null;
     readonly combatAllowed?: boolean;
     setCombatAllowed?(allowed: boolean): void;
-    onCompanionChat?(listener: (username: string, message: string) => void): () => void;
-    sendCompanionChat?(message: string, recipient: string | null): void;
   };
   const companionMemory = options.skills
     ? await CompanionMemory.open(options.companionMemoryDirectory ?? null, options.worldKey ?? "unscoped-world")
@@ -245,7 +241,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
           options.safety?.configure({ optedInCapabilities: enabled ? [MINECRAFT_ATTACK_HOSTILE_CAPABILITY] : [] });
           return { ok: true, message: enabled ? "Combat armed through adapter and safety broker." : "Combat disarmed." };
         },
-        replyMinecraft: (message, recipient) => sessionAdapter.sendCompanionChat?.(message, recipient),
       })
     : null;
   companion?.start();
@@ -382,15 +377,9 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   });
   if (options.startFastLoop !== false) loop.start();
 
-  const unsubscribeChat = companion && options.minecraftCommander && sessionAdapter.onCompanionChat
-    ? sessionAdapter.onCompanionChat((username, message) => {
-        if (username !== options.minecraftCommander) return;
-        if (!message.startsWith("#") && !/\b(come|follow|need|help|build|gather)\b/i.test(message)) return;
-        void companion.submit(message, "minecraft", username);
-      })
-    : null;
   const source = createControlCenterSource({
     runtime: options.runtime,
+    skills: options.skills ?? null,
     memory,
     learner: options.learner ?? null,
     safety: options.safety,
@@ -495,7 +484,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       loop.stop();
       await training.dispose();
       await roadmap.idle();
-      unsubscribeChat?.();
       await handle.stop("run host closing");
       if (memory instanceof PersistentWorldMemory) {
         try {

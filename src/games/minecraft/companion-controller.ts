@@ -5,21 +5,28 @@ import type { MinecraftObservation } from "./observation.js";
 import type { MinecraftTask } from "./task.js";
 import type { MinecraftTaskResult } from "./task-runner.js";
 import { buildShelterTaskSchema, gatherResourceTaskSchema } from "./task.js";
-import { parseCompanionCommand, type CompanionMode } from "./companion-command.js";
+import type { CompanionMode } from "./companion-modes.js";
+import { normalizeHomepointName } from "./companion-modes.js";
+import { minecraftLogNames } from "./capabilities.js";
 import { CompanionMemory, type CompanionLocation } from "./companion-memory.js";
 import type { WorldMemory } from "./world-memory.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import { isHostileMinecraftEntity } from "./threats.js";
 
-export interface CompanionMessage {
+/**
+ * Structured operation log entry. The chat transcript (in/out text commands) was removed with the
+ * chat-command system; this log records executed Library operations and their measured outcomes.
+ */
+export interface CompanionHistoryEntry {
   readonly at: string;
-  readonly direction: "in" | "out";
-  readonly source: "control-center" | "minecraft" | "agent";
-  readonly speaker: string | null;
+  readonly kind: "mode" | "homepoint" | "task" | "status" | "system";
   readonly text: string;
   readonly ok: boolean | null;
 }
+
+/** @deprecated Use CompanionHistoryEntry; kept as an alias for snapshot compatibility. */
+export type CompanionMessage = CompanionHistoryEntry;
 
 export type FollowRecoveryState = "inactive" | "close" | "following" | "catching-up" | "target-missing" | "observation-stale" | "dimension-mismatch" | "holding-lost" | "blocked";
 
@@ -39,7 +46,7 @@ export interface CompanionSnapshot {
   readonly reason: string;
   readonly executing: boolean;
   readonly lastOutcome: string | null;
-  readonly history: readonly CompanionMessage[];
+  readonly history: readonly CompanionHistoryEntry[];
 }
 
 export interface CompanionControllerOptions {
@@ -53,8 +60,9 @@ export interface CompanionControllerOptions {
   requestTaskStop(reason: string): void;
   setCombatAllowed(enabled: boolean): { ok: boolean; message: string };
   readonly intervalMs?: number;
-  readonly replyMinecraft?: (message: string, recipient: string | null) => void;
 }
+
+export type CompanionSettableMode = Exclude<CompanionMode, "task" | "idle">;
 
 const preferredFollowDistance = 4;
 const followStopDistance = 5;
@@ -73,7 +81,10 @@ function measuredDistance(a: { x: number; y: number; z: number }, b: { x: number
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-/** Persistent companion-mode coordinator over the same runtime and skills used by autonomous tasks. */
+/**
+ * Persistent companion-mode coordinator over the same runtime and skills used by autonomous tasks.
+ * All control arrives through structured methods (the Library); there is no text-command parsing.
+ */
 export class CompanionController {
   private mode: CompanionMode = "idle";
   private targetPlayer: string | null = null;
@@ -82,7 +93,7 @@ export class CompanionController {
   private reason = "No companion instruction has been issued.";
   private executing = false;
   private lastOutcome: string | null = null;
-  private history: CompanionMessage[] = [];
+  private history: CompanionHistoryEntry[] = [];
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
   private explorationLegs = 0;
@@ -150,119 +161,169 @@ export class CompanionController {
     };
   }
 
-  async submit(text: string, source: "control-center" | "minecraft", speaker: string | null = null): Promise<{ ok: boolean; message: string }> {
-    this.record({ direction: "in", source, speaker, text, ok: null });
-    const parsed = parseCompanionCommand(text, speaker);
-    if (!parsed.command) return this.respond(parsed.error ?? "Command was not understood.", false, source, speaker);
-    const command = parsed.command;
-    if (command.type === "help") {
-      return this.respond("Commands: #follow, #come, #hold, #combat, #afk, #guard, #sethome <name>, #home [name], #homes, #delhome <name>, #return, #gather <log> <count>, #explore, #status, #unstuck, #stop.", true, source, speaker);
-    }
-    if (command.type === "status") return this.respond(this.statusText(), true, source, speaker);
-    if (command.type === "stop") {
-      this.options.requestTaskStop(`stopped by ${speaker ?? source}`);
-      await this.transition("idle", null, "Explicit stop: task interruption requested and autonomous companion actions disabled.");
-      return this.respond("Stopped. I will not start another action until instructed.", true, source, speaker);
-    }
-    if (command.type === "save-home") {
-      const location = this.currentLocation();
-      if (!location) return this.respond("I cannot save a homepoint without a current observation and position.", false, source, speaker);
-      const saved = await this.options.companionMemory.createHomepoint(command.name, location);
-      if (!saved.ok) return this.respond(saved.reason, false, source, speaker);
-      return this.respond(`Homepoint '${command.name}' saved at ${location.x.toFixed(1)}, ${location.y.toFixed(1)}, ${location.z.toFixed(1)} in ${location.dimension ?? "unknown dimension"}.`, true, source, speaker);
-    }
-    if (command.type === "list-homes") {
-      const homes = this.snapshot().homepoints;
-      if (!homes.length) return this.respond("No homepoints are saved.", true, source, speaker);
-      return this.respond(homes.map((entry) => `${entry.name}: ${entry.location.dimension ?? "unknown dimension"} ${entry.location.x.toFixed(1)}, ${entry.location.y.toFixed(1)}, ${entry.location.z.toFixed(1)} [${entry.availability}]`).join("; "), true, source, speaker);
-    }
-    if (command.type === "delete-home") {
-      const deleted = await this.options.companionMemory.deleteHomepoint(command.name);
-      if (!deleted) return this.respond(`Homepoint '${command.name}' does not exist.`, false, source, speaker);
-      if (this.activeHomepoint === command.name) {
-        this.activeHomepoint = null;
-        await this.transition("idle", null, `Active homepoint '${command.name}' was deleted; navigation stopped.`);
-      }
-      return this.respond(`Homepoint '${command.name}' deleted.`, true, source, speaker);
-    }
-    if (command.type === "go-home") {
-      const entry = this.options.companionMemory.homepoint(command.name);
-      if (!entry) return this.respond(`Homepoint '${command.name}' does not exist. Use #homes to list saved destinations.`, false, source, speaker);
-      const currentDimension = this.options.runtime.currentWorldState?.state.player.dimension ?? null;
-      if (entry.location.dimension === null || currentDimension === null) {
-        return this.respond(`Cannot navigate to '${command.name}' because its dimension or the current dimension is unknown.`, false, source, speaker);
-      }
-      if (entry.location.dimension !== currentDimension) {
-        return this.respond(`Homepoint '${command.name}' is in ${entry.location.dimension}, but I am in ${currentDimension}. No verified cross-dimension route is available.`, false, source, speaker);
-      }
-      if (this.options.taskRunning()) this.options.requestTaskStop(`interrupted by homepoint navigation to ${command.name}`);
-      this.activeHomepoint = command.name;
-      this.anchor = entry.location;
-      await this.transition("return", null, `Navigating to homepoint '${command.name}'; arrival will be revalidated from a fresh observation.`);
-      const stale = Date.now() - Date.parse(entry.location.savedAt) > homepointStaleMs ? " The saved coordinates are stale and require revalidation." : "";
-      return this.respond(`Navigating to homepoint '${command.name}' in ${currentDimension}.${stale}`, true, source, speaker);
-    }
-    if (command.type === "gather" || command.type === "build-shelter") {
-      const separation = this.currentTargetSeparation();
-      if (this.mode === "follow" && separation !== null && separation >= catchUpDistance) {
-        return this.respond(`Cannot start ordinary work while ${this.targetPlayer} is ${separation.toFixed(1)} blocks away; safe catch-up has priority.`, false, source, speaker);
-      }
-      if (this.options.taskRunning()) return this.respond("A verified task is already running. Use #stop before replacing it.", false, source, speaker);
-      const task = command.type === "gather"
-        ? gatherResourceTaskSchema.parse({ id: `companion-gather-${command.resource}`, resourceName: command.resource, targetCount: command.count, maxActions: Math.min(100, Math.max(16, command.count * 6)) })
-        : buildShelterTaskSchema.parse({ id: "companion-build-shelter", mode: "cardinal", maxBlocks: 4, maxActions: 30 });
-      await this.transition("task", speaker, `Running verified ${task.kind} objective '${task.id}'.`);
-      void this.options.runTask(task).then(async (result) => {
-        const message = result.status === "succeeded"
-          ? `${task.id} completed from verified game state.`
-          : `${task.id} ended ${result.status}: ${result.failure?.code ?? "no code"} — ${result.failure?.message ?? "no reason reported"}`;
-        this.lastOutcome = message;
-        await this.options.companionMemory.update({ lastTask: { id: task.id, status: result.status, at: new Date().toISOString(), failureCode: result.failure?.code ?? null } });
-        if (this.mode === "task") await this.transition("idle", null, message);
-        this.record({ direction: "out", source: "agent", speaker: null, text: message, ok: result.status === "succeeded" });
-        this.options.replyMinecraft?.(message, speaker);
-      }).catch(async (error: unknown) => {
-        const message = `Task failed to start or crashed: ${error instanceof Error ? error.message : String(error)}`;
-        this.lastOutcome = message;
-        if (this.mode === "task") await this.transition("idle", null, message);
-      });
-      return this.respond(`Accepted ${task.id}; progress and verified outcomes are now tracked.`, true, source, speaker);
-    }
+  // ------------------------------------------------------------------ Library API
 
-    const target = command.targetPlayer;
+  async setMode(
+    mode: CompanionSettableMode,
+    options: { readonly targetPlayer?: string | null } = {},
+  ): Promise<{ ok: boolean; message: string }> {
+    const target = options.targetPlayer ?? null;
     const currentSeparation = this.currentTargetSeparation();
-    if (command.mode === "explore" && this.mode === "follow" && currentSeparation !== null && currentSeparation >= catchUpDistance) {
-      return this.respond(`Cannot explore while ${this.targetPlayer} is ${currentSeparation.toFixed(1)} blocks away; safe catch-up has priority.`, false, source, speaker);
+    if (mode === "explore" && this.mode === "follow" && currentSeparation !== null && currentSeparation >= catchUpDistance) {
+      return this.log("mode", `Cannot explore while ${this.targetPlayer} is ${currentSeparation.toFixed(1)} blocks away; safe catch-up has priority.`, false);
     }
-    if ((command.mode === "follow" || command.mode === "come" || command.mode === "afk") && !target) {
-      return this.respond(`${command.mode} needs a player name. Use #${command.mode} <player> or issue it from authorized Minecraft chat.`, false, source, speaker);
+    if ((mode === "follow" || mode === "come" || mode === "afk") && !target) {
+      return this.log("mode", `${mode} needs a player name. Provide the exact in-game username.`, false);
     }
     if (this.options.taskRunning()) {
-      this.options.requestTaskStop(`interrupted by companion mode ${command.mode}`);
+      this.options.requestTaskStop(`interrupted by companion mode ${mode}`);
     }
-    if (command.mode === "combat") {
+    if (mode === "combat") {
       const armed = this.options.setCombatAllowed(true);
-      if (!armed.ok) return this.respond(armed.message, false, source, speaker);
+      if (!armed.ok) return this.log("mode", armed.message, false);
     }
     let anchor: CompanionLocation | null = null;
-    if (command.mode === "hold" || command.mode === "guard") {
+    if (mode === "hold" || mode === "guard") {
       anchor = this.currentLocation();
-      if (!anchor) return this.respond(`Cannot enter ${command.mode} without a current position.`, false, source, speaker);
-      await this.options.companionMemory.update(command.mode === "hold" ? { hold: anchor } : { guard: anchor });
+      if (!anchor) return this.log("mode", `Cannot enter ${mode} without a current position.`, false);
+      await this.options.companionMemory.update(mode === "hold" ? { hold: anchor } : { guard: anchor });
     }
-    if (command.mode === "return") {
+    if (mode === "return") {
       const defaultHome = this.options.companionMemory.homepoint("default");
-      if (!defaultHome) return this.respond("No default home is saved. Use #home at a confirmed location first.", false, source, speaker);
+      if (!defaultHome) return this.log("mode", "No default home is saved. Save a default home from the Library first.", false);
       const dimension = this.options.runtime.currentWorldState?.state.player.dimension ?? null;
       if (!dimension || !defaultHome.location.dimension || dimension !== defaultHome.location.dimension) {
-        return this.respond(`Default home is in ${defaultHome.location.dimension ?? "an unknown dimension"}, but the current dimension is ${dimension ?? "unknown"}; no verified route is available.`, false, source, speaker);
+        return this.log("mode", `Default home is in ${defaultHome.location.dimension ?? "an unknown dimension"}, but the current dimension is ${dimension ?? "unknown"}; no verified route is available.`, false);
       }
       this.activeHomepoint = "default";
       anchor = defaultHome.location;
     }
     this.anchor = anchor;
-    await this.transition(command.mode, target, `Mode selected by ${speaker ?? source}.`);
-    return this.respond(`Mode is now ${command.mode}${target ? ` with ${target}` : ""}.`, true, source, speaker);
+    await this.transition(mode, target, "Mode selected from the Library.");
+    return this.log("mode", `Mode is now ${mode}${target ? ` with ${target}` : ""}.`, true);
+  }
+
+  /** Requests the running task to stop and returns the companion to idle. */
+  async halt(reason: string): Promise<{ ok: boolean; message: string }> {
+    this.options.requestTaskStop(reason);
+    await this.transition("idle", null, "Explicit stop: task interruption requested and autonomous companion actions disabled.");
+    return this.log("mode", "Stopped. The companion will not start another action until instructed.", true);
+  }
+
+  async saveHomepoint(rawName: string): Promise<{ ok: boolean; message: string }> {
+    const name = normalizeHomepointName(rawName);
+    if (!name) {
+      return this.log("homepoint", "Invalid homepoint name. Use 1–32 lowercase letters, numbers, '_' or '-', starting with a letter.", false);
+    }
+    const location = this.currentLocation();
+    if (!location) return this.log("homepoint", "Cannot save a homepoint without a current observation and position.", false);
+    const saved = await this.options.companionMemory.createHomepoint(name, location);
+    if (!saved.ok) return this.log("homepoint", saved.reason, false);
+    return this.log("homepoint", `Homepoint '${name}' saved at ${location.x.toFixed(1)}, ${location.y.toFixed(1)}, ${location.z.toFixed(1)} in ${location.dimension ?? "unknown dimension"}.`, true);
+  }
+
+  async goHomepoint(rawName: string): Promise<{ ok: boolean; message: string }> {
+    const name = normalizeHomepointName(rawName);
+    if (!name) {
+      return this.log("homepoint", "Invalid homepoint name. Use 1–32 lowercase letters, numbers, '_' or '-', starting with a letter.", false);
+    }
+    const entry = this.options.companionMemory.homepoint(name);
+    if (!entry) return this.log("homepoint", `Homepoint '${name}' does not exist. List saved destinations from the Library.`, false);
+    const currentDimension = this.options.runtime.currentWorldState?.state.player.dimension ?? null;
+    if (entry.location.dimension === null || currentDimension === null) {
+      return this.log("homepoint", `Cannot navigate to '${name}' because its dimension or the current dimension is unknown.`, false);
+    }
+    if (entry.location.dimension !== currentDimension) {
+      return this.log("homepoint", `Homepoint '${name}' is in ${entry.location.dimension}, but I am in ${currentDimension}. No verified cross-dimension route is available.`, false);
+    }
+    if (this.options.taskRunning()) this.options.requestTaskStop(`interrupted by homepoint navigation to ${name}`);
+    this.activeHomepoint = name;
+    this.anchor = entry.location;
+    await this.transition("return", null, `Navigating to homepoint '${name}'; arrival will be revalidated from a fresh observation.`);
+    const stale = Date.now() - Date.parse(entry.location.savedAt) > homepointStaleMs ? " The saved coordinates are stale and require revalidation." : "";
+    return this.log("homepoint", `Navigating to homepoint '${name}' in ${currentDimension}.${stale}`, true);
+  }
+
+  async listHomepoints(): Promise<{ ok: boolean; message: string }> {
+    const homes = this.snapshot().homepoints;
+    if (!homes.length) return this.log("homepoint", "No homepoints are saved.", true);
+    return this.log("homepoint", homes.map((entry) => `${entry.name}: ${entry.location.dimension ?? "unknown dimension"} ${entry.location.x.toFixed(1)}, ${entry.location.y.toFixed(1)}, ${entry.location.z.toFixed(1)} [${entry.availability}]`).join("; "), true);
+  }
+
+  async deleteHomepoint(rawName: string): Promise<{ ok: boolean; message: string }> {
+    const name = normalizeHomepointName(rawName);
+    if (!name) {
+      return this.log("homepoint", "Invalid homepoint name. Use 1–32 lowercase letters, numbers, '_' or '-', starting with a letter.", false);
+    }
+    const deleted = await this.options.companionMemory.deleteHomepoint(name);
+    if (!deleted) return this.log("homepoint", `Homepoint '${name}' does not exist.`, false);
+    if (this.activeHomepoint === name) {
+      this.activeHomepoint = null;
+      await this.transition("idle", null, `Active homepoint '${name}' was deleted; navigation stopped.`);
+    }
+    return this.log("homepoint", `Homepoint '${name}' deleted.`, true);
+  }
+
+  async startGather(
+    resource: (typeof minecraftLogNames)[number],
+    count: number,
+  ): Promise<{ ok: boolean; message: string; taskId?: string }> {
+    if (!(minecraftLogNames as readonly string[]).includes(resource)) {
+      return { ok: false, message: `Unknown gather resource '${resource}'. Supported: ${minecraftLogNames.join(", ")}.` };
+    }
+    if (!Number.isInteger(count) || count < 1 || count > 64) {
+      return { ok: false, message: "Gather count must be a whole number from 1 through 64." };
+    }
+    const separation = this.currentTargetSeparation();
+    if (this.mode === "follow" && separation !== null && separation >= catchUpDistance) {
+      return this.logTask(`Cannot start ordinary work while ${this.targetPlayer} is ${separation.toFixed(1)} blocks away; safe catch-up has priority.`, false);
+    }
+    if (this.options.taskRunning()) return this.logTask("A verified task is already running. Stop the companion before replacing it.", false);
+    const task = gatherResourceTaskSchema.parse({ id: `companion-gather-${resource}`, resourceName: resource, targetCount: count, maxActions: Math.min(100, Math.max(16, count * 6)) });
+    return this.startCompanionTask(task);
+  }
+
+  async startBuildShelter(): Promise<{ ok: boolean; message: string; taskId?: string }> {
+    const separation = this.currentTargetSeparation();
+    if (this.mode === "follow" && separation !== null && separation >= catchUpDistance) {
+      return this.logTask(`Cannot start ordinary work while ${this.targetPlayer} is ${separation.toFixed(1)} blocks away; safe catch-up has priority.`, false);
+    }
+    if (this.options.taskRunning()) return this.logTask("A verified task is already running. Stop the companion before replacing it.", false);
+    const task = buildShelterTaskSchema.parse({ id: "companion-build-shelter", mode: "cardinal", maxBlocks: 4, maxActions: 30 });
+    return this.startCompanionTask(task);
+  }
+
+  async getStatus(): Promise<{ ok: boolean; message: string }> {
+    return this.log("status", this.statusText(), true);
+  }
+
+  private async startCompanionTask(task: MinecraftTask): Promise<{ ok: boolean; message: string; taskId: string }> {
+    await this.transition("task", this.targetPlayer, `Running verified ${task.kind} objective '${task.id}'.`);
+    void this.options.runTask(task).then(async (result) => {
+      const message = result.status === "succeeded"
+        ? `${task.id} completed from verified game state.`
+        : `${task.id} ended ${result.status}: ${result.failure?.code ?? "no code"} — ${result.failure?.message ?? "no reason reported"}`;
+      this.lastOutcome = message;
+      await this.options.companionMemory.update({ lastTask: { id: task.id, status: result.status, at: new Date().toISOString(), failureCode: result.failure?.code ?? null } });
+      if (this.mode === "task") await this.transition("idle", null, message);
+      this.record({ kind: "task", text: message, ok: result.status === "succeeded" });
+    }).catch(async (error: unknown) => {
+      const message = `Task failed to start or crashed: ${error instanceof Error ? error.message : String(error)}`;
+      this.lastOutcome = message;
+      if (this.mode === "task") await this.transition("idle", null, message);
+    });
+    const message = `Started ${task.id}; progress and verified outcomes are now tracked.`;
+    this.record({ kind: "task", text: message, ok: true });
+    return { ok: true, message, taskId: task.id };
+  }
+
+  private log(kind: CompanionHistoryEntry["kind"], message: string, ok: boolean): { ok: boolean; message: string } {
+    this.record({ kind, text: message, ok });
+    return { ok, message };
+  }
+
+  private logTask(message: string, ok: boolean): { ok: boolean; message: string } {
+    return this.log("task", message, ok);
   }
 
   private async transition(mode: CompanionMode, targetPlayer: string | null, reason: string): Promise<void> {
@@ -330,15 +391,9 @@ export class CompanionController {
     return `Mode ${this.mode}; health ${health}/20; hunger ${food}/20; game mode ${world.player.gameMode ?? "unknown"}; position ${world.player.position.x.toFixed(1)}, ${world.player.position.y.toFixed(1)}, ${world.player.position.z.toFixed(1)}; ${itemSummary(world)}.${blocker}`;
   }
 
-  private record(entry: Omit<CompanionMessage, "at">): void {
+  private record(entry: Omit<CompanionHistoryEntry, "at">): void {
     this.history.push({ at: new Date().toISOString(), ...entry });
     if (this.history.length > 80) this.history.splice(0, this.history.length - 80);
-  }
-
-  private respond(message: string, ok: boolean, source: "control-center" | "minecraft", speaker: string | null): { ok: boolean; message: string } {
-    this.record({ direction: "out", source: "agent", speaker: null, text: message, ok });
-    if (source === "minecraft") this.options.replyMinecraft?.(message, speaker);
-    return { ok, message };
   }
 
   private async tick(): Promise<void> {

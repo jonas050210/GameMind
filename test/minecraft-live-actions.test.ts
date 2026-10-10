@@ -281,17 +281,15 @@ async function run(adapter: MinecraftAdapter, capability: string, input: unknown
   return adapter.executeAction({ actionId: randomUUID(), sessionId: session.id, capability, input }, new AbortController().signal);
 }
 
-test("authorized run hosts can receive Minecraft chat without coupling chat to action execution", async () => {
+test("Minecraft chat is not wired to any control path", async () => {
   const mock = createLiveMock();
   const adapter = await connectAdapter(mock);
-  const received: Array<{ username: string; message: string }> = [];
-  const unsubscribe = adapter.onCompanionChat((username, message) => received.push({ username, message }));
+  // The chat-command system was removed: the adapter exposes no chat subscription or send path,
+  // and emitting chat must not throw, move the agent, or change any state.
+  assert.equal("onCompanionChat" in adapter, false);
+  assert.equal("sendCompanionChat" in adapter, false);
+  assert.equal(typeof (adapter as unknown as Record<string, unknown>).onCompanionChat, "undefined");
   (mock.bot as unknown as EventEmitter).emit("chat", "Alex", "#follow");
-  (mock.bot as unknown as EventEmitter).emit("chat", "GameMind", "ignored echo");
-  assert.deepEqual(received, [{ username: "Alex", message: "#follow" }]);
-  unsubscribe();
-  (mock.bot as unknown as EventEmitter).emit("chat", "Alex", "#stop");
-  assert.equal(received.length, 1);
   await adapter.disconnect("test");
 });
 

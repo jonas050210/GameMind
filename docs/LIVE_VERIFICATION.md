@@ -163,10 +163,15 @@ updates is evidence the runtime is producing new state, not evidence of a lost e
    flight, never in the middle of one.
 7. Start a task from the dashboard (`mine-stone`, count 2). It must go through the same limits as the CLI;
    `Actions` counts up and the map highlights the target block class when it is observed.
-8. Kill the server process mid-run. The connection state, the `status reason` line and the blocker card must
+8. Run a Library entry with real parameters (e.g. Movement & Navigation → Inspect block at the agent's
+   feet). The operation must report `succeeded` with `confirmed by adapter` only when the observation
+   agrees; disconnect the run and the same entry must refuse with the connection named. Entries the run
+   cannot serve (combat on an adapter without the switch, companion entries with no coordinator) must show
+   as unavailable with the missing requirement named — never as runnable buttons that fail silently.
+9. Kill the server process mid-run. The connection state, the `status reason` line and the blocker card must
    say `connection · … · who: server` within one poll; a disconnect must never be displayed as a task
    failure or a safety refusal.
-9. Reload the page: the token comes from the served page, so the controls keep working; `POST /api/command`
+10. Reload the page: the token comes from the served page, so the controls keep working; `POST /api/command`
    from a terminal without the header must return `403`, an unknown command `501`, and `GET /api/stream`
    must return `410` with `STREAM_REMOVED` (the live event stream is retired; polling replaced it).
 

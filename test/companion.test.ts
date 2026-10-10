@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { parseCompanionCommand } from "../src/games/minecraft/companion-command.js";
+import { normalizeHomepointName } from "../src/games/minecraft/companion-modes.js";
 import { CompanionMemory } from "../src/games/minecraft/companion-memory.js";
 import { CompanionController } from "../src/games/minecraft/companion-controller.js";
 import { WorldMemory } from "../src/games/minecraft/world-memory.js";
@@ -12,32 +12,31 @@ import { observationAt } from "./support/observations.js";
 
 const logger = pino({ level: "silent" });
 
-test("validated companion commands cover every supported behavior and reject unsafe arguments", () => {
-  const commands = [
-    "#follow Alex", "#come Alex", "#hold", "#combat", "#afk Alex", "#guard", "#home", "#return",
-    "#gather birch 4", "#explore", "#status", "#unstuck", "#stop",
-  ];
-  for (const input of commands) assert.ok(parseCompanionCommand(input, "Alex").command, input);
-  assert.deepEqual(parseCompanionCommand("#gather birch 4").command, { type: "gather", resource: "birch_log", count: 4 });
-  assert.equal(parseCompanionCommand("#gather diamond 100").command, null);
-  assert.match(parseCompanionCommand("#gather oak 0").error ?? "", /1 through 64/);
+test("homepoint names validate and normalize without any chat parsing", () => {
+  assert.equal(normalizeHomepointName("MainBase"), "mainbase");
+  assert.equal(normalizeHomepointName("mine"), "mine");
+  assert.equal(normalizeHomepointName("../base"), null);
+  assert.equal(normalizeHomepointName("two names"), null);
+  assert.equal(normalizeHomepointName(""), null);
+  assert.equal(normalizeHomepointName(undefined), null);
 });
 
-test("named homepoint commands validate and normalize names without changing legacy #home", () => {
-  assert.deepEqual(parseCompanionCommand("#sethome MainBase").command, { type: "save-home", name: "mainbase" });
-  assert.deepEqual(parseCompanionCommand("#home mine").command, { type: "go-home", name: "mine" });
-  assert.deepEqual(parseCompanionCommand("#home").command, { type: "save-home", name: "default" });
-  assert.deepEqual(parseCompanionCommand("#homes").command, { type: "list-homes" });
-  assert.deepEqual(parseCompanionCommand("#delhome farm").command, { type: "delete-home", name: "farm" });
-  assert.equal(parseCompanionCommand("#sethome ../base").command, null);
-  assert.equal(parseCompanionCommand("#sethome two names").command, null);
-});
-
-test("bounded natural-language teamwork requests map to dependent verified objectives", () => {
-  assert.deepEqual(parseCompanionCommand("we need more wood", "Alex").command, { type: "gather", resource: "oak_log", count: 8 });
-  assert.equal(parseCompanionCommand("help me build a house", "Alex").command?.type, "build-shelter");
-  assert.deepEqual(parseCompanionCommand("come with me", "Alex").command, { type: "set-mode", mode: "follow", targetPlayer: "Alex" });
-  assert.equal(parseCompanionCommand("become omnipotent", "Alex").command, null);
+test("no chat-command module or text submission path remains", async () => {
+  const removedModule = "../src/games/minecraft/companion-command.js";
+  await assert.rejects(() => import(removedModule));
+  const controller = new CompanionController({
+    runtime: {} as never,
+    skills: {} as never,
+    memory: new WorldMemory(),
+    companionMemory: await CompanionMemory.open(null, "chat-removal-probe"),
+    logger,
+    runTask: async () => { throw new Error("not used"); },
+    taskRunning: () => false,
+    requestTaskStop: () => undefined,
+    setCombatAllowed: () => ({ ok: true, message: "ok" }),
+  });
+  assert.equal("submit" in controller, false);
+  assert.equal(typeof (controller as unknown as Record<string, unknown>).submit, "undefined");
 });
 
 test("companion home, mode and task outcome memory persists per world", async () => {
@@ -105,7 +104,7 @@ test("named homepoints persist, reject duplicates, look up by name, and delete e
   }
 });
 
-test("follow, come, hold, combat and stop transitions are explicit and interruptible", async () => {
+test("follow, come, hold, combat and halt transitions are explicit and interruptible", async () => {
   const fixture = controllerFixture();
   const memory = await CompanionMemory.open(null, "test-world");
   const controller = new CompanionController({
@@ -121,22 +120,22 @@ test("follow, come, hold, combat and stop transitions are explicit and interrupt
     intervalMs: 5,
   });
 
-  assert.equal((await controller.submit("#follow Alex", "control-center")).ok, true);
+  assert.equal((await controller.setMode("follow", { targetPlayer: "Alex" })).ok, true);
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 30));
   controller.stop();
   assert.ok(fixture.calls.some((call) => call.skill === "minecraft.navigate"), "follow uses the shared verified navigation skill");
   assert.equal(controller.snapshot().mode, "follow");
 
-  assert.equal((await controller.submit("#combat", "control-center")).ok, true);
+  assert.equal((await controller.setMode("combat")).ok, true);
   assert.equal(fixture.combat(), true);
   assert.equal(controller.snapshot().mode, "combat");
 
-  assert.equal((await controller.submit("#hold", "control-center")).ok, true);
+  assert.equal((await controller.setMode("hold")).ok, true);
   assert.equal(controller.snapshot().mode, "hold");
   assert.ok(controller.snapshot().anchor);
 
-  assert.equal((await controller.submit("#stop", "control-center")).ok, true);
+  assert.equal((await controller.halt("stopped by test")).ok, true);
   assert.equal(controller.snapshot().mode, "idle");
   assert.match(fixture.stop() ?? "", /stopped by/);
 });
@@ -149,13 +148,13 @@ test("homepoint navigation reports lookup, stale coordinates, and dimension avai
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: fixture.setStop,
     setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 5,
   });
-  assert.equal((await controller.submit("#sethome mainbase", "control-center")).ok, true);
-  assert.equal((await controller.submit("#sethome mainbase", "control-center")).ok, false);
-  assert.match((await controller.submit("#homes", "control-center")).message, /mainbase: overworld/);
-  assert.equal((await controller.submit("#home missing", "control-center")).ok, false);
+  assert.equal((await controller.saveHomepoint("mainbase")).ok, true);
+  assert.equal((await controller.saveHomepoint("mainbase")).ok, false);
+  assert.match((await controller.listHomepoints()).message, /mainbase: overworld/);
+  assert.equal((await controller.goHomepoint("missing")).ok, false);
 
   await memory.createHomepoint("mine", { x: 20, y: 64, z: 0, dimension: "overworld", savedAt: new Date(0).toISOString(), observationSequence: 0 });
-  const goMine = await controller.submit("#home mine", "control-center");
+  const goMine = await controller.goHomepoint("mine");
   assert.equal(goMine.ok, true);
   assert.match(goMine.message, /stale.*revalidation/i);
   assert.equal(controller.snapshot().activeHomepoint, "mine");
@@ -166,17 +165,17 @@ test("homepoint navigation reports lookup, stale coordinates, and dimension avai
   assert.ok(fixture.calls.some((call) => call.skill === "minecraft.navigate" && (call.input as { x: number }).x === 20));
 
   await memory.createHomepoint("oldfarm", { x: 0.5, y: 64, z: 0.5, dimension: "overworld", savedAt: new Date(0).toISOString(), observationSequence: 0 });
-  await controller.submit("#home oldfarm", "control-center");
+  await controller.goHomepoint("oldfarm");
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 10));
   controller.stop();
   assert.equal(controller.snapshot().homepoints.find((entry) => entry.name === "oldfarm")?.availability, "available", "a fresh observed arrival revalidates stale coordinates");
 
   await memory.createHomepoint("netherfarm", { x: 1, y: 64, z: 1, dimension: "the_nether", savedAt: new Date().toISOString(), observationSequence: 1 });
-  const mismatch = await controller.submit("#home netherfarm", "control-center");
+  const mismatch = await controller.goHomepoint("netherfarm");
   assert.equal(mismatch.ok, false);
   assert.match(mismatch.message, /No verified cross-dimension route/);
-  assert.equal((await controller.submit("#delhome mainbase", "control-center")).ok, true);
+  assert.equal((await controller.deleteHomepoint("mainbase")).ok, true);
   assert.equal(memory.homepoint("mainbase"), null);
 });
 
@@ -195,7 +194,7 @@ test("follow uses measured distance, hysteresis, catch-up priority, and obstacle
       runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
       setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 50,
     });
-    await controller.submit("#follow Alex", "control-center");
+    await controller.setMode("follow", { targetPlayer: "Alex" });
     controller.start();
     await new Promise((resolve) => setTimeout(resolve, 65));
     controller.stop();
@@ -215,7 +214,7 @@ test("follow refreshes navigation from the player's newly observed movement", as
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 12,
   });
-  await controller.submit("#follow Alex", "control-center");
+  await controller.setMode("follow", { targetPlayer: "Alex" });
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 16));
   const target = fixture.state.entities[0];
@@ -239,7 +238,7 @@ test("follow refuses to move toward stale player coordinates", async () => {
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 5,
   });
-  await controller.submit("#follow Alex", "control-center");
+  await controller.setMode("follow", { targetPlayer: "Alex" });
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 12));
   controller.stop();
@@ -255,7 +254,7 @@ test("lost follow targets stop movement and recover by holding instead of wander
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 5,
   });
-  await controller.submit("#follow Alex", "control-center");
+  await controller.setMode("follow", { targetPlayer: "Alex" });
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 40));
   controller.stop();
@@ -273,7 +272,7 @@ test("lost follow targets still recover when event-loop delay prevents observati
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 5,
   });
-  await controller.submit("#follow Alex", "control-center");
+  await controller.setMode("follow", { targetPlayer: "Alex" });
   controller.start();
   // Starve the event loop the way CPU contention does: the synchronous busy wait keeps the 5 ms
   // observation interval from firing on schedule, so far fewer than five ticks run inside the budget.
@@ -295,7 +294,7 @@ test("a dimension change during follow stops recovery movement", async () => {
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => false, requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }), intervalMs: 5,
   });
-  await controller.submit("#follow Alex", "control-center");
+  await controller.setMode("follow", { targetPlayer: "Alex" });
   controller.start();
   await new Promise((resolve) => setTimeout(resolve, 8));
   fixture.state.player.dimension = "the_nether";
@@ -315,11 +314,11 @@ test("catch-up separation prevents ordinary work from replacing follow priority"
     runTask: async () => { throw new Error("must not run"); }, taskRunning: () => false, requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }),
   });
-  await controller.submit("#follow Alex", "control-center");
-  const gather = await controller.submit("#gather oak 2", "control-center");
+  await controller.setMode("follow", { targetPlayer: "Alex" });
+  const gather = await controller.startGather("oak_log", 2);
   assert.equal(gather.ok, false);
   assert.match(gather.message, /catch-up has priority/);
-  const explore = await controller.submit("#explore", "control-center");
+  const explore = await controller.setMode("explore");
   assert.equal(explore.ok, false);
   assert.match(explore.message, /catch-up has priority/);
   assert.equal(controller.snapshot().mode, "follow");
@@ -333,13 +332,13 @@ test("hold reliably requests interruption of an incompatible running task", asyn
     runTask: async () => { throw new Error("not used"); }, taskRunning: () => true,
     requestTaskStop: fixture.setStop, setCombatAllowed: () => ({ ok: true, message: "ok" }),
   });
-  const result = await controller.submit("#hold", "control-center");
+  const result = await controller.setMode("hold");
   assert.equal(result.ok, true);
   assert.equal(controller.snapshot().mode, "hold");
   assert.match(fixture.stop() ?? "", /interrupted by companion mode hold/);
 });
 
-test("gather chat starts the standard task runner contract and records evidence-based completion", async () => {
+test("gather via the Library starts the standard task runner contract and records evidence-based completion", async () => {
   const fixture = controllerFixture();
   const memory = await CompanionMemory.open(null, "task-world");
   let task: { kind?: string; targetCount?: number } | null = null;
@@ -355,7 +354,7 @@ test("gather chat starts the standard task runner contract and records evidence-
     requestTaskStop: () => undefined,
     setCombatAllowed: () => ({ ok: true, message: "ok" }),
   });
-  const accepted = await controller.submit("#gather oak 3", "control-center");
+  const accepted = await controller.startGather("oak_log", 3);
   assert.equal(accepted.ok, true);
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(task);

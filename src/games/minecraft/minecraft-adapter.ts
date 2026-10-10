@@ -477,7 +477,6 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private activeActionId: string | null = null;
   private activeCapability: string | null = null;
   private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
-  private readonly companionChatListeners = new Set<(username: string, message: string) => void>();
   private readonly botFactory: MinecraftBotFactory;
   private readonly installPlugins: (bot: Bot) => void;
   private readonly configureSafeMovements: (bot: Bot) => void;
@@ -690,10 +689,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       };
 
       bot.on("spawn", onSpawn);
-      bot.on("chat", (username: string, message: string) => {
-        if (username === bot.username) return;
-        for (const listener of this.companionChatListeners) listener(username, message);
-      });
+      // Minecraft chat is intentionally not wired to any control path. All agent control arrives
+      // through the Control Center Library; chat text is never parsed into actions.
       bot.on("death", () => {
         this.deathCount += 1;
         this.logger.warn({ sessionId, deathCount: this.deathCount }, this.config.autoRespawn
@@ -2288,20 +2285,6 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   setCombatAllowed(allowed: boolean): void {
     this.combatAllowedValue = allowed;
     this.logger.info({ combatAllowed: allowed }, allowed ? "Combat armed by operator" : "Combat disarmed by operator");
-  }
-
-  /** Subscribes to player chat. Authorization is intentionally enforced by the run host, not the adapter. */
-  onCompanionChat(listener: (username: string, message: string) => void): () => void {
-    this.companionChatListeners.add(listener);
-    return () => this.companionChatListeners.delete(listener);
-  }
-
-  sendCompanionChat(message: string, recipient: string | null): void {
-    const bot = this.bot;
-    if (!bot || this.statusValue !== "connected") return;
-    const safe = message.replace(/[\r\n]+/g, " ").slice(0, 240);
-    if (recipient) bot.whisper(recipient, safe);
-    else bot.chat(safe);
   }
 
   private blockAtCoordinates(bot: Bot, x: number, y: number, z: number) {

@@ -40,6 +40,7 @@ function roadmapView(service: RoadmapService, loop: AgentLoopPerformance | null)
 }
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
+import { LibraryExecutor, createMinecraftLibraryRegistry } from "./library.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
 export interface CombatGateAdapter {
@@ -83,9 +84,10 @@ export interface ControlCenterSource {
   readonly worldKey?: string | null;
   readonly offlineNote?: string | null;
   readonly logger: Logger;
-  readonly companion?: {
+  /** Skill runtime for direct Library skill execution; null when the host runs without skills. */
+  readonly skills?: import("../../core/skill-runtime.js").SkillRuntime | null;
+  readonly companion?: import("./library.js").LibraryCompanion & {
     snapshot(): import("./companion-controller.js").CompanionSnapshot;
-    submit(text: string, source: "control-center", speaker?: string | null): Promise<{ ok: boolean; message: string }>;
   } | null;
   /** Builds the next task from a UI request; throws with a readable message when the kind is unknown. */
   taskFor?(request: { readonly kind: string; readonly resource?: string; readonly count?: number }): MinecraftTask;
@@ -351,13 +353,43 @@ export function createControlCenterSource(source: ControlCenterSource): {
     message: "This run has no Safety Broker attached, so nothing can be paused or tripped from here.",
   });
 
+  // Central Library: one registry for the run, sharing the live runtime/skill/companion/task
+  // objects. `hostCommands` is filled after `commands` is defined so Library safety/learning
+  // entries delegate to the exact same handlers as the existing panels (no second code path).
+  const libraryHostCommands: ControlCenterCommands = {};
+  const library = new LibraryExecutor(createMinecraftLibraryRegistry(), {
+    skills: source.skills ?? null,
+    companion: source.companion ?? null,
+    runtime,
+    safety,
+    control,
+    learner,
+    training: source.training ?? null,
+    worldSeed: source.worldSeed ?? null,
+    advertisedCapabilities: runtime.adapter.capabilities.map((capability) => capability.name),
+    combatSwitchAvailable: typeof (runtime.adapter as unknown as CombatGateAdapter).setCombatAllowed === "function",
+    ...(source.taskFor ? { taskFor: source.taskFor } : {}),
+    ...(source.onStart ? { onStart: source.onStart } : {}),
+    hostCommands: libraryHostCommands,
+    logger: source.logger,
+  });
+
   const commands: ControlCenterCommands = {
-    async chat(message) {
-      if (!source.companion) return { ok: false, message: "No companion coordinator is attached to this run." };
-      if (typeof message !== "string" || message.trim().length < 1 || message.length > 256) {
-        return { ok: false, message: "Chat messages must contain 1 through 256 characters." };
+    async libraryExecute(payload) {
+      const id = typeof payload === "object" && payload !== null && typeof (payload as { id?: unknown }).id === "string"
+        ? ((payload as { id: string }).id)
+        : "";
+      const params = typeof payload === "object" && payload !== null && typeof (payload as { params?: unknown }).params === "object" && (payload as { params?: unknown }).params !== null
+        ? ((payload as { params: Readonly<Record<string, unknown>> }).params)
+        : {};
+      if (!id) return { ok: false, message: "Library entry id is required." };
+      const operation = await library.execute(id, params);
+      // HTTP status follows the measured outcome: running/succeeded => 200, refused/failed => 409.
+      // The operation itself carries the specific failure code and message.
+      if (operation.state === "succeeded" || operation.state === "running") {
+        return { ok: true, message: operation.message, data: operation };
       }
-      return source.companion.submit(message, "control-center", null);
+      return { ok: false, message: operation.message, data: operation };
     },
     pause(reason) {
       if (!safety) return noBroker();
@@ -531,6 +563,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
       return { ok: true, message: "Rolled back to the baseline policy; the candidate weights are no longer in force." };
     },
   };
+  Object.assign(libraryHostCommands, commands);
 
   async function snapshot(): Promise<ControlCenterSnapshot> {
     // A viewer that opens the page between runs would otherwise show the last observation of the run that
@@ -924,6 +957,10 @@ export function createControlCenterSource(source: ControlCenterSource): {
         : null,
       training: source.training ? await source.training.snapshot() : null,
       roadmap: source.roadmap ? roadmapView(source.roadmap, source.metrics?.summary() ?? null) : null,
+      library: {
+        catalog: library.catalog,
+        operations: library.listOperations(),
+      },
     };
     return source.decorate ? source.decorate(base) : base;
   }
@@ -994,8 +1031,8 @@ function describeBlocker(input: BlockerInput): ControlCenterSnapshot["agent"]["b
       : "No explicit task is active.",
     detail: input.running
       ? `The agent is between actions; the last observation is #${input.sequenceNote ?? "n/a"}.`
-      : (input.statusReason ?? "The agent is idle. Start a task from the dashboard, use a companion command like #follow or #explore, or let autonomous mode handle survival."),
-    hint: input.running ? null : "Start a task, use a companion command, or wait for autonomous survival to activate.",
+      : (input.statusReason ?? "The agent is idle. Start a task from the dashboard, run a Library action such as Follow player or Explore frontier, or let autonomous mode handle survival."),
+    hint: input.running ? null : "Start a task, run a Library action, or wait for autonomous survival to activate.",
     owner: "unknown",
     source: "run control",
     at: input.at,
