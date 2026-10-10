@@ -19,6 +19,15 @@ async function exists(target) {
   }
 }
 
+/** Every file below `directory` (sub-directories included), as sorted forward-slash paths relative to it. */
+async function filesUnder(directory) {
+  const entries = await readdir(directory, { recursive: true, withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.relative(directory, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
+    .sort();
+}
+
 // The project emits to `dist/src/...`; check both layouts instead of guessing.
 const outputRoots = ["dist/src", "dist"];
 let copied = 0;
@@ -35,9 +44,16 @@ for (const relative of sources) {
     await mkdir(path.dirname(candidate), { recursive: true });
     // Declaration files exist only so TypeScript tests can type-check the browser modules; the browser never loads them.
     await cp(from, candidate, { recursive: true, force: true, filter: (source) => !source.endsWith(".d.ts") });
-    const files = (await readdir(candidate)).filter((name) => !name.endsWith(".d.ts"));
-    copied += files.length;
-    console.log(`copy-assets: ${relative} -> ${path.relative(root, candidate)} (${files.length} files)`);
+    // The page is a tree of ES modules: a file that did not arrive is a blank page, so a short copy fails the build.
+    const expected = (await filesUnder(from)).filter((name) => !name.endsWith(".d.ts"));
+    const present = new Set(await filesUnder(candidate));
+    const missing = expected.filter((name) => !present.has(name));
+    if (missing.length > 0) {
+      console.error(`copy-assets: ${missing.length} file(s) did not reach ${path.relative(root, candidate)}: ${missing.join(", ")}`);
+      process.exitCode = 1;
+    }
+    copied += expected.length - missing.length;
+    console.log(`copy-assets: ${relative} -> ${path.relative(root, candidate)} (${expected.length - missing.length} of ${expected.length} files, sub-directories included)`);
     break;
   }
 }

@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { ExperienceLearner } from "./core/learning/learner.js";
+import { PROGRESS_DEFINITION } from "./games/minecraft/progress-evidence.js";
 import {
   baselinePolicyMetricsFromReport,
   comparePolicyAgainstBaseline,
@@ -118,7 +119,7 @@ async function main(): Promise<void> {
   const elapsedMs = Date.now() - started;
 
   await mkdir(path.dirname(options.out), { recursive: true });
-  await writeFile(options.out, `${JSON.stringify({ ...report, elapsedMs, offlineSimulationOnly: true }, null, 2)}\n`, "utf8");
+  await writeFile(options.out, `${JSON.stringify({ ...report, elapsedMs, offlineSimulationOnly: true, progressDefinition: PROGRESS_DEFINITION }, null, 2)}\n`, "utf8");
 
   console.log(
     "GameMind offline evaluation — simulated worlds, control logic only. Not a live Minecraft server result.",

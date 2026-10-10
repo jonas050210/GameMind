@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
+import { writeFileAtomic } from "../core/atomic-file.js";
 
 /**
  * Persisted training state. It is written after every episode with an atomic rename, so the Control Center
@@ -46,6 +47,11 @@ const evaluationSummarySchema = z.object({
   verdict: z.enum(["promotable", "not-promotable"]),
   reasons: z.array(z.string()),
   successRate: z.object({ baseline: z.number(), candidate: z.number() }),
+  /** What the comparison actually established; see `EvaluationConclusion`. Absent in older reports. */
+  conclusion: z.string().optional(),
+  learnedContexts: z.number().int().min(0).optional(),
+  behaviourChangedRuns: z.number().int().min(0).optional(),
+  pairedRuns: z.number().int().min(0).optional(),
 });
 
 export const trainingStateSchema = z.object({
@@ -73,6 +79,13 @@ export const trainingStateSchema = z.object({
   maxMinutes: z.number().positive().nullable().default(null),
   /** Why the run last stopped, for the operator. Null while running. */
   stopReason: z.string().nullable().default(null),
+  /**
+   * Ids of the curriculum stages this run was started with, in order. `stageIndex` indexes into this list, so a run
+   * can only be resumed with the same stages. Absent in runs written before stage selection existed (the default stages).
+   */
+  stageIds: z.array(z.string()).optional(),
+  /** Exploration rate this run last used, so the operator can see how its experience was collected. */
+  explorationRate: z.number().min(0).max(1).optional(),
 });
 
 export type TrainingState = z.infer<typeof trainingStateSchema>;
@@ -88,6 +101,7 @@ export interface TrainingPaths {
   readonly checkpoints: string;
   readonly evaluations: string;
   readonly log: string;
+  readonly lock: string;
 }
 
 export function trainingPaths(root: string): TrainingPaths {
@@ -99,6 +113,7 @@ export function trainingPaths(root: string): TrainingPaths {
     checkpoints: join(root, "checkpoints"),
     evaluations: join(root, "evaluations"),
     log: join(root, "logs", "train.log"),
+    lock: join(root, "training.lock"),
   };
 }
 
@@ -159,10 +174,7 @@ export async function archiveTrainingArtifacts(paths: TrainingPaths, now: Date, 
 }
 
 export async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  await mkdir(join(path, ".."), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(temporary, path);
+  await writeFileAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export async function readTrainingState(paths: TrainingPaths): Promise<TrainingState | null> {

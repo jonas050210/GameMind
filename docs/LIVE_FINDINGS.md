@@ -5,6 +5,15 @@ Everything below is either (a) a cause established by reading Mineflayer 4.39.0'
 reproduced offline against the built-in adapters, or (c) a fix proven by an offline regression test. The
 failed live run has to be repeated (§0 and §2 of `LIVE_VERIFICATION.md`) before any of it is called fixed.
 
+**Update (persistent-session release).** The Control Center page was rewritten after this file was written, so some
+names below belong to the previous page: the blocker card, the world panel and its freshness line, and the WebGL
+block view (`world-view.js`, `test/world-view.test.ts`), which no longer exist in the repository. The causes and the
+fixes in the adapter, the decision model and the snapshot stand. Today the same information is on the Overview
+(*Player and world*, with `Observation #N · Xs ago` and a stale notice), the Tasks tab (*Latest decision*, with the
+game mode and dimension it was made under and their evidence) and the Bots tab (*Connection diagnostics*); the
+page publishes no block coordinates. The rewritten page has not been looked at in a browser either; see
+`LIVE_VERIFICATION.md` §18.
+
 ## 1. What the live report actually said, and what each line turned out to be
 
 | Reported symptom | Real cause | Evidence class |
@@ -41,7 +50,7 @@ failed live run has to be repeated (§0 and §2 of `LIVE_VERIFICATION.md`) befor
   `world.provenance`, `world.freshness`, `world.sessionFacts`, per-block `source`, and
   `connection.statusReason`; the page polls, shows a freshness line (`live — observation #N (2s old)`),
   and the world panel re-reads through `observeIfStale` while the agent is idle.
-- **`src/control-center/public/world-view.js`** — camera fitted to *current* observations only
+- *(Removed since: the block view no longer exists.)* **`src/control-center/public/world-view.js`** — camera fitted to *current* observations only
   (`clamp(extent · 1.35 + 8, 12, 90)`), near/far derived from that distance, depth-based fog, and an explicit
   `data-live="0"` + `renderer=fallback` state instead of a silently wrong picture.
 - **SSE removed** from `server.ts`, `types.ts`, `run-control.ts`, `attach-control-center.ts`, `app.js`,
@@ -60,18 +69,22 @@ failed live run has to be repeated (§0 and §2 of `LIVE_VERIFICATION.md`) befor
   but the server remains the only authority.
 - **Task outcomes.** No offline test can show that gather-logs or secure-food *completes* in 1.20.4; the
   suites prove the refusal paths, the evidence strings and the state transitions.
-- **Rendered pixels.** `test/world-view.test.ts` drives the real module against a recording WebGL stub, which
-  proves projection, fit and fog math and the fallback path — not appearance in a browser.
+- **Rendered pixels.** No offline test can show what the page looks like in a browser. (This bullet once described
+  `test/world-view.test.ts`, which drove the WebGL block view against a recording stub; both were removed. The current
+  page is checked in a fake DOM only: text, controls and states, never appearance. See `LIVE_VERIFICATION.md` §18, item 8.)
 - **Anything the operator changed in-game.** A mid-run `/gamemode`, a dimension change, a death, a kick, or a
   full inventory need a live run; §10 and §15 of `LIVE_VERIFICATION.md` are the checklists for them.
 
 ## 4. Re-running the live test that started this
 
 ```bash
-npm run build && npm test         # 220 offline tests, all of them in the repo, no server needed
-npm run dev -- --task gather-logs --resource oak_log --count 2 \
-  --host 127.0.0.1 --port 25565 --username GameMind --version 1.20.4 --control-center
+npm run build && npm test         # offline tests, no server needed
+python3 main.py --task gather-logs --resource oak_log --count 2 \
+  --host 127.0.0.1 --port 25565 --username GameMind --version 1.20.4
 ```
+
+That starts a persistent session with the Control Center and keeps it connected after the task; add `--one-shot` to end
+the session when the task ends.
 
 Then work through `LIVE_VERIFICATION.md` §2 (observation), §3 (gather + exploration), §10 (dashboard) and
 §15 (session facts), and keep `data/traces/*.jsonl` for the run. If the panel and the trace disagree with

@@ -1,4 +1,10 @@
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { runProbe, type ProbeRequest } from "./app/probe.js";
+import { runCommandLine } from "./app/run-app.js";
+import { failureClassification, liveTaskReport, simulatedTaskReport, type ReportDetails, type ReportSource } from "./app/task-report.js";
+import type { ConnectRequest } from "./app/types.js";
 import { createLogger } from "./core/logger.js";
 import { FanOutTraceSink, JsonlTraceSink, RingBufferTraceSink, TraceRecorder } from "./core/trace.js";
 import { ExperienceLearner } from "./core/learning/learner.js";
@@ -10,11 +16,6 @@ import {
   type ControlCenterTaskKind,
   type MinecraftRunHost,
 } from "./games/minecraft/attach-control-center.js";
-import {
-  DEFAULT_MINECRAFT_CONFIG,
-  MinecraftAdapter,
-  minecraftAdapterConfigFromEnv,
-} from "./games/minecraft/minecraft-adapter.js";
 import { MinecraftTaskDecisionModel } from "./games/minecraft/decision-model.js";
 import { secureFoodTaskSchema, type MinecraftTask } from "./games/minecraft/task.js";
 import {
@@ -24,45 +25,13 @@ import {
 } from "./games/minecraft/task-runner.js";
 import { readEvaluationSummary } from "./games/minecraft/run-control.js";
 import { policyPromotionRefusalReasons } from "./games/minecraft/policy-promotion.js";
-import { PersistentWorldMemory } from "./games/minecraft/persistent-world-memory.js";
 import type { WorldMemory } from "./games/minecraft/world-memory.js";
-import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./games/minecraft/capabilities.js";
 import { createFakeMinecraftFixture, FakeMinecraftAdapter } from "./testing/fake-minecraft-adapter.js";
 import { evaluationScenarios } from "./testing/eval/scenarios.js";
-import { SimulatedMinecraftAdapter } from "./testing/simulated-minecraft/adapter.js";
 import { loadScenario } from "./testing/scenario.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
-import { classifyFailure } from "./core/failure-taxonomy.js";
 
 type TaskChoice = ControlCenterTaskKind;
-
-/**
- * The failure category the Control Center shows, attached to the CLI report too so stdout and the
- * dashboard can never disagree about whether a stop was a safety refusal, a missing capability, a
- * connection fault or a task that ran out of budget.
- */
-function failureClassification(result: MinecraftTaskResult): Record<string, unknown> {
-  if (result.status === "succeeded" && result.failure === null) return {};
-  const classified = classifyFailure(result.failure?.code ?? null, result.failure?.message ?? null);
-  return {
-    classification: {
-      status: result.status,
-      kind: classified.kind,
-      label: classified.label,
-      code: classified.code,
-      owner: classified.owner,
-      retryable: classified.retryable,
-      ...(classified.hint ? { hint: classified.hint } : {}),
-    },
-  };
-}
-
-/** One line for the process error: what stopped, in whose component, with the source's own words kept. */
-function failureLine(result: MinecraftTaskResult, taskDescription: string): string {
-  const classified = classifyFailure(result.failure?.code ?? null, result.failure?.message ?? null);
-  const head = `${classified.label} · ${classified.code ?? "no code"} · ${classified.owner}`;
-  return `Minecraft ${taskDescription} task ended with status '${result.status}' (${head}): ${result.failure?.message ?? "the task reported no reason"}`;
-}
 
 type PolicyChoice = "status" | "promote" | "reject";
 
@@ -105,13 +74,27 @@ interface CliOptions {
   /** Operator opt-in for the combat capability, at the adapter and the safety policy together. */
   readonly allowCombat: boolean;
   readonly policy?: PolicyChoice;
+  /** Persistent sessions stay connected after a task until stopped (the default); one-shot ones end with the task. */
+  readonly mode: "persistent" | "one-shot";
+  /** --persistent or --one-shot was given explicitly; otherwise each entry point picks its own default. */
+  readonly modeGiven: boolean;
+  /** The Control Center was explicitly turned off with --no-control-center. */
+  readonly controlCenterDisabled: boolean;
+  readonly openBrowser: boolean;
+  readonly autonomy: boolean;
+  /** Start the Control Center without connecting to a game; connect from the page later. */
+  readonly connect: boolean;
+  readonly allowHosts: readonly string[];
+  readonly reconnectAttempts?: number;
+  readonly instanceLock: boolean;
+  readonly dataDirectory?: string;
 }
 
 function isTaskChoice(value: string): value is TaskChoice {
   return (TASK_CHOICES as readonly string[]).includes(value);
 }
 
-function parseArgs(args: readonly string[]): CliOptions {
+export function parseArgs(args: readonly string[]): CliOptions {
   let demo = false;
   let demoTask = false;
   let demoTaskKind: TaskChoice | undefined;
@@ -144,6 +127,16 @@ function parseArgs(args: readonly string[]): CliOptions {
   let allowCombat = false;
   let policy: PolicyChoice | undefined;
   let help = false;
+  let mode: "persistent" | "one-shot" = "persistent";
+  let modeGiven = false;
+  let controlCenterDisabled = false;
+  let openBrowser = false;
+  let autonomy = true;
+  let connect = true;
+  const allowHosts: string[] = [];
+  let reconnectAttempts: number | undefined;
+  let instanceLock = true;
+  let dataDirectory: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -293,6 +286,47 @@ function parseArgs(args: readonly string[]): CliOptions {
       case "--allow-combat":
         allowCombat = true;
         break;
+      case "--persistent":
+        mode = "persistent";
+        modeGiven = true;
+        break;
+      case "--one-shot":
+        mode = "one-shot";
+        modeGiven = true;
+        break;
+      case "--no-control-center":
+        controlCenterDisabled = true;
+        break;
+      case "--open-browser":
+        openBrowser = true;
+        break;
+      case "--no-open-browser":
+        openBrowser = false;
+        break;
+      case "--no-autonomy":
+        autonomy = false;
+        break;
+      case "--no-connect":
+        connect = false;
+        break;
+      case "--allow-host": {
+        const name = value().trim().toLowerCase();
+        if (!/^[a-z0-9.\-]+$/.test(name)) throw new Error("--allow-host takes a host name such as gamemind.local (letters, digits, dots and dashes).");
+        allowHosts.push(name);
+        break;
+      }
+      case "--reconnect-attempts":
+        reconnectAttempts = Number(value());
+        if (!Number.isInteger(reconnectAttempts) || reconnectAttempts < 0 || reconnectAttempts > 20) {
+          throw new Error("--reconnect-attempts must be an integer from 0 through 20 (0 disables reconnecting).");
+        }
+        break;
+      case "--no-instance-lock":
+        instanceLock = false;
+        break;
+      case "--data-dir":
+        dataDirectory = value();
+        break;
       case "--policy": {
         const policyValue = value();
         if (!(POLICY_CHOICES as readonly string[]).includes(policyValue)) {
@@ -324,11 +358,28 @@ function parseArgs(args: readonly string[]): CliOptions {
   if (lookPitchProvided && lookYaw === undefined) {
     throw new Error("--look-pitch requires --look-yaw.");
   }
+  if (lookYaw !== undefined && (controlCenter || openBrowser || (modeGiven && mode === "persistent"))) {
+    throw new Error(
+      "--look-yaw is a one-shot probe: it connects, turns once, prints the result and disconnects. It cannot be combined with --control-center, --open-browser or --persistent. Start a normal session and use the Look entry in the Library (Bots tab) instead.",
+    );
+  }
   if (policy !== undefined && (demo || demoTask || task || sim !== undefined)) {
     throw new Error("--policy inspects or changes the learned policy on its own; do not combine it with a run.");
   }
   if (controlPort !== undefined && !controlCenter) {
     throw new Error("--control-port is only meaningful together with --control-center.");
+  }
+  if (controlCenterDisabled && controlCenter) {
+    throw new Error("--no-control-center cannot be combined with --control-center or --control-port.");
+  }
+  if (!connect && (task || lookYaw !== undefined)) {
+    throw new Error("--no-connect starts only the Control Center, so it cannot be combined with --task or --look-yaw.");
+  }
+  if (openBrowser && controlCenterDisabled) {
+    throw new Error("--open-browser needs the Control Center; remove --no-control-center.");
+  }
+  if (modeGiven && (demo || demoTask)) {
+    throw new Error("--persistent and --one-shot apply to live and --sim sessions, not to the offline fixture demos.");
   }
   if (allowCombat && policy !== undefined) {
     throw new Error("--allow-combat applies to a run, not to --policy.");
@@ -385,6 +436,16 @@ function parseArgs(args: readonly string[]): CliOptions {
     ...(worldKey !== undefined ? { worldKey } : {}),
     allowCombat,
     ...(policy !== undefined ? { policy } : {}),
+    mode,
+    modeGiven,
+    controlCenterDisabled,
+    openBrowser,
+    autonomy,
+    connect,
+    allowHosts,
+    ...(reconnectAttempts !== undefined ? { reconnectAttempts } : {}),
+    instanceLock,
+    ...(dataDirectory !== undefined ? { dataDirectory } : {}),
   };
 }
 
@@ -395,9 +456,12 @@ Usage:
   npm run dev -- --demo
   npm run dev -- --demo-task [gather-logs|craft-wooden-pickaxe|secure-food]
   npm run dev -- --sim food-remote-berries --seed 101
+  npm run dev -- --host 127.0.0.1                      (persistent session + Control Center)
+  npm run dev -- --host 127.0.0.1 --one-shot           (connect, print the first observation, disconnect)
   npm run dev -- --task craft-wooden-pickaxe --host 127.0.0.1
-  npm run dev -- --task mine-stone --resource iron_ore --count 4 --host 127.0.0.1 --control-center
-  npm run dev -- --task secure-food --target-hunger 18 --host 127.0.0.1
+  npm run dev -- --task mine-stone --resource iron_ore --count 4 --host 127.0.0.1 --open-browser
+  npm run dev -- --task secure-food --target-hunger 18 --host 127.0.0.1 --one-shot
+  python3 main.py                                        (launcher: checks, ports, browser, graceful stop)
 
 Offline:
   --demo               Run the seeded look scenario against the offline fake adapter
@@ -407,7 +471,7 @@ Offline:
   --seed N             Seed for --sim scenarios (default 101)
 
 Live Java server (requires an authorized private/local server):
-  --task TASK          Run gather-logs, mine-stone, craft-wooden-pickaxe or secure-food on a Java server
+  --task TASK          Run gather-logs, mine-stone, craft-wooden-pickaxe, secure-food or build-shelter on a Java server
   --resource NAME      Target block or item for the task (oak_log, stone, iron_ore, wooden_pickaxe, ...)
   --count N            Inventory target for gather/craft, from 1 through 64 (default: 1)
   --target-hunger N    Hunger target for secure-food, from 1 through 20 (default: 18)
@@ -425,15 +489,33 @@ Live Java server (requires an authorized private/local server):
   --look-pitch RADIANS Look pitch in radians (range -pi/2 through pi/2)
   --trace-dir PATH     JSONL trace directory (default: data/traces)
 
-Control Center (real state, real controls; serve it from a run):
-  --control-center     Serve the dashboard for this run and keep the process open until Ctrl-C
+Session lifecycle (live and --sim sessions):
+  (default)            Persistent: connect, run the requested task (if any), then stay connected and idle until
+                       you stop the session from the Control Center or press Ctrl-C. The Control Center is served.
+  --persistent         Say so explicitly.
+  --one-shot           End the session when the requested task finishes (exit code 1 if it did not succeed).
+                       Serves no Control Center unless --control-center is also given.
+  --no-autonomy        The agent acts only on tasks you start (safety limits are unchanged either way)
+  --no-connect         Start only the Control Center; connect to a server from the page
+  --reconnect-attempts N  Retries after a dropped connection, 0 through 20 (default 5; 0 disables reconnecting)
+
+Control Center (real state, real controls; stays up for the whole process):
+  --control-center     Serve the dashboard (always on for persistent runs; opt-in for one-shot runs)
+  --no-control-center  Run with no dashboard (Ctrl-C is then the only way to stop a persistent session)
   --control-port PORT  Port for the dashboard (default 8787, 0 picks a free one)
-  --control-host HOST  Interface to bind (default 127.0.0.1; use 0.0.0.0 only on a trusted network)
+  --control-host HOST  Interface to bind (default 127.0.0.1, this machine only). 0.0.0.0 exposes the dashboard,
+                       and the commands it accepts, to the whole network: use it only on a trusted network.
+  --allow-host NAME    Extra Host header name accepted while bound to loopback (for a local reverse proxy)
+  --open-browser       Open the dashboard in your default browser once (never again on state changes)
+  --no-open-browser    Do not open a browser (the default)
+  --no-instance-lock   Allow a second GameMind process in this project (default: refuse, naming the first)
+  --data-dir PATH      Data directory (default: data)
 
 Learning and policy:
   --learn              Record episodes and reuse them (on by default)
   --no-learning        Turn the experience store off for this run
-  --learning-dir PATH  Experience store directory (default: data/learning)
+  --learning-dir PATH  Live experience store directory (default: data/learning). Offline --sim runs record into
+                       data/learning-simulated instead, so a demo can never become evidence for the live policy.
   --memory-dir PATH    World knowledge directory (default: data/world-memory or GAMEMIND_MEMORY_DIR)
   --world-key KEY      Stable base identity for this world (default: server host + port)
   --policy STATUS|PROMOTE|REJECT
@@ -499,6 +581,8 @@ interface RunHostParts {
   readonly offlineNote: string | null;
   readonly extraRunnerOptions: MinecraftTaskRunnerOptions;
   readonly report: (result: MinecraftTaskResult, source: "cli" | "control-center") => void;
+  /** The task the caller submits right after the host is up; reserved first so autonomy cannot take the idle window. */
+  readonly startupTask?: MinecraftTask;
 }
 
 /**
@@ -535,6 +619,7 @@ async function openRunHost(
     title: parts.offlineNote ? "GameMind (offline world)" : "GameMind",
     ...(parts.options.controlPort !== undefined ? { port: parts.options.controlPort } : {}),
     bindHost: parts.options.controlHost,
+    ...(parts.startupTask ? { startupTask: parts.startupTask } : {}),
     createRunner: makeRunner,
     onTaskFinished: (result, source) => {
       if (source === "control-center") parts.report(result, source);
@@ -636,28 +721,12 @@ async function runDemoTask(
   }
   if (taskKind === "build-shelter") {
     // The shelter needs mutable block state, which the tiny fake fixture does not model.
-    await runSimulatedScenario(
-      "shelter-close-cardinal-sides",
-      options.seed ?? 101,
-      trace,
-      ring,
-      logger,
-      options,
-      true,
-    );
+    process.exitCode = await runSimulatedScenario("shelter-close-cardinal-sides", options.seed ?? 101, logger, options, true);
     return;
   }
   if (taskKind === "secure-food") {
     // Berries and drops only exist in the simulated world, so the food demo runs there.
-    await runSimulatedScenario(
-      "food-remote-berries",
-      options.seed ?? 101,
-      trace,
-      ring,
-      logger,
-      { ...options, targetHunger: options.targetHunger ?? 8 },
-      true,
-    );
+    process.exitCode = await runSimulatedScenario("food-remote-berries", options.seed ?? 101, logger, { ...options, targetHunger: options.targetHunger ?? 8 }, true);
     return;
   }
   const fixture = createFakeMinecraftFixture(1337);
@@ -704,6 +773,7 @@ async function runDemoTask(
       worldKey: "offline-fixture-1337",
       offlineNote: "Offline demo: the world is a fixture, not a Minecraft server.",
       extraRunnerOptions: {},
+      startupTask: task,
       report: (result) =>
         console.log(JSON.stringify({ type: "task-report", offlineFixture: true, ...result, ...failureClassification(result) }, null, 2)),
     });
@@ -725,18 +795,17 @@ async function runDemoTask(
 }
 
 /**
- * Runs one offline simulated scenario from the evaluation suite. The world is not a Minecraft
- * server: this demonstrates control behaviour, and the report says so.
+ * Runs one offline simulated scenario from the evaluation suite through the same app and session the live flow uses.
+ * The world is not a Minecraft server: this demonstrates control behaviour, and every report and page says so.
+ * Without --control-center it runs the scenario and exits; with it the session stays open for inspection.
  */
 async function runSimulatedScenario(
   scenarioId: string,
   seed: number,
-  trace: TraceRecorder,
-  ring: RingBufferTraceSink,
   logger: ReturnType<typeof createLogger>,
   options: CliOptions,
   demo: boolean,
-): Promise<void> {
+): Promise<number> {
   const scenario = evaluationScenarios().find((candidate) => candidate.id === scenarioId);
   if (!scenario) {
     const ids = evaluationScenarios().map((candidate) => candidate.id).join(", ");
@@ -747,222 +816,139 @@ async function runSimulatedScenario(
     baseTask.kind === "secure_food" && options.targetHunger !== undefined
       ? secureFoodTaskSchema.parse({ ...baseTask, targetHunger: options.targetHunger })
       : baseTask;
-  const adapter = new SimulatedMinecraftAdapter({ definition: scenario.world(seed), allowCombat: options.allowCombat });
-  const { runtime, skills, safety } = createMinecraftAgent(adapter, trace, logger);
-  const decisionModel = new MinecraftTaskDecisionModel();
-  const learner = createLearner(options, logger);
-  const signal = new AbortController();
-  const onSignal = (name: NodeJS.Signals): void => {
-    logger.warn({ signal: name }, "Shutdown signal received; ending the simulated run");
-    signal.abort();
-  };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-  const report = (result: MinecraftTaskResult, source: "cli" | "control-center"): void => {
+  const serve = options.controlCenterDisabled ? false : options.modeGiven ? (options.mode === "persistent" ? true : options.controlCenter) : options.controlCenter;
+  const mode = options.modeGiven ? options.mode : serve ? "persistent" : "one-shot";
+  const report = (result: MinecraftTaskResult, source: ReportSource, details?: ReportDetails): void => {
     console.log(
       JSON.stringify(
-        {
-          type: "sim-task-report",
-          simulatedWorld: true,
-          startedBy: source,
-          scenarioId,
-          seed,
-          description: scenario.description,
-          expectation: scenario.expectation,
-          ...(demo ? { offlineDemo: true } : {}),
-          simulatedElapsedMs: adapter.simulatedNowMs,
-          worldStats: {
-            damageTaken: adapter.world.stats.damageTaken,
-            minHealth: adapter.world.stats.minHealth,
-            starvationTicks: adapter.world.stats.starvationTicks,
-          },
-          ...result,
-          ...failureClassification(result),
-        },
+        simulatedTaskReport({ id: scenarioId, seed, description: scenario.description, expectation: scenario.expectation, demo }, result, source, details),
         null,
         2,
       ),
     );
-    // The scenario's own expectation gates the run the CLI started. A task an operator starts from the
-    // dashboard afterwards is not part of the scenario, so it reports without turning the demo red.
-    if (source === "cli" && result.status !== "succeeded" && scenario.expectation === "success") {
-      throw new Error(`Simulated scenario '${scenarioId}' ended with status '${result.status}'.`);
-    }
   };
-  try {
-    const { host, run } = await openRunHost({
-      options,
-      trace,
-      ring,
-      logger,
-      runtime,
-      skills,
-      safety,
-      decisionModel,
-      learner,
-      worldKey: `${scenarioId}#${seed}`,
-      offlineNote: "Simulated world: this is the offline evaluation adapter, not a Minecraft server.",
-      extraRunnerOptions: { clock: () => adapter.simulatedNowMs, provenance: "simulator-demo" },
-      report,
-    });
-    const result = await run(task);
-    report(result, "cli");
-    if (host) {
-      console.log(`Control Center for this simulated run: ${host.handle?.url} (left open until Ctrl-C)`);
-      await host.waitUntil(signal.signal);
-      await host.close();
-    }
-  } finally {
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-    await runtime.shutdown(`simulated scenario ${scenarioId} complete`);
-  }
+  return runCommandLine({
+    root: process.cwd(),
+    ...(options.dataDirectory ? { dataDirectory: resolve(options.dataDirectory) } : {}),
+    logger,
+    version: packageVersion(),
+    mode,
+    controlCenter: serve,
+    bind: { host: options.controlHost, ...(options.controlPort !== undefined ? { port: options.controlPort } : {}), allowedHosts: options.allowHosts },
+    connect: {
+      source: "simulated",
+      scenarioId,
+      seed,
+      mode,
+      // A scenario demo is deterministic: the agent does what the scenario asks, not what autonomy would add afterwards.
+      autonomy: false,
+      allowCombat: options.allowCombat,
+      startupTask: task,
+    },
+    openBrowser: options.openBrowser,
+    // Simulated runs record into their own store; the live policy store is never written by an offline demo.
+    learningDirectory: options.learning ? resolve(options.learningDirectory) : null,
+    memoryDirectory: resolve(options.memoryDirectory),
+    traceDirectory: resolve(options.traceDirectory),
+    instanceLock: options.instanceLock && serve,
+    report,
+    taskDescription: scenarioId,
+    // The scenario's own expectation decides whether the demo is red: a scenario that expects only safety may end blocked.
+    isFailure: (result) => result.status !== "succeeded" && scenario.expectation === "success",
+  });
 }
 
-async function runMinecraft(
-  options: CliOptions,
-  trace: TraceRecorder,
-  ring: RingBufferTraceSink,
-  logger: ReturnType<typeof createLogger>,
-): Promise<void> {
-  const task = options.task ? configuredTask(options) : null;
-  const configFromEnv = minecraftAdapterConfigFromEnv();
-  const config = {
-    ...DEFAULT_MINECRAFT_CONFIG,
-    ...configFromEnv,
-    ...(options.host !== undefined ? { host: options.host } : {}),
-    ...(options.port !== undefined ? { port: options.port } : {}),
-    ...(options.username !== undefined ? { username: options.username } : {}),
-    ...(options.version !== undefined ? { version: options.version } : {}),
-    ...(options.auth !== undefined ? { auth: options.auth } : {}),
-    ...(options.allowCombat ? { allowCombat: true } : {}),
+/** Persistent is the default for a live run: connecting and then leaving again is not what anyone starting an agent wants. */
+function liveRunShape(options: CliOptions): { mode: "persistent" | "one-shot"; serve: boolean } {
+  const mode = options.mode;
+  const serve = options.controlCenterDisabled ? false : mode === "persistent" ? true : options.controlCenter;
+  return { mode, serve };
+}
+
+function taskReport(options: CliOptions) {
+  return (result: MinecraftTaskResult, source: ReportSource): void => {
+    console.log(JSON.stringify(liveTaskReport(result, source), null, 2));
   };
-  const adapter = new MinecraftAdapter(logger, config);
-  const { runtime, skills, safety } = createMinecraftAgent(adapter, trace, logger, {
-    // Combat is opt-in at three layers; this is the operator's explicit second and third "yes".
-    ...(options.allowCombat ? { optedInCapabilities: [MINECRAFT_ATTACK_HOSTILE_CAPABILITY] } : {}),
+}
+
+async function runLive(options: CliOptions, logger: ReturnType<typeof createLogger>): Promise<number> {
+  const startupTask = options.task ? configuredTask(options) : undefined;
+  const { mode, serve } = liveRunShape(options);
+  const connect: ConnectRequest | null = options.connect
+    ? {
+        source: "live",
+        ...(options.host !== undefined ? { host: options.host } : {}),
+        ...(options.port !== undefined ? { port: options.port } : {}),
+        ...(options.username !== undefined ? { username: options.username } : {}),
+        ...(options.version !== undefined ? { version: options.version } : {}),
+        ...(options.auth !== undefined ? { auth: options.auth } : {}),
+        mode,
+        autonomy: options.autonomy,
+        allowCombat: options.allowCombat,
+        ...(options.worldKey !== undefined ? { worldKey: `minecraft-java:${options.worldKey}` } : {}),
+        ...(startupTask ? { startupTask } : {}),
+      }
+    : null;
+  if (options.lookYaw !== undefined) return runProbeCommand(options, logger, connect, { kind: "look", yaw: options.lookYaw, pitch: options.lookPitch });
+  // One-shot, no task, no dashboard: there is nothing to run, so report what the agent sees instead of connecting and leaving silently.
+  if (connect && mode === "one-shot" && !startupTask && !serve) return runProbeCommand(options, logger, connect, { kind: "observe" });
+  return runCommandLine({
+    root: process.cwd(),
+    ...(options.dataDirectory ? { dataDirectory: resolve(options.dataDirectory) } : {}),
+    logger,
+    version: packageVersion(),
+    mode,
+    controlCenter: serve,
+    bind: { host: options.controlHost, ...(options.controlPort !== undefined ? { port: options.controlPort } : {}), allowedHosts: options.allowHosts },
+    connect,
+    openBrowser: options.openBrowser,
+    learningDirectory: options.learning ? resolve(options.learningDirectory) : null,
+    memoryDirectory: resolve(options.memoryDirectory),
+    traceDirectory: resolve(options.traceDirectory),
+    ...(options.reconnectAttempts !== undefined ? { reconnectAttempts: options.reconnectAttempts } : {}),
+    instanceLock: options.instanceLock && serve,
+    report: taskReport(options),
+    taskDescription: String(options.task ?? "requested"),
   });
-  const decisionModel = new MinecraftTaskDecisionModel();
-  const learner = createLearner(options, logger);
+}
 
-  const signal = new AbortController();
-  const onSignal = (name: NodeJS.Signals): void => {
-    logger.warn({ signal: name }, "Shutdown signal received; closing Minecraft session safely");
-    signal.abort();
-    void runtime.shutdown(name).catch((error: unknown) => {
-      logger.error({ err: error }, "Safe shutdown after signal failed");
-    });
-  };
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-  let persistentMemory: PersistentWorldMemory | null = null;
+/**
+ * The shortest live runs, for "can I reach that server and what does the agent see?": connect, do one small step, print one
+ * report, disconnect. `--look-yaw` turns the bot once; `--one-shot` with no task and no Control Center prints the first
+ * observation. Both are one-shots by nature, so they never keep a session.
+ */
+async function runProbeCommand(options: CliOptions, logger: ReturnType<typeof createLogger>, connect: ConnectRequest | null, probe: ProbeRequest): Promise<number> {
+  const { createSessionFactory } = await import("./app/session-factory.js");
+  const { MinecraftSession } = await import("./app/session.js");
+  const { AppEventLog } = await import("./app/event-log.js");
+  const { defaultRedactionContext } = await import("./app/redact.js");
+  if (!connect) return 2;
+  const events = new AppEventLog({ redaction: defaultRedactionContext(process.cwd()) });
+  const factory = createSessionFactory({
+    logger,
+    events,
+    learner: null,
+    traceDirectory: resolve(options.traceDirectory),
+    memoryDirectory: resolve(options.memoryDirectory),
+  });
+  const request: ConnectRequest = { ...connect, mode: "one-shot", autonomy: false };
+  const session = new MinecraftSession({
+    id: probe.kind === "look" ? "look-only" : "observe-only",
+    request,
+    resources: factory(request),
+    events,
+    logger,
+    host: { training: null },
+  });
+  return runProbe(session, probe);
+}
 
+function packageVersion(): string {
   try {
-    const session = await runtime.connect();
-    const dimension = runtime.currentWorldState?.state.player.dimension ?? "unknown";
-    const worldKey = options.worldKey
-      ? `minecraft-java:${options.worldKey}:${dimension}`
-      : `minecraft-java:${config.host.toLowerCase()}:${config.port}:${dimension}`;
-    persistentMemory = await PersistentWorldMemory.open(resolve(options.memoryDirectory), worldKey, { logger });
-    const initialWorld = runtime.currentWorldState;
-    if (initialWorld) persistentMemory.observe(initialWorld.state, initialWorld.sequence);
-    logger.info(
-      {
-        sessionId: session.id,
-        worldKey,
-        memoryFile: persistentMemory.filePath,
-        gameVersion: session.gameVersion,
-        host: config.host,
-        port: config.port,
-        capabilities: adapter.capabilities.map(({ name }) => name),
-      },
-      "Minecraft observation loop connected",
-    );
-
-    let host: MinecraftRunHost | null = null;
-    if (options.controlCenter) {
-      host = (
-        await openRunHost({
-          options,
-          trace,
-          ring,
-          logger,
-          runtime,
-          skills,
-          safety,
-          decisionModel,
-          learner,
-          worldKey,
-          memory: persistentMemory,
-          offlineNote: null,
-          extraRunnerOptions: { provenance: "live" },
-          report: (result, source) =>
-            console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result, ...failureClassification(result) }, null, 2)),
-        })
-      ).host;
-    }
-    if (task) {
-      const result = host
-        ? await host.runTask(task)
-        : await new MinecraftTaskRunner(runtime, skills, decisionModel, logger, {
-            ...(learner ? { learner } : {}),
-            worldKey,
-            memory: persistentMemory,
-            allowCombat: options.allowCombat,
-          }).run(task);
-      console.log(JSON.stringify({ type: "task-report", startedBy: "cli", ...result, ...failureClassification(result) }, null, 2));
-      if (host) {
-        // The operator keeps the dashboard open after the task so the trace and the learning result stay
-        // readable; a second task can be started from the UI against the same live session.
-        console.log(`Control Center for this live run: ${host.handle?.url} (left open until Ctrl-C)`);
-        await host.waitUntil(signal.signal);
-        await host.close();
-      }
-      if (result.status !== "succeeded") {
-        throw new Error(failureLine(result, String(options.task)));
-      }
-    } else if (options.lookYaw !== undefined) {
-      const result = await skills.run("minecraft.orient", {
-        yaw: options.lookYaw,
-        pitch: options.lookPitch,
-      });
-      console.log(JSON.stringify({ type: "skill-result", ...result }, null, 2));
-      if (result.action.status !== "succeeded") {
-        throw new Error(
-          `Minecraft look action ended with status '${result.action.status}': ${result.action.failure?.message ?? "unconfirmed"}`,
-        );
-      }
-    } else {
-      console.log(
-        JSON.stringify(
-          {
-            type: "initial-observation",
-            sessionId: session.id,
-            observation: runtime.currentWorldState,
-            availableSkills: skills.list().map(({ id, description }) => ({ id, description })),
-          },
-          null,
-          2,
-        ),
-      );
-      if (host) {
-        // Observation-only mode with a dashboard: the agent acts only when an operator starts a task.
-        console.log(`Control Center for this session: ${host.handle?.url} (left open until Ctrl-C)`);
-        await host.waitUntil(signal.signal);
-        await host.close();
-      }
-    }
-  } finally {
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
-    if (persistentMemory) {
-      try {
-        await persistentMemory.flush();
-      } catch (error) {
-        logger.warn({ err: error }, "Persistent world memory did not flush cleanly at shutdown");
-      }
-    }
-    await runtime.shutdown("CLI run complete");
+    const parsed = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version?: unknown };
+    return typeof parsed.version === "string" ? parsed.version : "0.0.0";
+  } catch {
+    return "0.0.0";
   }
 }
 
@@ -987,18 +973,31 @@ async function main(): Promise<void> {
     return;
   }
   if (options.sim !== undefined) {
-    await runSimulatedScenario(options.sim, options.seed ?? 101, trace, ring, logger, options, false);
+    process.exitCode = await runSimulatedScenario(options.sim, options.seed ?? 101, logger, options, false);
     return;
   }
   if (options.demoTask) {
     await runDemoTask(options, trace, ring, logger);
     return;
   }
-  await runMinecraft(options, trace, ring, logger);
+  process.exitCode = await runLive(options, logger);
 }
 
-main().catch((error: unknown) => {
-  const logger = createLogger();
-  logger.error({ err: error }, "GameMind exited with an error");
-  process.exitCode = 1;
-});
+/** True only when this file is the program being run, so tests can import `parseArgs` without starting the agent. */
+function isMainModule(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  main().catch((error: unknown) => {
+    const logger = createLogger();
+    logger.error({ err: error }, "GameMind exited with an error");
+    process.exitCode = 1;
+  });
+}

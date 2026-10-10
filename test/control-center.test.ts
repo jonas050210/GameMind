@@ -46,6 +46,30 @@ interface FixtureOptions {
   readonly stopAfterActions?: number;
 }
 
+/**
+ * Everything the browser loads for the page: index.html plus app.js and every module it imports, found by following the
+ * `import ... from "./x.js"` lines the way the browser does. The page is modular, so contract checks that used to grep one
+ * script now read this whole bundle.
+ */
+async function loadPageBundle(base: string): Promise<{ readonly html: string; readonly app: string; readonly modules: Readonly<Record<string, string>>; readonly all: string }> {
+  const html = await (await fetch(`${base}/index.html`)).text();
+  const modules: Record<string, string> = {};
+  const queue = ["app.js"];
+  while (queue.length > 0) {
+    const name = queue.shift() as string;
+    if (name in modules) continue;
+    const response = await fetch(`${base}/${name}`);
+    assert.equal(response.status, 200, `${name} is imported by the page and must be served`);
+    const text = await response.text();
+    modules[name] = text;
+    for (const match of text.matchAll(/from\s+"(\.\/[^"]+|\.\.\/[^"]+)"/g)) {
+      const resolved = new URL(match[1] as string, `http://page.invalid/${name}`).pathname.replace(/^\//, "");
+      queue.push(resolved);
+    }
+  }
+  return { html, app: modules["app.js"] as string, modules, all: [html, ...Object.values(modules)].join("\n") };
+}
+
 async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const directory = await mkdtemp(path.join(tmpdir(), "gamemind-control-center-"));
   const logger = createLogger("silent");
@@ -224,11 +248,15 @@ test("snapshot reflects the live runtime, before and after a real task", async (
     assert.equal(before.world.sessionFacts?.gameMode.value, "survival");
     assert.equal(before.world.sessionFacts?.gameMode.evidence, "verified");
     assert.equal(before.world.perception, null, "the simulator does not invent live adapter timing data");
-    // Block and entity coordinates, the terrain census, and the agent's own position are not published: the
-    // Control Center shows status, and those were low-level data the operator views never needed.
-    for (const key of ["blocks", "terrain", "position"]) {
+    // Block coordinates and the terrain census are not published: the Control Center shows status, and those were
+    // low-level data the operator views never needed. The agent's own position is published (the Overview and Bots views
+    // must say where the bot is), but only as whole blocks, and entities still carry no coordinates.
+    for (const key of ["blocks", "terrain"]) {
       assert.equal(key in before.world, false, `world.${key} must not be in the status payload`);
     }
+    assert.ok(before.world.position, "the bot's own position comes from the observed player state");
+    assert.deepEqual(Object.keys(before.world.position ?? {}).sort(), ["x", "y", "z"]);
+    assert.ok(Object.values(before.world.position ?? {}).every((coordinate) => Number.isInteger(coordinate)), "whole blocks, never a precise coordinate");
     assert.ok((before.world.entities ?? []).every((entity) => !("position" in entity)), "entities carry no coordinates");
 
     const result = await fixture.runTask(taskFromControlCenterRequest({ kind: "gather-logs", count: 1 }));
@@ -449,7 +477,8 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     assert.match(html, /id="boot-data"/);
     assert.ok(!html.includes("__CONTROL_TOKEN__"), "the token placeholder must be replaced when serving");
     assert.ok(html.includes(fixture.host.handle?.token ?? "missing"), "the served page carries this server's token");
-    const clientScript = await (await fetch(`${base}/app.js`)).text();
+    const bundle = await loadPageBundle(base);
+    const clientScript = bundle.all;
     for (const route of ["/api/snapshot", "/api/command"]) {
       assert.ok(clientScript.includes(route), `the UI must call ${route} on this same server`);
     }
@@ -458,11 +487,12 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
       "the removed live event stream must not be re-opened by the UI: the snapshot poll is the only read channel",
     );
     assert.ok(
-      /POLL_HIDDEN_MS|document\.hidden/.test(clientScript),
+      /POLL_HIDDEN_MS|document\.hidden/.test(bundle.app),
       "polling must back off while the tab is hidden, so an unwatched page costs the agent nothing",
     );
     assert.ok(clientScript.includes("aria-valuenow"), "the action-budget progress bar must expose its live value");
-    for (const asset of ["styles.css", "app.js", "index.html"]) {
+    const assets = ["styles.css", "index.html", ...Object.keys(bundle.modules)];
+    for (const asset of assets) {
       const response = await fetch(`${base}/${asset}`);
       assert.equal(response.status, 200, `${asset} must be served from the package, not a CDN`);
       const body = await response.text();
@@ -471,22 +501,24 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
         `${asset} must not reference external origins: the dashboard runs with no network access`,
       );
       assert.ok(!/<link[^>]+href=["']http/.test(body) && !/<script[^>]+src=["']http/.test(body), `${asset} must not load remote code`);
+      assert.ok(!/@import\s+url\(["']?http|url\(["']?https?:/.test(body), `${asset} must not pull remote fonts or images`);
     }
-    // Every element id the renderer looks up must exist in the served page: the dashboard has no type
-    // checker over its DOM, so a card that is renamed in the HTML fails silently at runtime in the browser.
-    const markup = await (await fetch(`${base}/index.html`)).text();
-    const declared = new Set([...markup.matchAll(/id="([^"]+)"/g)].map((match) => match[1] ?? ""));
+    // Every element id the page controller looks up must exist in the served page: the dashboard has no type
+    // checker over its DOM, so a control that is renamed in the HTML fails silently at runtime in the browser.
+    const declared = new Set([...bundle.html.matchAll(/id="([^"]+)"/g)].map((match) => match[1] ?? ""));
     const OPTIONAL_IDS = new Set(["theme-toggle"]);
-    const lookedUp = [...new Set([...clientScript.matchAll(/el\("([^"]+)"\)/g)].map((match) => match[1] ?? ""))];
+    const lookedUp = [...new Set([...bundle.app.matchAll(/\bel\("([^"]+)"\)/g)].map((match) => match[1] ?? ""))];
+    assert.ok(lookedUp.length > 30, "the controller looks its elements up through el(\"id\"), which this check can read");
     assert.deepEqual(
       lookedUp.filter((id) => !declared.has(id) && !OPTIONAL_IDS.has(id)),
       [],
-      "the page must declare every element the renderers touch",
+      "the page must declare every element the controller touches",
     );
-    // The removed live-stream card must not leave its renderer behind, and the blocker card must be wired.
+    // The removed live-stream card must not leave its renderer behind; the reason a task cannot start and the age of the
+    // world data are rendered from the snapshot (their behaviour is exercised in ui-page.test.ts).
     assert.ok(!clientScript.includes('el("events")'), "the live event stream card is gone from the UI");
-    assert.ok(lookedUp.includes("blocker"), "the blocker panel is rendered from the snapshot");
-    assert.ok(lookedUp.includes("world-freshness"), "the world panel states how current its data is");
+    assert.ok(bundle.app.includes("taskBlocker") && bundle.html.includes('id="task-hint"'), "the page explains why a task cannot start");
+    assert.ok(clientScript.includes("freshness") && bundle.html.includes('id="ov-vitals"'), "the world panel states how current its data is");
 
     const missing = await fetch(`${base}/../etc/passwd`);
     assert.ok(missing.status === 404 || missing.status === 403, "path escapes are refused");
@@ -673,13 +705,14 @@ test("the Control Center shows the new panels and no longer offers an action cap
   const fixture = await startFixture();
   try {
     const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
-    const html = await (await fetch(base)).text();
-    const script = await (await fetch(`${base}/app.js`)).text();
-    for (const heading of ["Objective &amp; subgoal", "World seed", "Training", "Observation rate", "Observation age", "Reaction p95"]) {
-      assert.ok(html.includes(heading) || script.includes(heading), `the UI shows ${heading}`);
+    const bundle = await loadPageBundle(base);
+    const html = bundle.html;
+    const script = bundle.all;
+    for (const heading of ["Objective & subgoal", "World seed", "Training", "Observation rate", "Observation age", "Reaction p95"]) {
+      assert.ok(script.includes(heading) || script.includes(heading.replace("&", "&amp;")), `the UI shows ${heading}`);
     }
-    assert.ok(!html.includes("budget-input") && !script.includes("budget-form"), "the action-cap input is gone");
-    assert.ok(!script.includes("setActionBudget") && !html.includes("Action cap"), "no UI path sets an action cap");
+    assert.ok(!script.includes("budget-input") && !script.includes("budget-form"), "the action-cap input is gone");
+    assert.ok(!script.includes("setActionBudget") && !script.includes("Action cap"), "no UI path sets an action cap");
     for (const id of ["training-form", "training-metrics", "training-episodes-table", "loop-targets", "seed-form", "objective-panel"]) {
       assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
     }
@@ -795,7 +828,7 @@ test("training refuses an out-of-range time budget at the endpoint, and the page
     assert.equal(snapshot.training?.processAlive, false, "the refused request started nothing");
 
     const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
-    const html = await (await fetch(base)).text();
+    const html = (await loadPageBundle(base)).html;
     for (const id of ["training-headless", "training-minutes", "training-max-episodes", "roadmap-items", "roadmap-refresh", "training-reward"]) {
       assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
     }

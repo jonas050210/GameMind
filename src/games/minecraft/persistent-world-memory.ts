@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Logger } from "pino";
+import { writeFileAtomic } from "../../core/atomic-file.js";
 import type { MinecraftObservation } from "./observation.js";
 import { WorldMemory, type MemoryUpdate, type WorldMemorySnapshot } from "./world-memory.js";
 
@@ -100,16 +101,8 @@ export class PersistentWorldMemory extends WorldMemory {
 
   private enqueueWrite(): Promise<void> {
     const snapshot: WorldMemorySnapshot = this.exportSnapshot(this.worldKey);
-    const temporary = `${this.filePath}.${process.pid}.tmp`;
     const operation = this.writeQueue.catch(() => undefined).then(async () => {
-      await mkdir(path.dirname(this.filePath), { recursive: true });
-      try {
-        await writeFile(temporary, `${JSON.stringify(snapshot)}\n`, { encoding: "utf8", mode: 0o600 });
-        await rename(temporary, this.filePath);
-      } catch (error) {
-        await rm(temporary, { force: true }).catch(() => undefined);
-        throw error;
-      }
+      await writeFileAtomic(this.filePath, `${JSON.stringify(snapshot)}\n`, { mode: 0o600 });
     });
     this.writeQueue = operation;
     return operation;

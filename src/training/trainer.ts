@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import type { Logger } from "pino";
 import { ExperienceLearner } from "../core/learning/learner.js";
 import type { PolicyWeights } from "../core/learning/policy-weights.js";
@@ -12,6 +12,7 @@ import {
   trainingSeed,
   type CurriculumStage,
 } from "./curriculum.js";
+import { acquireTrainingLock, type LockEnvironment } from "./lock.js";
 import { TRAINING_SCHEMA_VERSION, readControlCommand, readTrainingState, trainingPaths, writeControlCommand, writeJsonAtomic, type TrainingCheckpointRecord, type TrainingEpisodeRecord, type TrainingPaths, type TrainingState, archiveTrainingArtifacts, canonicalDigest } from "./state.js";
 
 /** Runs one scenario episode. Injectable so tests can drive the state machine without the simulator. */
@@ -41,6 +42,36 @@ export interface TrainingRunOptions {
   readonly evaluationSeedCount?: number;
   readonly logger?: Pick<Logger, "info" | "warn" | "error">;
   readonly now?: () => Date;
+  /** Set false only for callers that already hold the directory lock. Default: take it, so two runs cannot share a directory. */
+  readonly lock?: boolean;
+  readonly lockEnvironment?: LockEnvironment;
+}
+
+/** Thrown when a directory holds training data that a new run would silently overwrite. */
+export class TrainingDirectoryError extends Error {
+  readonly code = "TRAINING_DIRECTORY_HAS_DATA";
+  constructor(message: string) {
+    super(message);
+    this.name = "TrainingDirectoryError";
+  }
+}
+
+async function countEntries(directory: string): Promise<number> {
+  try {
+    return (await readdir(directory)).filter((name) => !name.startsWith(".") && !name.endsWith(".tmp")).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** What a directory already holds, so a run can refuse to write over data it does not own. */
+export async function describeTrainingArtifacts(paths: TrainingPaths): Promise<{ readonly checkpoints: number; readonly experienceFiles: number; readonly evaluations: number }> {
+  const [checkpoints, experienceFiles, evaluations] = await Promise.all([
+    countEntries(paths.checkpoints),
+    countEntries(paths.experience),
+    countEntries(paths.evaluations),
+  ]);
+  return { checkpoints, experienceFiles, evaluations };
 }
 
 const DEFAULT_EPISODES_PER_STAGE = 8;
@@ -88,6 +119,15 @@ function initialState(
  * it. Nothing here changes the active policy; promotion stays with the offline gate.
  */
 export async function runTraining(options: TrainingRunOptions): Promise<TrainingState> {
+  const lock = options.lock === false ? null : acquireTrainingLock(options.root, "train", options.lockEnvironment);
+  try {
+    return await runTrainingLocked(options);
+  } finally {
+    lock?.release();
+  }
+}
+
+async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingState> {
   const paths = trainingPaths(options.root);
   const stages = options.stages ?? TRAINING_STAGES;
   const logger = options.logger;
@@ -107,6 +147,24 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
 
   const scenarios = curriculumScenarios(stages);
   const existing = await readTrainingState(paths);
+  if (!existing) {
+    // No state file but existing data: a new run would number its checkpoints from 1 again and replace the old files
+    // that carry the same ids. Refuse and say how to proceed instead of overwriting learning data.
+    const artifacts = await describeTrainingArtifacts(paths);
+    if (artifacts.checkpoints > 0 || artifacts.experienceFiles > 0 || artifacts.evaluations > 0) {
+      throw new TrainingDirectoryError(
+        `This training directory already holds data (${artifacts.checkpoints} checkpoint(s), ${artifacts.experienceFiles} experience file(s), ${artifacts.evaluations} evaluation(s)) but no state file, so it cannot be resumed. ` +
+          "Starting here would overwrite checkpoints that have the same ids. Choose a fresh start (the existing data is archived, never deleted) or use another directory.",
+      );
+    }
+  } else {
+    const wanted = stages.map((stage) => stage.id);
+    if (existing.stageIds && (existing.stageIds.length !== wanted.length || existing.stageIds.some((id, index) => id !== wanted[index]))) {
+      throw new TrainingDirectoryError(
+        `This run was started with the stages [${existing.stageIds.join(", ")}]; resuming it with [${wanted.join(", ")}] would misplace its progress. Resume with the same stages, or start fresh to change the curriculum.`,
+      );
+    }
+  }
   const configuredPerStage = options.episodesPerStage ?? existing?.episodesPerStage ?? null;
   const episodesPerStage = configuredPerStage ?? DEFAULT_EPISODES_PER_STAGE;
   const maxEpisodes = options.maxEpisodes ?? existing?.maxEpisodes ?? episodesPerStage * stages.length * 2;
@@ -127,6 +185,8 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
         updatedAt: now().toISOString(),
       }
     : initialState({ episodesPerStage, maxEpisodes, maxMinutes }, now().toISOString());
+  state.stageIds = stages.map((stage) => stage.id);
+  state.explorationRate = options.explorationRate ?? 0;
   if (options.evaluationSeedCount !== undefined) assertSeedSplit(options.evaluationSeedCount, maxEpisodes);
   await writeControlCommand(paths, "run");
   await persist(paths, state, now);
@@ -252,7 +312,7 @@ async function persist(paths: TrainingPaths, state: TrainingState, now: () => Da
   await writeJsonAtomic(paths.state, state);
 }
 
-async function saveCheckpoint(
+export async function saveCheckpoint(
   paths: TrainingPaths,
   weights: PolicyWeights,
   stageId: string,
@@ -263,6 +323,11 @@ async function saveCheckpoint(
   const path = `${paths.checkpoints}/${id}.json`;
   const createdAt = now().toISOString();
   const body = { schemaVersion: 1, id, stageId, createdAt, episodes, weights };
+  // Never replace an existing checkpoint with different content: it may be the only record of an earlier run.
+  const previous = await readFile(path, "utf8").then((text) => JSON.parse(text) as { weights?: unknown }, () => null);
+  if (previous !== null && canonicalDigest(previous.weights) !== canonicalDigest(weights)) {
+    throw new TrainingDirectoryError(`Checkpoint ${id} already exists with different contents; refusing to overwrite it. Use a fresh start (which archives the old run) or another directory.`);
+  }
   // The digest lets evaluation refuse a checkpoint that was edited after it was written.
   await writeJsonAtomic(path, { ...body, digest: canonicalDigest(body) });
   return {

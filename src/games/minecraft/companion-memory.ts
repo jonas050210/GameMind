@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { writeFileAtomic } from "../../core/atomic-file.js";
 import type { CompanionMode } from "./companion-modes.js";
 import { homepointNamePattern } from "./companion-modes.js";
 
@@ -162,14 +163,6 @@ export class CompanionMemory {
 
   private async persist(): Promise<void> {
     if (!this.filePath) return;
-    await mkdir(path.dirname(this.filePath), { recursive: true });
-    const temporary = `${this.filePath}.${process.pid}.tmp`;
-    try {
-      await writeFile(temporary, `${JSON.stringify(this.state)}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temporary, this.filePath);
-    } catch (error) {
-      await rm(temporary, { force: true }).catch(() => undefined);
-      throw error;
-    }
+    await writeFileAtomic(this.filePath, `${JSON.stringify(this.state)}\n`, { mode: 0o600 });
   }
 }

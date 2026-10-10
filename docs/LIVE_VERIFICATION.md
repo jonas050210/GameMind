@@ -1,12 +1,13 @@
 # Live verification checklist
 
-This checklist is what remains before GameMind's new Minecraft behaviour can be described as verified on a real server. Nothing here has been executed against a server yet. Record the result of each check, including failures, before making any compatibility claim.
+This checklist is what remains before GameMind's new Minecraft behaviour can be described as verified on a real server. Nothing here has been executed against a server yet. Sections 16 and 17 record the only runs so far, against a non-vanilla stand-in; section 18 lists the checks for the persistent session, the scheduler, the launcher and the rewritten Control Center, none of which has been run against a server either. Record the result of each check, including failures, before making any compatibility claim.
 
 ## 0. Safety and scope
 
 - Use a **disposable, private world** on a server you are authorized to operate, on Minecraft Java **1.20.4** (or the version you pin with `--version`).
 - Use `MINECRAFT_AUTH=offline` for offline-mode servers only. Do not pass account credentials on the command line or in files you commit.
 - Stop the agent with **Ctrl-C** at any time. The CLI closes the Minecraft session before exiting.
+- A session is **persistent** by default: it stays connected after a task until you stop it. Commands in this checklist that expect the run to finish by itself and print a result carry `--one-shot`.
 - Keep an operator account in-game for the setup commands below. The agent's account should start in **survival** mode.
 
 ## 1. Server setup
@@ -39,7 +40,7 @@ Adjust `y` values to the ground level of your world (the grass surface is at y 6
 ## 2. Connection and wide observation
 
 ```bash
-npm run dev -- --host 127.0.0.1 --port 25565 --username GameMind
+npm run dev -- --host 127.0.0.1 --port 25565 --username GameMind --one-shot
 ```
 
 **Expected:** a JSON `initial-observation` with `observation.state` containing `resourceScan` (`radius: 32`, `center` at the agent's block, `truncated: false`), `resourceSightings` including the log at `30 80 0` (when the agent is at about 0,0) and the berry bush with `properties.age: 3`, and `itemDrops` listing `bread` near `4,-4`. This tests perception only; the task's separate 24-block collection limit can require an approach before collection.
@@ -52,7 +53,7 @@ Remove any nearby test log, leaving only the one at 30 blocks. Then:
 
 ```bash
 npm run dev -- --task gather-logs --resource oak_log --count 1 --explore-legs 8 --max-actions 24 \
-  --host 127.0.0.1 --port 25565 --username GameMind
+  --host 127.0.0.1 --port 25565 --username GameMind --one-shot
 ```
 
 **Expected:** `task-report` with `"status": "succeeded"`. The `actions` array shows either a direct `collect:oak_log` or an `approach:oak_log` followed by collection, and every action has `"verification": "verified"`.
@@ -65,7 +66,7 @@ Give the agent no logs (clear its inventory with `/clear GameMind`) and keep the
 
 ```bash
 npm run dev -- --task craft-wooden-pickaxe --explore-legs 8 --max-actions 24 \
-  --host 127.0.0.1 --port 25565 --username GameMind
+  --host 127.0.0.1 --port 25565 --username GameMind --one-shot
 ```
 
 **Expected:** `succeeded`, with the crafted `wooden_pickaxe` in the final inventory. The first `decision.made` event in the trace carries a `plan` such as `collect 1 oak_log`, `craft 4 oak_planks`, and so on.
@@ -78,7 +79,7 @@ Lower the agent's hunger first, for example `/effect give GameMind minecraft:hun
 
 ```bash
 npm run dev -- --task secure-food --target-hunger 12 --explore-legs 8 --max-actions 24 \
-  --host 127.0.0.1 --port 25565 --username GameMind
+  --host 127.0.0.1 --port 25565 --username GameMind --one-shot
 ```
 
 **Expected:** the actions include `pickup:bread` (skill `minecraft.pickup-item`) and then `restore-hunger` (`minecraft.eat-food`). Each has `"verification": "verified"`, and `metrics.foodSourcesUsed` is at least 1.
@@ -91,7 +92,7 @@ Remove the bread (`/clear GameMind minecraft:bread` or let it be eaten). Keep th
 
 ```bash
 npm run dev -- --task secure-food --target-hunger 8 --explore-legs 8 --max-actions 24 \
-  --host 127.0.0.1 --port 25565 --username GameMind
+  --host 127.0.0.1 --port 25565 --username GameMind --one-shot
 ```
 
 **Expected:** `harvest:sweet_berry_bush` (skill `minecraft.harvest-berries`) confirms with `berriesAfter > berriesBefore`, and the bush's `age` in `details` drops to 1. An unripe bush (`age=1`) must never be harvested; check that the agent skips it.
@@ -103,7 +104,7 @@ npm run dev -- --task secure-food --target-hunger 8 --explore-legs 8 --max-actio
 **Rest (natural regeneration):** lower health with a short damage effect (for example `/effect give GameMind minecraft:instant_damage 1 1`), keep food at 18 or more, and run a gather task:
 
 ```bash
-npm run dev -- --task gather-logs --count 1 --host 127.0.0.1 --port 25565 --username GameMind
+npm run dev -- --task gather-logs --count 1 --host 127.0.0.1 --port 25565 --username GameMind --one-shot
 ```
 
 **Expected:** a `minecraft.rest` action with `confirmation: health_increase_observed_during_rest` and `metrics.restMs > 0`, then the log collection.
@@ -128,58 +129,28 @@ After any run, open `data/traces/<session-id>.jsonl` (the session id is in the `
 
 ## 10. Control Center against a live run
 
-**Setup:** start an authorized server and run the agent with the dashboard:
+**Setup:** start an authorized server and run GameMind with its Control Center. A persistent session is the default and keeps the page up for the whole session:
 
 ```bash
-npm run dev -- --task gather-logs --host 127.0.0.1 --port 25565 --username GameMind --control-center
+python3 main.py --task gather-logs --host 127.0.0.1 --port 25565 --username GameMind
+# or, without the launcher:
+npm run dev -- --task gather-logs --host 127.0.0.1 --port 25565 --username GameMind --open-browser
 ```
 
-Open the printed URL (`http://127.0.0.1:8787/`) on the same machine. The page has no push channel: it
-re-reads `/api/snapshot` every second while a task runs (3 s idle, 15 s in a hidden tab), so a panel that
-updates is evidence the runtime is producing new state, not evidence of a lost event. Then check, in order:
+Open the printed URL (`http://127.0.0.1:8787/`) on the same machine; the launcher and `--open-browser` do this for you, once. The page has no push channel: it re-reads `/api/snapshot` every 1.5 s while the tab is visible (every 15 s in a hidden tab), so a panel that updates is evidence that the runtime is producing new state, not evidence of a lost event. Then check, in order:
 
-1. The header shows `minecraft-java · seq N` with N increasing while the run is live, and the world panel's
-   first line reads `live — observation #N (Xs old)` with X staying small (an idle connected agent is
-   refreshed by the dashboard poll itself; if the line ever reads `stale — observation #N is …s old` while
-   the CLI is still observing, the refresh is broken).
-2. Health, hunger, saturation, air and the inventory must match the client exactly, including when the
-   server reports nothing. A field the session never sent must appear as `not reported` — never as 20
-   health, 20 food, 5 saturation or a full air bar. Drown the agent to a few air ticks and confirm the
-   value falls with `bot.oxygenLevel × 15`; on death, `alive` must follow the real session.
-3. Dimension and game mode are shown with their evidence: `survival · verified (bot.game.gameMode +
-   bot.player.gamemode)`, `survival · one source (…)`, or `unknown · not reported by the session`. Switch
-   mode mid-run with `/gamemode creative GameMind` and the panel must change **and** the next action must be
-   refused with `GAME_MODE_BLOCKS_*`; switch back to survival and the refusal must clear. `/execute in
-   minecraft:the_nether run tp …` must move the dimension line to `the_nether` and gate overworld-only work
-   with `UNSUPPORTED_DIMENSION`.
-4. The Current decision panel shows the goal that is actually running, and its `session` line repeats the
-   mode/dimension the decision was made from. Open "Alternatives considered": rejections must name a real
-   reason (`combat is not enabled for this run…`, `target excluded after repeated failure`, `danger radius
-   around the target`, …).
-5. Press **Pause** mid-run. The next action must be denied with `RUN_PAUSED`, the blocker card must read
-   `safety · RUN_PAUSED · who: you`, and the agent must keep observing. **Resume** continues it and the card
-   returns to `idle`.
-6. Press **Trip**, then **Stop task**. The run must end as `aborted` / `OPERATOR_STOP` after the action in
-   flight, never in the middle of one.
-7. Start a task from the dashboard (`mine-stone`, count 2). It must go through the same limits as the CLI;
-   `Actions` counts up and the map highlights the target block class when it is observed.
-8. Run a Library entry with real parameters (e.g. Movement & Navigation → Inspect block at the agent's
-   feet). The operation must report `succeeded` with `confirmed by adapter` only when the observation
-   agrees; disconnect the run and the same entry must refuse with the connection named. Entries the run
-   cannot serve (combat on an adapter without the switch, companion entries with no coordinator) must show
-   as unavailable with the missing requirement named — never as runnable buttons that fail silently.
-9. Kill the server process mid-run. The connection state, the `status reason` line and the blocker card must
-   say `connection · … · who: server` within one poll; a disconnect must never be displayed as a task
-   failure or a safety refusal.
-10. Reload the page: the token comes from the served page, so the controls keep working; `POST /api/command`
-   from a terminal without the header must return `403`, an unknown command `501`, and `GET /api/stream`
-   must return `410` with `STREAM_REMOVED` (the live event stream is retired; polling replaced it).
+1. **Session and freshness.** The status bar shows the session state (`Running a task`, `Connected · idle`, …) and a **LIVE** badge. On the Overview, the *Player and world* card reads `Observation #N · Xs ago` with N increasing and X staying small. An idle connected agent is refreshed by the page's own poll; if the card says `stale` while the console shows the bot still observing, the refresh is broken. A genuinely stale observation must show the notice *The latest observation is stale* with its consequence (`STALE_OBSERVATION` refuses world-changing actions).
+2. **Telemetry matches the client.** Health, food, position, dimension, game mode and inventory must match what the Minecraft client shows, including when the server reports nothing: a field the session never sent must read *unknown*, never 20 health, 20 food or a default position. The position is shown as whole blocks. On death, *Alive* must read `no — respawning` until the session reports the respawn.
+3. **Dimension and game mode.** Switch mode mid-run with `/gamemode creative GameMind`: the *Game mode* row must change and the next action must be refused with `GAME_MODE_BLOCKS_*` (or a new task must end as `TASK_BLOCKED_MODE`); switch back to survival and the refusal must clear. `/execute in minecraft:the_nether run tp …` must move *Dimension* to `the_nether` and gate overworld-only work with `UNSUPPORTED_DIMENSION`. On the Tasks tab, the *Latest decision* card shows *Game mode seen* and *Dimension seen* with their evidence (`survival · verified`, `single-source`, or `unknown · unreported`).
+4. **Decision explanation.** The *Latest decision* card names the goal that is actually running, with its rationale. *Alternatives considered* and *Rejected candidates* must give real reasons (`combat is not enabled for this run…`, `target excluded after repeated failure`, a danger radius around the target, …). The page never shows a candidate's coordinates; the trace file does.
+5. **Pause and resume.** Press **Pause** on the Overview. The next action must be denied with `RUN_PAUSED`, the Overview shows the *Paused* notice, and the agent must keep observing. **Resume** continues and the notice goes away.
+6. **Trip and stop.** On the Bots tab press **Trip** (or use the Overview's **Emergency stop**), then **Stop task**. The run must end as `aborted` / `OPERATOR_STOP` after the action in flight, never in the middle of one. **Reset trip** clears the *Safety trip raised* notice.
+7. **Start a task from the page** (Tasks tab, `mine-stone`, amount 2). It must go through the same limits as the CLI, and *Actions used* counts up. Starting a second task while it runs must be refused, or queued when *Queue it* is ticked, never run alongside.
+8. **A Library action** (Bots tab, *Library actions (advanced)*): run one with real parameters, for example inspecting the block at the agent's feet. The operation must report `succeeded` only when the observation agrees; disconnect the run and the same entry must refuse with the connection named. Entries the run cannot serve (combat on an adapter without the switch, companion entries with no coordinator) must read as unavailable with the missing requirement named, never as runnable buttons that fail silently.
+9. **Kill the server process mid-run.** Within a poll the session state must change to `Reconnecting` with the attempt count, and *Connection diagnostics* on the Bots tab must say what failed. A disconnect must never be displayed as a task failure or a safety refusal.
+10. **Reload the page.** The token comes from the served page, so the controls keep working and nothing restarts. From a terminal, `POST /api/command` without the `x-gamemind-token` header must return `403`, an unknown command `501`, and `GET /api/stream` must return `410` with `STREAM_REMOVED` (the live event stream is retired; polling replaced it).
 
-**Record:** any panel that stayed unchanged while the CLI log showed new state, any number the panel showed
-that the client did not report, and every control that reported success without a matching trace line. The
-dashboard's wiring, its poll model, the blocker taxonomy and the fallback renderer are covered offline by
-`test/control-center.test.ts`, `test/session-gates.test.ts` and `test/world-view.test.ts`; this section is
-the only place that can verify them against Minecraft.
+**Record:** any panel that stayed unchanged while the console showed new state, any number the page showed that the client did not report, and every control that reported success without a matching event or trace line. The page's wiring, its poll model and its text are covered offline by `test/ui-page.test.ts`, `test/ui-e2e.test.ts`, `test/control-center.test.ts` and `test/session-gates.test.ts`; this section is the only place that can verify them against Minecraft, and §18 item 8 covers how the page looks in a real browser.
 
 ## 11. Experience memory across two runs
 
@@ -187,9 +158,9 @@ the only place that can verify them against Minecraft.
 
 ```bash
 npm run dev -- --policy status
-npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username GameMind
+npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username GameMind --one-shot
 npm run dev -- --policy status
-npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username GameMind
+npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username GameMind --one-shot
 ```
 
 **Expected:** after the first run, `episodes` equals the number of attempted actions and a `data/learning/` directory exists. If the first run blocked on a target (unreachable log, no tool, full inventory), the second run must not spend its budget on that same target: `wastedActions` in the second `task-report` is lower, and the dashboard's Learning panel lists the target as blocked. `activePolicy` stays `null` until you promote something.
@@ -201,7 +172,7 @@ npm run dev -- --task gather-logs --resource oak_log --host 127.0.0.1 --username
 **Setup:** on a test world with mobs, first run **without** the flag:
 
 ```bash
-npm run dev -- --task secure-food --target-hunger 6 --max-actions 20 --host 127.0.0.1 --username GameMind
+npm run dev -- --task secure-food --target-hunger 6 --max-actions 20 --host 127.0.0.1 --username GameMind --one-shot
 ```
 
 Summon a zombie next to you. **Expected:** no `attack_hostile` action; the agent flees, and the decision trace records the rejection `combat is not enabled for this run, so the agent flees instead of attacking`.
@@ -213,8 +184,8 @@ Then run with `--allow-combat` (this arms the adapter, the safety policy and the
 ## 13. Mining and shelter
 
 ```bash
-npm run dev -- --task mine-stone --resource stone --count 4 --max-actions 30 --host 127.0.0.1 --username GameMind --allow-combat
-npm run dev -- --task mine-stone --resource coal_ore --count 2 --host 127.0.0.1 --username GameMind
+npm run dev -- --task mine-stone --resource stone --count 4 --max-actions 30 --host 127.0.0.1 --username GameMind --allow-combat --one-shot
+npm run dev -- --task mine-stone --resource coal_ore --count 2 --host 127.0.0.1 --username GameMind --one-shot
 ```
 
 **Expected for a bare hand:** no dig is attempted on stone; the agent crafts or equips a pickaxe first (`equip:pickaxe` appears in the plan), and only then digs. A dig that would drop nothing is refused by name — `TOOL_REQUIRED` with no pickaxe at all, `TOOL_TIER_INSUFFICIENT` when the best pickaxe is below the block's minimum tier (`iron_ore` and above need stone tier), `BLOCK_NOT_MINEABLE_CLASS` for a block outside the mineable classes.
@@ -236,15 +207,15 @@ Use only a disposable world. With `MINECRAFT_AUTO_RESPAWN` unset (default `true`
 ## 15. Session facts under a real login sequence
 
 **Setup:** join a server that has *not* been touched by the agent before, with the agent in survival, and
-watch the first two observations in the trace plus the dashboard's world panel.
+watch the first two observations in the trace plus the Control Center's Overview.
 
 ```bash
-npm run dev -- --look-yaw 0 --host 127.0.0.1 --port 25565 --username GameMind --control-center
+npm run dev -- --host 127.0.0.1 --port 25565 --username GameMind --no-autonomy --open-browser
 ```
 
 **Expected:** on the very first observation the `player.session` line may still read
 `not reported` for mode or dimension, because Mineflayer fills `bot.game` only with the login packets — but
-the task must then keep running and the panel must fill in, not block. A `bot.game = {}` server, a server
+the session must then keep running and the page must fill in, not block (the Overview's *Player and world* card and the Tasks tab's *Latest decision* card show the values and their evidence). A `bot.game = {}` server, a server
 that answers `login` with a numeric dimension (`0`, `-1`, `1`) and one that answers with a level name
 (`world`, `World`, `DIM-1`) must all reach a canonical reading (`overworld`, `the_nether`, `the_end`) or an
 honest `unrecognised dimension name` — never `no overworld` for a plain survival world. A custom dimension
@@ -341,3 +312,21 @@ npx tsx src/testing/live/live-test-runner.ts --host <ip> --port 25565 --actions 
 ```
 
 Read the tags in the report. Only `[server]` phases are live evidence; `NOT RUN` and `SKIPPED` mean nothing was tested.
+
+## 18. Lifecycle, scheduler, launcher and Control Center (added with the persistent-session work)
+
+None of the following has been run against a Minecraft server. Each item is the live counterpart of offline tests (named in each item); the offline tests prove the logic with doubles and a simulator, not the behaviour of a real server, a real operating system or a real browser. Run these in a disposable world, record the result of each, failures included, and make no compatibility claim from the offline tests alone.
+
+**Setup:** a private 1.20.4 server as in §1, the agent's account in survival, and the launcher: `python3 main.py --host 127.0.0.1 --port 25565 --username GameMind` (WSL2: see item 7). `python3 main.py --check` first, to confirm Node, the dependencies and the Control Center port.
+
+1. **Persistent session.** Start `python3 main.py` with no task. Expected: the browser opens once; the status bar goes `Connecting` → `Initializing` → `Connected · idle` with the **LIVE** badge, and *Player and world* fills in with the real health, food and position. Turn autonomy off (*Turn autonomy off* on the Bots tab, or `--no-autonomy`) and wait five minutes: the bot stays connected, `CLI run complete` never appears, and refreshing, or closing and reopening the tab, restarts nothing (same session, no second browser tab, no new `connection` events in the event log). Then start `gather-logs` from the Tasks tab: when it finishes the session returns to `Connected · idle` and stays connected. *Offline counterparts:* `test/lifecycle.test.ts`, `test/cli-lifecycle.test.ts`, `test/ui-e2e.test.ts`.
+2. **The CLI task wins the startup race, and tasks never overlap.** With autonomy on (the default), run `python3 main.py --task gather-logs --resource oak_log --count 1` with a log in reach, ten times (stop the session between runs), because the original defect was a race and one pass proves little. Expected every time: no `A task is already running in this agent` message and no `Cannot access 'host' before initialization`; the Tasks tab shows the task started by `cli` first; autonomous work, if any, starts after it. Then, while a task runs, start the same task again (refused as `TASK_DUPLICATE`), start a different one (refused, or queued with *Queue it* ticked) and queue six (the sixth is refused: the queue holds five). Stopping the running task must start the next queued one. *Offline:* `test/task-scheduler.test.ts`, `test/lifecycle.test.ts`.
+3. **A dropped connection.** Stop the server mid-session. Expected: `Reconnecting` with `Reconnect attempt N of 5` and growing delays (2 s doubling to 30 s); a running task ends as an excluded connection outcome, never as a skill failure; after the last attempt the session ends `Disconnected` with `RECONNECT_EXHAUSTED` and the Control Center still answers. Restart the server during the retries and the session must come back to `Connected · idle` on the same page. Stop it again and press **Stop session** during a retry: the retry is cancelled. *Offline:* `test/lifecycle.test.ts`.
+4. **Shutdown.** End a session four ways: the Overview's **Stop session**, the footer's **Quit GameMind**, Ctrl-C under `npm run dev`, and Ctrl-C under `python3 main.py`. Expected each time: the bot leaves the server once (a single `left the game` line in the server log, not a timeout), the Control Center port is released, the process exits, no `node` or `tsx` process remains (`ps`), and `data/run/gamemind.lock.json` is gone. Then `kill -9` the process once and confirm the next start replaces the stale lock instead of refusing. *Offline:* `test/cli-lifecycle.test.ts`, `test/launcher.test.ts`, `tests_py/test_launcher.py`, `test/app.test.ts`.
+5. **Game-mode refusal.** Put the player in creative (`/gamemode creative GameMind`) and start a task. Expected: it ends as `TASK_BLOCKED_MODE` with the explanation on the Learning & Policy tab, no action was dispatched, and the learning store counts it as excluded (the context's success rate does not move). Also switch mode during a task: the next action is refused with `GAME_MODE_BLOCKS_*`. *Offline:* `test/learning-evidence.test.ts`.
+6. **Real action failures.** Run tasks likely to fail in a real world (a log behind water, stone without a pickaxe, a full inventory) and read the codes behind any `CONSECUTIVE_ACTION_FAILURES` or `NO_FEASIBLE_GOAL` stop on the Learning & Policy tab and in the trace. Expected: each failure code names a world condition (path blocked, tool missing, block not diggable, …), the failed target is excluded and the run tries an alternative before stopping, and a second run in the same world does not retry the excluded target first. Record the codes: the simulator cannot produce the real ones. *Offline:* `test/learning-evidence.test.ts`, `test/training-safety.test.ts`, `npm run eval:offline`.
+7. **WSL2 and Windows.** With the server on Windows and GameMind in WSL2 (default NAT networking): `python3 main.py --check`, then `python3 main.py` with no `--host` and no `MINECRAFT_HOST`. Expected: the launcher reports which host it chose (`127.0.0.1` if it answers, otherwise the Windows host), connects, and opens the Control Center in the Windows browser (`wslview`, `explorer.exe`, `cmd.exe` or `powershell.exe`). Record the Windows firewall rule you needed, whether mirrored networking changes the choice, and what happens with the project under `/mnt/c` (a warning about slow file access). Repeat natively on Windows if you run Node there. *Offline:* injected platforms, fake probes and a fake process spawner in `tests_py/test_launcher.py` and `test/launcher.test.ts`.
+8. **The page in a real browser.** Look at every tab at about 1440 px and at about 700 px wide, in light and dark themes, with the system's reduced-motion setting on and off. Record contrast problems, text that is cut off or overlaps, controls that are hard to use, and anything that moves when it should not. Nobody has looked at the page yet. *Offline:* `test/ui-page.test.ts`, `test/ui-components.test.ts`, `test/ui-e2e.test.ts` and `test/ui-static.test.ts` check text, controls, states and code in a fake DOM, never appearance.
+9. **Live verification phases.** On the Tests & Evaluation tab, try to run live verification without confirming (the controls must stay disabled), then confirm the connection and run the read-only phases; confirm again only in a disposable world before the digging and combat phases. Expected: PASS, FAIL or SKIPPED with a reason for every skip, and a result labelled `NOT VERIFIED LIVE` unless a server was actually reached. Compare with the headless harness in §16.
+
+**Record for every item:** what you ran, the date, the server software and version, the evidence (event-log lines, trace file names, a screenshot for item 8) and anything that differed from *Expected*. A difference is a result.

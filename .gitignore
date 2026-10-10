@@ -7,3 +7,7 @@ coverage/
 data/
 *.log
 test-results/
+
+# Python bytecode from the launcher and its tests
+__pycache__/
+*.pyc

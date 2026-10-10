@@ -1,438 +1,334 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="auto">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0a0e12" />
-    <title>GameMind Operations</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>GameMind</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <script id="boot-data" type="application/json">{"token":"__CONTROL_TOKEN__","banner":"__BANNER__","title":"__TITLE__"}</script>
-    <div class="ambient" aria-hidden="true"></div>
+    <a class="skip-link" href="#main">Skip to the content</a>
 
-    <!-- HEADER: Connection, Agent State, Emergency Stop -->
-    <header class="ops-header">
-      <div class="header-left">
-        <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <div class="names">
-          <p class="eyebrow">AUTONOMOUS AGENT</p>
-          <h1 id="title">GameMind</h1>
-          <p id="subtitle">Operations Control Center</p>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div>
+            <h1 id="title">GameMind</h1>
+            <p id="subtitle" class="muted small">Control Center</p>
+          </div>
         </div>
-      </div>
-      <div class="header-status">
-        <div class="pill" id="connection-pill" data-state="unknown">
-          <span class="dot"></span><span id="connection-text">connecting…</span>
+
+        <nav id="tabs" class="tabs" role="tablist" aria-label="Sections">
+          <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">Overview</button>
+          <button type="button" role="tab" id="tab-training" data-tab="training" aria-controls="panel-training">Training</button>
+          <button type="button" role="tab" id="tab-bots" data-tab="bots" aria-controls="panel-bots">Bots</button>
+          <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="panel-tasks">Tasks</button>
+          <button type="button" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Tests &amp; Evaluation</button>
+          <button type="button" role="tab" id="tab-learning" data-tab="learning" aria-controls="panel-learning">Learning &amp; Policy</button>
+          <button type="button" role="tab" id="tab-memory" data-tab="memory" aria-controls="panel-memory">World Memory &amp; Events</button>
+        </nav>
+
+        <div class="status-cluster" aria-label="Status">
+          <div class="status-pill" id="session-pill" data-tone="neutral" title="Session state">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="session-pill-text">Connecting to GameMind…</span>
+          </div>
+          <span id="source-badge" class="badge source source-unavailable" title="Where the numbers on this page come from">UNAVAILABLE</span>
+          <span id="updated" class="muted small" title="When this page last heard from GameMind">—</span>
+          <button type="button" class="btn danger compact" id="panic-btn" data-command="panic" title="Emergency stop: trips safety, stops the task and disarms combat at once">Emergency stop</button>
+          <button type="button" class="btn ghost compact" id="theme-toggle" data-action="toggle-theme" aria-label="Switch between light and dark" title="Switch between light and dark">◐</button>
         </div>
-        <div class="pill agent-pill" id="agent-pill" data-state="idle">
-          <span class="dot"></span><span id="agent-text">idle</span>
-        </div>
-        <div class="clock" id="updated">—</div>
-      </div>
-      <div class="header-actions">
-        <button class="btn emergency-btn" id="panic-btn" data-command="panic" title="Emergency Stop: Trip + Stop Task + Disarm Combat">⚠ EMERGENCY STOP</button>
       </div>
     </header>
 
-    <!-- SITUATION BAR: Always visible survival status -->
-    <div class="situation-bar" id="situation-bar">
-      <div class="sit-item" id="sit-health" data-tone="good">
-        <span class="sit-icon">❤</span>
-        <span class="sit-label">Health</span>
-        <span class="sit-value" id="sit-health-value">—</span>
-        <div class="sit-bar"><div class="sit-bar-fill" id="sit-health-bar"></div></div>
-      </div>
-      <div class="sit-item" id="sit-hunger" data-tone="good">
-        <span class="sit-icon">🍗</span>
-        <span class="sit-label">Hunger</span>
-        <span class="sit-value" id="sit-hunger-value">—</span>
-        <div class="sit-bar"><div class="sit-bar-fill" id="sit-hunger-bar"></div></div>
-      </div>
-      <div class="sit-item" id="sit-air" data-tone="good">
-        <span class="sit-icon">💨</span>
-        <span class="sit-label">Air</span>
-        <span class="sit-value" id="sit-air-value">—</span>
-        <div class="sit-bar"><div class="sit-bar-fill" id="sit-air-bar"></div></div>
-      </div>
-      <div class="sit-item" id="sit-weapon">
-        <span class="sit-icon">⚔</span>
-        <span class="sit-label">Weapon</span>
-        <span class="sit-value" id="sit-weapon-value">—</span>
-      </div>
-      <div class="sit-item" id="sit-safety" data-tone="good">
-        <span class="sit-icon">🛡</span>
-        <span class="sit-label">Safety</span>
-        <span class="sit-value" id="sit-safety-value">—</span>
-      </div>
-      <div class="sit-item" id="sit-task">
-        <span class="sit-icon">📋</span>
-        <span class="sit-label">Task</span>
-        <span class="sit-value" id="sit-task-value">—</span>
-      </div>
-      <div class="sit-item" id="sit-threats">
-        <span class="sit-icon">⚠</span>
-        <span class="sit-label">Threats</span>
-        <span class="sit-value" id="sit-threats-value">None</span>
-      </div>
-      <div class="sit-item" id="sit-decision">
-        <span class="sit-icon">🧭</span>
-        <span class="sit-label">Action</span>
-        <span class="sit-value" id="sit-decision-value">—</span>
-      </div>
+    <div id="banner" class="banner" hidden></div>
+    <div id="lost" class="banner lost" role="alert" hidden>
+      <strong>Lost contact with GameMind.</strong>
+      <span id="lost-detail">The process may have been stopped. This page keeps retrying and shows the last data it received as out of date.</span>
     </div>
 
-    <p class="banner" id="banner" hidden></p>
-
-    <main class="dashboard-grid">
-      <!-- LEFT COLUMN: Controls + Blocker + Task + Companion -->
-      <section class="column column-ops">
-        <article class="card run-card">
-          <header class="card-head">
-            <div><span class="section-index">01 / CONTROL</span><h2>Run control</h2></div>
-            <span class="hint" id="run-hint"></span>
-          </header>
-          <div class="metrics" id="run-metrics"></div>
-          <div class="progress" role="progressbar" aria-label="Task progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
-          <div class="controls">
-            <button data-command="pause" data-payload="paused from the Control Center" class="btn">⏸ Pause</button>
-            <button data-command="resume" class="btn primary">▶ Resume</button>
-            <button data-command="trip" data-payload="manual trip from the Control Center" class="btn danger">⛔ Trip</button>
-            <button data-command="resetTrip" class="btn">↩ Reset trip</button>
-            <button data-command="stopTask" data-payload="stopped from the Control Center" class="btn warn">⏹ Stop task</button>
-          </div>
-          <div class="control-row">
-            <label class="switch">
-              <input type="checkbox" id="combat-toggle" data-command="enableCombat" />
-              <span class="track" aria-hidden="true"></span><span class="switch-label">⚔ Combat armed</span>
-            </label>
-          </div>
-        </article>
-
-        <article class="card blocker-card">
-          <header class="card-head">
-            <div><span class="section-index">02 / STATUS</span><h2>Status</h2></div>
-            <span class="hint" id="blocker-note"></span>
-          </header>
-          <div class="blocker" id="blocker" data-kind="none"></div>
-        </article>
-
-        <article class="card objective-card">
-          <header class="card-head">
-            <div><span class="section-index">02b / OBJECTIVE</span><h2>Objective &amp; subgoal</h2></div>
-            <span class="hint" id="objective-hint"></span>
-          </header>
-          <div id="objective-panel" class="objective"></div>
-        </article>
-
-        <article class="card training-card" id="training-card">
-          <header class="card-head">
-            <div><span class="section-index">13 / TRAINING</span><h2>Training</h2></div>
-            <span class="hint" id="training-hint"></span>
-          </header>
-          <p class="note" id="training-note"></p>
-          <div class="training-error" id="training-error" role="alert" hidden></div>
-          <div class="metrics" id="training-metrics"></div>
-          <div class="training-reward" id="training-reward" aria-label="Reward per episode, oldest to newest"></div>
-          <div class="progress" role="progressbar" aria-label="Current stage success rate" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="training-progress"></span></div>
-          <form class="training-form" id="training-form">
-            <label for="training-episodes">Episodes per stage</label>
-            <input id="training-episodes" type="number" min="1" max="200" step="1" value="8" inputmode="numeric" />
-            <label for="training-max-episodes">Episode budget <span class="hint">optional</span></label>
-            <input id="training-max-episodes" type="number" min="1" max="5000" step="1" placeholder="from stages" inputmode="numeric" />
-            <label for="training-minutes">Time budget, minutes <span class="hint">optional</span></label>
-            <input id="training-minutes" type="number" min="1" max="1440" step="1" placeholder="no limit" inputmode="numeric" />
-            <label class="switch">
-              <input type="checkbox" id="training-headless" checked />
-              <span class="track" aria-hidden="true"></span><span class="switch-label">Headless</span>
-            </label>
-            <p class="note training-mode-note" id="training-mode-note">Headless: offline simulator in a separate process. No Minecraft window and no browser 3D rendering while it runs.</p>
-            <label class="switch">
-              <input type="checkbox" id="training-fresh" />
-              <span class="track" aria-hidden="true"></span><span class="switch-label">Start over</span>
-            </label>
-            <button class="btn primary" type="submit" id="training-start">▶ Start / resume</button>
-          </form>
-          <div class="controls">
-            <button data-command="pauseTraining" class="btn">⏸ Pause</button>
-            <button data-command="resumeTraining" class="btn">▶ Resume</button>
-            <button data-command="stopTraining" class="btn warn">⏹ Stop</button>
-            <button data-command="evaluateTraining" class="btn">📊 Evaluate latest checkpoint</button>
-          </div>
-          <div class="table-wrap">
-            <table id="training-episodes-table">
-              <thead><tr><th>#</th><th>Stage</th><th>Scenario</th><th>Result</th><th>Actions</th><th>Reward</th></tr></thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <div id="training-checkpoints" class="list"></div>
-          <div id="training-evaluation" class="list"></div>
-        </article>
-
-        <article class="card task-card">
-          <header class="card-head">
-            <div><span class="section-index">03 / TASK</span><h2>Issue task</h2></div>
-          </header>
-          <form id="task-form" class="task-form">
-            <label for="task-kind">Objective</label>
-            <select id="task-kind">
-              <option value="gather-logs">Gather logs</option>
-              <option value="mine-stone">Mine resource</option>
-              <option value="craft-wooden-pickaxe">Craft item</option>
-              <option value="secure-food">Secure food</option>
-              <option value="build-shelter">Build shelter</option>
-            </select>
-            <label for="task-resource">Target</label>
-            <input id="task-resource" type="text" maxlength="48" placeholder="Default" autocomplete="off" />
-            <div class="task-submit-row">
-              <div><label for="task-count">Count</label><input id="task-count" type="number" min="1" max="64" value="1" /></div>
-              <button class="btn primary" type="submit">Start task</button>
-            </div>
-          </form>
-        </article>
-
-        <article class="card library-card">
-          <header class="card-head">
-            <div><span class="section-index">04 / LIBRARY</span><h2>Library</h2></div>
-            <span class="hint" id="companion-mode">—</span>
-          </header>
-          <div id="companion-summary" class="companion-summary"></div>
-          <div id="library-operations" class="library-operations" aria-live="polite"></div>
-          <details id="companion-log-details" class="companion-log-details">
-            <summary>Companion log</summary>
-            <div id="companion-log" class="companion-log"></div>
-          </details>
-          <p class="note" id="library-hint"></p>
-          <div id="library-catalog" class="library-catalog"></div>
-        </article>
+    <main id="main" class="content" tabindex="-1">
+      <section id="panel-loading" class="panel" aria-busy="true">
+        <div class="skeleton tall"></div>
+        <p id="loading-text" class="muted" role="status">Contacting GameMind…</p>
       </section>
 
-      <!-- CENTER COLUMN: World View + Decision + Threats -->
-      <section class="column column-world">
-            <article class="card seed-card">
-          <header class="card-head">
-            <div><span class="section-index">06 / WORLD SEED</span><h2>World seed</h2></div>
-            <span class="hint" id="seed-hint"></span>
-          </header>
-          <form id="seed-form" class="budget">
-            <label for="seed-input">Seed</label>
-            <input id="seed-input" type="text" maxlength="64" autocomplete="off" placeholder="blank clears" />
-            <button class="btn small" type="submit">Save</button>
-          </form>
-          <p class="note" id="seed-note"></p>
-        </article>
+      <!-- A. OVERVIEW -->
+      <div id="render-error" role="alert"></div>
 
-        <article class="card threats-card">
-          <header class="card-head">
-            <div><span class="section-index">05 / THREATS</span><h2>Nearby threats</h2></div>
-            <span class="hint" id="threat-hint"></span>
-          </header>
-          <div class="threat-list" id="threat-list"></div>
-        </article>
-
-        <article class="card world-card">
-          <header class="card-head">
-            <div><span class="section-index">06 / WORLD</span><h2>Observed world</h2></div>
-            <span class="hint" id="world-hint"></span>
-          </header>
-          <p class="world-freshness" id="world-freshness" data-state="stale">no observation</p>
-          <div class="vitals" id="vitals"></div>
-          <div class="threat-row"><span class="sub">Visible entities</span><div class="items" id="hostiles"></div></div>
-          <div class="split inventory-split">
-            <div><div class="sub">Inventory</div><div id="inventory" class="items"></div></div>
-            <div><div class="sub">Equipment</div><div id="equipment" class="items"></div></div>
+      <section id="panel-overview" class="panel" role="tabpanel" aria-labelledby="tab-overview" hidden>
+        <div class="grid two">
+          <div id="ov-session" aria-live="polite"></div>
+          <div id="ov-controls"></div>
+        </div>
+        <div class="grid three">
+          <div id="ov-vitals"></div>
+          <div id="ov-task"></div>
+          <div id="ov-legend"></div>
+        </div>
+        <div class="grid two">
+          <div id="ov-activity"></div>
+          <div class="stack">
+            <div id="ov-training"></div>
+            <div id="ov-evaluation"></div>
           </div>
-        </article>
-
-        <article class="card decision-card">
-          <header class="card-head">
-            <div><span class="section-index">07 / DECISION</span><h2>AI decision</h2></div>
-            <span class="hint" id="goal-hint"></span>
-          </header>
-          <div class="intent-grid" id="intent-summary" aria-label="Agent intent"></div>
-          <div id="goal" class="goal"></div>
-          <details class="trace-details" id="alternatives-details" hidden>
-            <summary>Alternatives &amp; rejections</summary><div id="alternatives"></div>
-          </details>
-          <details class="trace-details" id="decision-history-details" hidden>
-            <summary>Previous decisions</summary><div id="decision-history"></div>
-          </details>
-        </article>
-
-        <article class="panel" id="progression-panel" hidden>
-          <header class="panel-header">
-            <div><span class="section-index">08 / PROGRESSION</span><h2>Autonomous milestones</h2></div>
-            <span class="hint">Long-term progression across task boundaries</span>
-          </header>
-          <div id="progression-panel"></div>
-        </article>
+        </div>
       </section>
 
-      <!-- RIGHT COLUMN: Safety + Actions + Learning (tabbed) -->
-      <section class="column column-activity">
-        <div class="tab-bar" role="tablist">
-          <button class="tab-btn active" data-tab="actions" role="tab">Actions</button>
-          <button class="tab-btn" data-tab="safety" role="tab">Safety</button>
-          <button class="tab-btn" data-tab="learning" role="tab">Learning</button>
-          <button class="tab-btn" data-tab="skills" role="tab">Skills</button>
+      <!-- B. TRAINING -->
+      <section id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
+        <div id="training-notice"></div>
+        <div class="grid two">
+          <div id="training-metrics"></div>
+          <div id="training-reward"></div>
         </div>
-
-        <div class="tab-panel active" id="tab-actions" role="tabpanel">
-          <article class="card activity-card">
-            <header class="card-head">
-              <div><span class="section-index">08 / LOGS</span><h2>Actions &amp; recovery</h2></div>
-              <span class="hint" id="actions-hint"></span>
-            </header>
-            <ol class="timeline" id="actions"></ol>
-            <h3 class="sub failures-head">Failures</h3>
-            <ol class="timeline compact" id="failures"></ol>
-          </article>
-        </div>
-
-        <div class="tab-panel" id="tab-safety" role="tabpanel">
-          <article class="card safety-card">
-            <header class="card-head">
-              <div><span class="section-index">09 / GUARDRAILS</span><h2>Safety broker</h2></div>
-              <span class="hint" id="safety-hint"></span>
-            </header>
-            <div class="metrics" id="safety-metrics"></div>
-            <div class="table-wrap">
-              <table id="verdicts">
-                <thead><tr><th>Capability</th><th>Risk</th><th>Verdict</th><th>Reason</th></tr></thead><tbody></tbody>
-              </table>
+        <div class="grid two">
+          <section class="card" aria-labelledby="training-form-title">
+            <header class="card-head"><div><h3 id="training-form-title">Start or resume training</h3><p class="muted small" id="training-headless">Headless: runs on the offline simulator in its own process, with no rendering and no Minecraft client.</p></div></header>
+            <div class="card-body">
+              <form id="training-form" class="form" autocomplete="off" novalidate>
+                <fieldset>
+                  <legend>Folder</legend>
+                  <label for="training-directory">Training folder (inside the data folder)</label>
+                  <select id="training-directory" name="directory"></select>
+                  <input id="training-new-directory" name="newDirectory" type="text" maxlength="48" placeholder="new folder name, e.g. experiment-2" hidden />
+                  <p class="hint">One run per folder at a time; a lock file enforces it even across separate processes.</p>
+                </fieldset>
+                <fieldset>
+                  <legend>Run</legend>
+                  <div class="field-row">
+                    <div><label for="training-max-episodes">Episode budget</label><input id="training-max-episodes" name="maxEpisodes" type="number" min="1" max="5000" step="1" placeholder="default" /></div>
+                    <div><label for="training-minutes">Time budget (minutes)</label><input id="training-minutes" name="maxMinutes" type="number" min="1" max="1440" step="1" placeholder="none" /></div>
+                    <div><label for="training-episodes-per-stage">Episodes per stage</label><input id="training-episodes-per-stage" name="episodesPerStage" type="number" min="1" max="200" step="1" placeholder="8" /></div>
+                    <div><label for="training-explore">Exploration</label><input id="training-explore" name="explore" type="number" min="0" max="1" step="0.05" placeholder="0.15" /></div>
+                  </div>
+                  <p class="hint">Exploration is the share of eligible decisions where training tries an alternative, so the learner can see how it would have gone. 0 is greedy.</p>
+                </fieldset>
+                <fieldset>
+                  <legend>Curriculum stages</legend>
+                  <div id="training-stages" class="check-grid"></div>
+                  <p class="hint">Stages can only be chosen for a new or fresh run: a saved run keeps its own.</p>
+                </fieldset>
+                <fieldset>
+                  <legend>If the folder already holds a run</legend>
+                  <label class="choice"><input type="radio" id="training-mode-resume" name="trainingMode" value="resume" checked /> <span><strong>Resume</strong> (default): continue from the saved state; keep all experience and checkpoints and add to them.</span></label>
+                  <label class="choice"><input type="radio" id="training-mode-fresh" name="trainingMode" value="fresh" /> <span><strong>Fresh run</strong>: archive the saved run (nothing is deleted) and start again at episode 0 with an empty policy. The consequences are listed on the right before anything happens.</span></label>
+                  <label class="choice confirm" id="training-confirm-row" hidden><input type="checkbox" id="training-confirm-fresh" name="confirmFresh" /> <span>I have read what a fresh run archives and I want to start fresh.</span></label>
+                </fieldset>
+                <div class="button-row">
+                  <button type="submit" class="btn primary" id="training-start">Start training</button>
+                  <button type="button" class="btn" id="training-pause" data-command="pauseTraining">Pause</button>
+                  <button type="button" class="btn" id="training-resume" data-command="resumeTraining">Resume paused run</button>
+                  <button type="button" class="btn warn" id="training-stop" data-command="stopTraining">Stop</button>
+                  <button type="button" class="btn" id="training-evaluate" data-command="evaluateTraining">Evaluate latest checkpoint</button>
+                </div>
+                <p id="training-start-hint" class="hint" aria-live="polite"></p>
+              </form>
             </div>
-          </article>
+          </section>
+          <div id="training-preflight"></div>
         </div>
+        <div id="training-eval"></div>
+        <div id="training-checkpoints"></div>
+        <div id="training-episodes-table"></div>
+      </section>
 
-        <div class="tab-panel" id="tab-learning" role="tabpanel">
-          <article class="card learning-card">
-            <header class="card-head">
-              <div><span class="section-index">10 / EXPERIENCE</span><h2>Learning</h2></div>
-              <span class="hint" id="learning-hint"></span>
-            </header>
-            <div class="metrics" id="learning-metrics"></div>
-
-            <details class="learning-section" id="reward-section">
-              <summary>Reward Signal</summary>
-              <div class="metrics" id="reward-metrics"></div>
-              <div class="reward-bar-wrap">
-                <div class="reward-bar-label">Mean Reward</div>
-                <div class="reward-bar"><div class="reward-bar-fill" id="reward-bar-fill"></div></div>
-              </div>
-            </details>
-
-            <details class="learning-section" id="policy-section">
-              <summary>Policy Versions &amp; Checkpoints</summary>
-              <div id="checkpoints-list"></div>
-            </details>
-
-            <details class="learning-section" id="class-patterns-section">
-              <summary>Class-Level Failure Patterns</summary>
-              <div class="table-wrap">
-                <table id="class-patterns">
-                  <thead><tr><th>Pattern</th><th>Attempts</th><th>Targets</th><th>Status</th></tr></thead>
-                  <tbody></tbody>
-                </table>
-              </div>
-            </details>
-
-            <details class="learning-section" id="experiments-section">
-              <summary>Experiments</summary>
-              <div id="experiments-list"></div>
-            </details>
-
-            <details class="learning-section" id="rl-readiness-section">
-              <summary>RL Readiness Assessment</summary>
-              <div id="rl-readiness"></div>
-            </details>
-
-            <div id="blocked"></div>
-            <div class="controls">
-              <button data-command="promotePolicy" class="btn">Promote</button>
-              <button data-command="rejectPolicy" class="btn">Roll back</button>
+      <!-- C. BOTS -->
+      <section id="panel-bots" class="panel" role="tabpanel" aria-labelledby="tab-bots" hidden>
+        <div id="bots-list"></div>
+        <div class="grid two">
+          <section class="card" aria-labelledby="connect-title">
+            <header class="card-head"><div><h3 id="connect-title">Connect a bot</h3><p class="muted small">One bot per process today. The list above is built per bot, so more can be added later.</p></div></header>
+            <div class="card-body">
+              <form id="connect-form" class="form" autocomplete="off" novalidate>
+                <label for="connect-source">Where to connect</label>
+                <select id="connect-source" name="source">
+                  <option value="live">A Minecraft Java server (live)</option>
+                  <option value="simulated">The offline simulator (simulated, no server)</option>
+                </select>
+                <div id="connect-live-fields">
+                  <div class="field-row">
+                    <div><label for="connect-host">Host</label><input id="connect-host" name="host" type="text" placeholder="127.0.0.1" maxlength="253" /></div>
+                    <div><label for="connect-port">Port</label><input id="connect-port" name="port" type="number" min="1" max="65535" placeholder="25565" /></div>
+                  </div>
+                  <div class="field-row">
+                    <div><label for="connect-username">Bot name</label><input id="connect-username" name="username" type="text" placeholder="GameMind" maxlength="16" /></div>
+                    <div><label for="connect-version">Version</label><input id="connect-version" name="version" type="text" placeholder="1.20.4" maxlength="12" /></div>
+                    <div><label for="connect-auth">Sign-in</label><select id="connect-auth" name="auth"><option value="">default (offline)</option><option value="offline">offline</option><option value="microsoft">microsoft</option></select></div>
+                  </div>
+                  <p class="hint">Blank fields use the environment or the defaults (127.0.0.1:25565, Minecraft 1.20.4). A world opened to LAN gets a new port each time; use the one printed in the game chat. Credentials are never entered or stored here.</p>
+                  <p id="connect-wsl-hint" class="hint" hidden><span id="connect-wsl-text"></span> <button type="button" class="btn compact" id="connect-use-windows" data-action="use-windows-host">Use it</button></p>
+                </div>
+                <div id="connect-sim-fields" hidden>
+                  <label for="connect-scenario">Scenario</label>
+                  <select id="connect-scenario" name="scenarioId"></select>
+                  <p class="hint">Everything from a simulated session is labelled SIMULATED and recorded in its own store.</p>
+                </div>
+                <div class="field-row">
+                  <div><label for="connect-mode">After a task finishes</label><select id="connect-mode" name="mode"><option value="persistent">stay connected until I stop it</option><option value="one-shot">disconnect when the task finishes</option></select></div>
+                </div>
+                <label class="choice"><input type="checkbox" id="connect-autonomy" name="autonomy" checked /> <span>Let the agent start its own survival and progress tasks while idle (safety limits are the same either way)</span></label>
+                <div class="button-row"><button type="submit" class="btn primary" id="connect-submit">Connect</button></div>
+                <p id="connect-hint" class="hint" aria-live="polite"></p>
+              </form>
             </div>
-          </article>
-        </div>
-
-        <div class="tab-panel" id="tab-skills" role="tabpanel">
-          <article class="card skill-card">
-            <header class="card-head">
-              <div><span class="section-index">11 / SKILLS</span><h2>Performance</h2></div>
-              <span class="hint">from traces</span>
-            </header>
-            <div class="table-wrap">
-              <table id="skills">
-                <thead><tr><th>Skill</th><th>Runs</th><th>Verified</th><th>Mean</th></tr></thead><tbody></tbody>
-              </table>
-            </div>
-          </article>
-        </div>
-
-        <article class="card performance-card">
-          <header class="card-head">
-            <div><span class="section-index">12 / TELEMETRY</span><h2>Performance</h2></div>
-            <span class="hint" id="performance-hint"></span>
-          </header>
-          <div class="metrics performance-metrics" id="performance-metrics"></div>
-          <div class="table-wrap">
-            <table id="loop-targets">
-              <thead><tr><th>Target</th><th>Goal</th><th>Measured</th><th>Status</th></tr></thead>
-              <tbody></tbody>
-            </table>
+          </section>
+          <div class="stack">
+            <div id="bots-diagnostics"></div>
+            <div id="bots-safety"></div>
           </div>
-        </article>
+        </div>
+        <div class="grid two">
+          <div id="loop-targets"></div>
+          <div id="bots-library"></div>
+        </div>
+        <div id="bots-history"></div>
+      </section>
+
+      <!-- D. TASKS -->
+      <section id="panel-tasks" class="panel" role="tabpanel" aria-labelledby="tab-tasks" hidden>
+        <div class="grid two">
+          <div id="tasks-active"></div>
+          <section class="card" aria-labelledby="task-title">
+            <header class="card-head"><div><h3 id="task-title">Start a task</h3><p class="muted small">Only tasks the agent implements and validates are offered. The limits are enforced by the same schema the command line uses.</p></div></header>
+            <div class="card-body">
+              <form id="task-form" class="form" autocomplete="off" novalidate>
+                <label for="task-kind">Task</label>
+                <select id="task-kind" name="kind"></select>
+                <p id="task-description" class="hint"></p>
+                <div class="field-row">
+                  <div id="task-resource-row"><label for="task-resource" id="task-resource-label">Target</label><select id="task-resource" name="resource"></select></div>
+                  <div id="task-count-row"><label for="task-count" id="task-count-label">Amount</label><input id="task-count" name="count" type="number" min="1" max="64" step="1" /></div>
+                </div>
+                <div id="task-needs" class="hint"></div>
+                <label class="choice"><input type="checkbox" id="task-queue" name="queue" /> <span>Queue it to run after the current task if the agent is busy</span></label>
+                <p id="task-hint" class="hint" aria-live="polite"></p>
+                <div id="task-limits" class="limits"></div>
+                <div class="button-row"><button type="submit" class="btn primary" id="task-submit">Start task</button></div>
+              </form>
+            </div>
+          </section>
+        </div>
+        <div class="grid two">
+          <div id="tasks-queue"></div>
+          <div id="objective-panel"></div>
+        </div>
+        <div id="tasks-decision"></div>
+        <div id="tasks-history"></div>
+        <div id="tasks-progression"></div>
+      </section>
+
+      <!-- E. TESTS & EVALUATION -->
+      <section id="panel-evaluation" class="panel" role="tabpanel" aria-labelledby="tab-evaluation" hidden>
+        <div id="eval-notice"></div>
+        <div class="grid two">
+          <section class="card" aria-labelledby="eval-form-title">
+            <header class="card-head"><div><h3 id="eval-form-title">Run offline checks</h3><p class="muted small">Simulator and unit tests only. Nothing here touches a Minecraft server.</p></div></header>
+            <div class="card-body">
+              <div class="button-row"><button type="button" class="btn primary" id="run-tests" data-command="runUnitTests">Run unit and integration tests</button></div>
+              <p class="hint">Runs the project's whole offline suite in a separate process (about a minute). One job runs at a time and any job can be cancelled.</p>
+              <form id="eval-form" class="form" autocomplete="off" novalidate>
+                <div class="field-row">
+                  <div><label for="eval-seeds">Seeds per scenario</label><input id="eval-seeds" name="seeds" type="number" min="1" max="200" value="20" /></div>
+                  <div><label for="eval-scenario">Scenario</label><select id="eval-scenario" name="scenarioId"><option value="">all scenarios</option></select></div>
+                </div>
+                <div class="button-row"><button type="submit" class="btn" id="run-eval">Run offline evaluation</button></div>
+                <p id="eval-hint" class="hint" aria-live="polite"></p>
+              </form>
+            </div>
+          </section>
+          <div id="eval-jobs"></div>
+        </div>
+        <div id="eval-compare"></div>
+        <div id="eval-offline-report"></div>
+        <div class="live-zone">
+          <div id="eval-live"></div>
+          <section class="card live-card" aria-labelledby="live-title">
+            <header class="card-head"><div><h3 id="live-title">Run a live verification</h3><p class="muted small">This is the only control on this page that connects to a real server.</p></div></header>
+            <div class="card-body">
+              <form id="live-form" class="form" autocomplete="off" novalidate>
+                <div class="field-row">
+                  <div><label for="live-host">Server host</label><input id="live-host" name="host" type="text" maxlength="253" /></div>
+                  <div><label for="live-port">Port</label><input id="live-port" name="port" type="number" min="1" max="65535" /></div>
+                  <div><label for="live-username">Verification bot name</label><input id="live-username" name="username" type="text" maxlength="16" /></div>
+                </div>
+                <fieldset>
+                  <legend>Checks</legend>
+                  <label class="choice"><input type="radio" id="live-scope-read-only" name="scope" value="read-only" checked /> <span><strong>Read-only</strong>: connect, observe, decide. Nothing in the world changes.</span></label>
+                  <label class="choice"><input type="radio" id="live-scope-actions" name="scope" value="actions" /> <span><strong>Action checks</strong>: also movement, recovery and swimming.</span></label>
+                  <label class="choice danger-choice"><input type="checkbox" id="live-allow-dig" name="allowDig" /> <span>Also dig a block <em>(changes the world)</em></span></label>
+                  <label class="choice danger-choice"><input type="checkbox" id="live-allow-combat" name="allowCombat" /> <span>Also fight a hostile mob <em>(attacks an entity)</em></span></label>
+                </fieldset>
+                <label class="choice confirm"><input type="checkbox" id="live-confirm" name="confirmed" /> <span id="live-confirm-text">I confirm a verification bot may connect to this server.</span></label>
+                <label class="choice confirm" id="live-confirm-world-row" hidden><input type="checkbox" id="live-confirm-world" name="confirmedWorldChanges" /> <span>I confirm the world changes listed above are allowed on this server.</span></label>
+                <div class="button-row"><button type="submit" class="btn warn" id="live-submit" disabled>Run live verification</button></div>
+                <p id="live-hint" class="hint" aria-live="polite"></p>
+              </form>
+            </div>
+          </section>
+        </div>
+        <section class="section-head"><h2>Improvement roadmap</h2><div class="button-row"><button type="button" class="btn compact" id="roadmap-toggle-closed" data-action="roadmap-toggle-closed" aria-pressed="false">Show closed items</button><button type="button" class="btn compact" id="roadmap-refresh" data-command="refreshRoadmap">Refresh from evidence</button></div></section>
+        <div id="roadmap-items"></div>
+      </section>
+
+      <!-- F. LEARNING & POLICY -->
+      <section id="panel-learning" class="panel" role="tabpanel" aria-labelledby="tab-learning" hidden>
+        <div class="grid two">
+          <div id="learn-store"></div>
+          <div id="learn-policy"></div>
+        </div>
+        <div id="learn-explain"></div>
+        <div id="learn-contexts"></div>
+        <div class="grid two">
+          <div id="learn-failures"></div>
+          <div id="learn-checkpoints"></div>
+        </div>
+        <div id="learn-runs"></div>
+      </section>
+
+      <!-- G. WORLD MEMORY & EVENTS -->
+      <section id="panel-memory" class="panel" role="tabpanel" aria-labelledby="tab-memory" hidden>
+        <div class="grid two">
+          <div id="mem-identity"></div>
+          <section class="card" aria-labelledby="seed-title">
+            <header class="card-head"><div><h3 id="seed-title">World seed</h3><p class="muted small">Entered by hand and never checked against the server, so anything derived from it is a prediction.</p></div></header>
+            <div class="card-body">
+              <form id="seed-form" class="form" autocomplete="off" novalidate>
+                <label for="seed-input">Seed (number or text)</label>
+                <input id="seed-input" name="seed" type="text" maxlength="64" placeholder="not set" />
+                <div class="button-row"><button type="submit" class="btn">Save seed</button><button type="button" class="btn" id="seed-clear" data-action="seed-clear">Clear</button></div>
+              </form>
+            </div>
+          </section>
+        </div>
+        <div id="mem-worlds"></div>
+        <section class="card" aria-labelledby="events-title">
+          <header class="card-head"><div><h3 id="events-title">Search the event log</h3><p class="muted small">Connections, decisions, actions, task changes, errors and shutdown reasons, with their times.</p></div></header>
+          <div class="card-body">
+            <form id="event-filter-form" class="form" autocomplete="off" novalidate>
+              <div class="field-row">
+                <div class="grow"><label for="event-q">Search</label><input id="event-q" name="q" type="search" placeholder="text in a message, code or detail" maxlength="120" /></div>
+                <div><label for="event-level">Level</label><select id="event-level" name="level"><option value="info">info and above</option><option value="warn">warnings and errors</option><option value="error">errors only</option><option value="debug">everything</option></select></div>
+                <div><label for="event-scope">From</label><select id="event-scope" name="scope"><option value="all">this run and earlier runs</option><option value="current">this run only</option><option value="previous">earlier runs only</option></select></div>
+                <div><label for="event-source">Data</label><select id="event-source" name="source"><option value="">any</option><option value="live">live</option><option value="simulated">simulated</option><option value="offline">offline</option><option value="system">system</option></select></div>
+              </div>
+              <fieldset><legend>Categories</legend><div id="event-categories" class="check-grid"></div></fieldset>
+            </form>
+          </div>
+        </section>
+        <div id="mem-events"></div>
       </section>
     </main>
 
-    <section class="roadmap-band" aria-labelledby="roadmap-title">
-      <article class="card roadmap-card" id="roadmap-card">
-        <header class="card-head">
-          <div><span class="section-index">14 / ROADMAP</span><h2 id="roadmap-title">Improvement roadmap</h2></div>
-          <span class="hint" id="roadmap-hint"></span>
-          <button class="btn" type="button" id="roadmap-refresh">↻ Refresh from evidence</button>
-        </header>
-        <div class="roadmap-next" id="roadmap-next" aria-live="polite"></div>
-        <p class="note" id="roadmap-note"></p>
-        <div class="roadmap-filters" role="group" aria-label="Filter roadmap items">
-          <label>Category
-            <select id="roadmap-category">
-              <option value="">All categories</option>
-              <option value="autonomy">Autonomy</option>
-              <option value="performance">Performance</option>
-              <option value="observation">Observation</option>
-              <option value="training">Training</option>
-              <option value="navigation">Navigation</option>
-              <option value="survival">Survival</option>
-              <option value="world-knowledge">World knowledge</option>
-              <option value="reliability">Reliability</option>
-              <option value="interface">Interface usability</option>
-            </select>
-          </label>
-          <label>Kind
-            <select id="roadmap-kind">
-              <option value="">All kinds</option>
-              <option value="defect">Defect (measured)</option>
-              <option value="hypothesis">Hypothesis (cause open)</option>
-              <option value="known-limitation">Known limitation</option>
-              <option value="idea">Idea (optional)</option>
-            </select>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="roadmap-show-closed" />
-            <span class="track" aria-hidden="true"></span><span class="switch-label">Show dismissed and verified</span>
-          </label>
-        </div>
-        <div class="roadmap-sources" id="roadmap-sources"></div>
-        <div class="roadmap-items" id="roadmap-items" aria-live="polite"></div>
-      </article>
-    </section>
-
-    <footer class="ops-footer" id="footer">
-      <span class="status-led" aria-hidden="true"></span><span id="toast" aria-live="polite" aria-atomic="true">Ready.</span><span class="spacer"></span>
-      <span class="hint">Polled snapshot</span>
+    <footer class="footer">
+      <span class="muted small" id="footer-note">GameMind · local Control Center. Reloading this page restarts nothing.</span>
+      <button type="button" class="btn ghost compact" id="footer-quit" data-command="shutdownApp" data-confirm="Quit GameMind? The bot disconnects and this page stops responding.">Quit GameMind</button>
     </footer>
 
+    <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

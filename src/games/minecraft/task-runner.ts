@@ -28,6 +28,7 @@ import { WorldMemory } from "./world-memory.js";
 import { explorationKeyCenter } from "./exploration.js";
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { observedMovementProgress } from "./progress-evidence.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
 import { REFLEX_THRESHOLDS, urgentReflexesSince } from "./reflex.js";
 
@@ -732,6 +733,9 @@ export class MinecraftTaskRunner {
           skillResult.action.status === "succeeded" && skillResult.action.confirmed && verification.verified === false;
         if (confirmedButUnverified) unverifiedConfirmations += 1;
         if (skillResult.action.confirmed && verification.verified === true) verifiedActions += 1;
+        // The one definition of a successful action in this loop: it ran, the adapter confirmed it, and the next
+        // observation does not contradict the confirmation.
+        const succeeded = skillResult.action.status === "succeeded" && skillResult.action.confirmed && !confirmedButUnverified;
 
         const summary = actionSummary(
           selected.goalId,
@@ -798,6 +802,25 @@ export class MinecraftTaskRunner {
         if (after && after.state.player.health !== null) {
           minHealth = minHealth === null ? after.state.player.health : Math.min(minHealth, after.state.player.health);
         }
+        // Gathering is not the only effect worth recording. A verified success that explored new ground, closed the
+        // distance to its target, healed, or got away from a hostile did something the world shows. That is a
+        // measurement for the wasted-action figure and the recorded episode; it never steers the loop. Target exclusion
+        // and the autonomy controller's productivity check keep using `observedProgress` (items, food, target gains), so
+        // exploring still cannot reset the brakes that stop an agent from wandering without finding anything.
+        const movementEvidence =
+          !observedProgress && succeeded && before && after
+            ? observedMovementProgress({
+                skillId: skill.id,
+                goalId: selected.goalId,
+                safetyBand: selected.priorityBand === BAND_SAFETY,
+                movesToTarget: MOVEMENT_SKILLS.has(skill.id),
+                input: selected.input,
+                before: before.state,
+                after: after.state,
+                cellsRevealed,
+              })
+            : null;
+        const effectObserved = observedProgress || movementEvidence?.progress === true;
         if (observedProgress) progressEvents += 1;
 
         if (selected.goalId.startsWith("explore:")) {
@@ -826,7 +849,6 @@ export class MinecraftTaskRunner {
           awaitingRecovery = false;
         }
 
-        const succeeded = skillResult.action.status === "succeeded" && skillResult.action.confirmed && !confirmedButUnverified;
         const failureCode = succeeded
           ? null
           : confirmedButUnverified
@@ -854,7 +876,7 @@ export class MinecraftTaskRunner {
         if (skill.id === "minecraft.mine-block" && succeeded) minedBlocks += 1;
         if (skill.id === "minecraft.attack-hostile") combatActions += 1;
         if (skill.id === "minecraft.eat-food" && succeeded) hungerRecoveryActions += 1;
-        if (!observedProgress) wastedActions += 1;
+        if (!effectObserved) wastedActions += 1;
         if (skill.id === "minecraft.attack-hostile") combatAttempts += 1;
 
         // One episode per attempted action. The learner is the only writer, and it never throws.
@@ -897,7 +919,7 @@ export class MinecraftTaskRunner {
                 status: skillResult.action.status,
                 confirmed: skillResult.action.confirmed,
                 verified: verification.verified,
-                progress: observedProgress,
+                progress: effectObserved,
                 failureCode,
                 itemsGained: Math.max(0, afterCount - beforeCount),
                 itemsConsumed: Math.max(0, beforeCount - afterCount),

@@ -116,7 +116,11 @@ test("statistics are smoothed so one lucky run cannot redefine the policy", () =
   const rejected = summary.find((entry) => entry.key.includes("approaching"));
   assert.ok(rejected);
   assert.equal(rejected.safetyDenials, 1);
-  assert.equal(rejected.attempts, 1);
+  // A safety refusal happens before the action runs, so it says nothing about the skill: it is counted (as a denial and
+  // as an excluded outcome) but is not an attempt and cannot move a success rate or a weight. This replaces the earlier
+  // rule that every recorded episode was an attempt; see test/learning-evidence.test.ts for the full evidence rule.
+  assert.equal(rejected.attempts, 0);
+  assert.equal(rejected.excluded, 1);
 
   const one = { attempts: 1, successes: 1, progressCount: 1, contradictedConfirmations: 0, safetyDenials: 0, failureCodes: {}, ewmaDurationMs: 1, ewmaGain: 1, totalDistance: 1, distanceSamples: 1, lastSequence: 1 };
   assert.ok(smoothedSuccessRate(one) < 1, "a single success must not read as a certainty");

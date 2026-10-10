@@ -5,8 +5,11 @@ import { setPriority } from "node:os";
 import { readFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { ControlCenterTraining, ControlCenterTrainingDeltas, ControlCommandResult } from "../control-center/types.js";
-import { TRAINING_STAGES } from "./curriculum.js";
+import type { ControlCenterTraining, ControlCenterTrainingDeltas, ControlCenterTrainingStart, ControlCommandResult } from "../control-center/types.js";
+import { DEFAULT_TRAINING_EXPLORATION_RATE, TRAINING_STAGES } from "./curriculum.js";
+import { readTrainingLock, type TrainingLockHolder } from "./lock.js";
+import { describeTrainingArtifacts } from "./trainer.js";
+import type { TrainingEvaluationReport } from "./evaluate.js";
 import {
   readTrainingState,
   trainingPaths,
@@ -28,13 +31,44 @@ export interface TrainingManagerOptions {
   /** Overrides the entry point (tests). Defaults to the `cli` module next to this file. */
   readonly entry?: string;
   readonly now?: () => Date;
+  /**
+   * How the directory is shown to the operator (a project-relative path). The absolute `root` is used only to read
+   * and write files and never leaves the process; without this the root is shown as given.
+   */
+  readonly displayRoot?: string;
 }
 
-export interface TrainingStartOptions {
-  readonly episodesPerStage?: number;
-  readonly maxEpisodes?: number;
-  readonly maxMinutes?: number;
-  readonly fresh?: boolean;
+export type TrainingStartOptions = ControlCenterTrainingStart;
+
+export { DEFAULT_TRAINING_EXPLORATION_RATE };
+
+export interface TrainingPreflight {
+  /** Project-relative directory the run would use. */
+  readonly directory: string;
+  /** What is in the directory right now. */
+  readonly existing: {
+    readonly hasRun: boolean;
+    readonly status: string | null;
+    readonly episodes: number;
+    readonly stageId: string | null;
+    readonly checkpoints: number;
+    readonly experienceFiles: number;
+    readonly evaluations: number;
+    readonly stageIds: readonly string[] | null;
+    readonly updatedAt: string | null;
+  };
+  readonly lock: TrainingLockHolder | null;
+  /** True when something in this process or on disk is already running in the directory. */
+  readonly busy: boolean;
+  readonly resume: { readonly possible: boolean; readonly summary: string };
+  readonly fresh: {
+    readonly needsConfirmation: boolean;
+    /** Exactly what a fresh start moves aside. Nothing is deleted. */
+    readonly wouldArchive: readonly string[];
+    readonly summary: string;
+    readonly consequences: readonly string[];
+  };
+  readonly warnings: readonly string[];
 }
 
 /** Nice value applied to the trainer child process (higher means less CPU priority). */
@@ -83,7 +117,23 @@ interface ChildRunMetadata {
   readonly terminationMarker: string;
 }
 
-export class TrainingManager {
+/**
+ * The training operations the Control Center and the Library use. `TrainingManager` is the implementation for one
+ * directory; the app's hub implements the same surface over several directories while allowing one run at a time.
+ */
+export interface TrainingControl {
+  start(options?: TrainingStartOptions): Promise<ControlCommandResult>;
+  pause(): Promise<ControlCommandResult>;
+  resume(): Promise<ControlCommandResult>;
+  stop(): Promise<ControlCommandResult>;
+  evaluate(checkpointId?: string): Promise<ControlCommandResult>;
+  snapshot(): Promise<ControlCenterTraining>;
+  preflight(): Promise<TrainingPreflight>;
+  /** Asks any active run to stop and waits (bounded) for its process to exit, killing it if it does not. */
+  dispose(): Promise<void>;
+}
+
+export class TrainingManager implements TrainingControl {
   private trainer: ChildProcess | null = null;
   private evaluator: ChildProcess | null = null;
   /** Why the most recent trainer failed to start or exited non-zero, when its state file has no error. */
@@ -137,6 +187,75 @@ export class TrainingManager {
     }
   }
 
+  /**
+   * Reports what starting here would do, so the Control Center can explain a fresh start *before* it happens. It reads
+   * the directory and the lock; it starts nothing and writes nothing.
+   */
+  async preflight(): Promise<TrainingPreflight> {
+    const state = await this.readState();
+    const artifacts = await describeTrainingArtifacts(this.paths);
+    const lock = readTrainingLock(this.options.root);
+    const liveLock = lock && lock.alive ? lock : null;
+    const hasRun = state !== null;
+    const hasData = hasRun || artifacts.checkpoints > 0 || artifacts.experienceFiles > 0 || artifacts.evaluations > 0;
+    const busy = this.isTrainingActive(state) || liveLock !== null || (this.evaluator !== null && this.evaluator.exitCode === null);
+    const stage = state ? TRAINING_STAGES[state.stageIndex] ?? null : null;
+    const wouldArchive: string[] = [];
+    if (hasRun) wouldArchive.push("state.json (progress, stage, budgets)", "control.json");
+    if (artifacts.experienceFiles > 0) wouldArchive.push(`experience/ (${artifacts.experienceFiles} file(s) of recorded episodes and policy history)`);
+    if (artifacts.checkpoints > 0) wouldArchive.push(`checkpoints/ (${artifacts.checkpoints} checkpoint(s))`);
+    if (artifacts.evaluations > 0) wouldArchive.push(`evaluations/ (${artifacts.evaluations} report(s))`);
+    const warnings: string[] = [];
+    if (liveLock) warnings.push(`Process ${liveLock.pid} holds this directory (${liveLock.kind === "train" ? "training" : "evaluation"}, since ${liveLock.startedAt}); a new run cannot start until it ends.`);
+    if (!hasRun && hasData) warnings.push("The directory holds training data but no state file, so it cannot be resumed; a fresh start (which archives the data) or another directory is needed.");
+    if (state?.status === "completed") warnings.push("The saved curriculum has completed; resuming has nothing left to do. Start fresh to train again.");
+    return {
+      directory: this.displayRoot,
+      existing: {
+        hasRun,
+        status: state?.status ?? null,
+        episodes: state?.totalEpisodes ?? 0,
+        stageId: stage?.id ?? null,
+        checkpoints: artifacts.checkpoints,
+        experienceFiles: artifacts.experienceFiles,
+        evaluations: artifacts.evaluations,
+        stageIds: state?.stageIds ?? null,
+        updatedAt: state?.updatedAt ?? null,
+      },
+      lock: lock && lock.alive ? lock : null,
+      busy,
+      resume: {
+        possible: hasRun && state?.status !== "completed" && !busy,
+        summary: !hasRun
+          ? "There is no saved run here, so starting begins a new one at episode 0."
+          : state?.status === "completed"
+            ? "The saved run already finished its curriculum."
+            : `Resume continues the saved run from episode ${state?.totalEpisodes ?? 0}${stage ? ` in stage '${stage.id}'` : ""}, keeping all experience and checkpoints, and adds to them.`,
+      },
+      fresh: {
+        needsConfirmation: hasData,
+        wouldArchive,
+        summary: hasData
+          ? `A fresh start moves everything listed here into ${this.displayRoot}/archive/<timestamp>-before-fresh, then begins at episode 0 with an empty policy.`
+          : "Nothing exists here yet, so a fresh start and a resume are the same.",
+        consequences: hasData
+          ? [
+              "The current run's progress, experience and checkpoints are archived, not deleted; they can be restored by moving the archive folder back.",
+              "Training restarts at episode 0 and the learned policy starts empty, so its first checkpoints will hold no learned weights until enough verified attempts accumulate.",
+              "Evaluations of the old checkpoints stay in the archive and are no longer listed here.",
+              "The live policy store used by real Minecraft sessions is not touched, and nothing is promoted automatically.",
+              "This is offline simulator training; it is not learning in a real Minecraft world.",
+            ]
+          : ["This is offline simulator training; it is not learning in a real Minecraft world."],
+      },
+      warnings,
+    };
+  }
+
+  private get displayRoot(): string {
+    return this.options.displayRoot ?? this.options.root;
+  }
+
   /** Starts (or resumes) training in a child process. Refused while a run is already active. */
   async start(options: TrainingStartOptions = {}): Promise<ControlCommandResult> {
     // The values come from the browser, so they are checked here with the same limits as the CLI.
@@ -150,9 +269,23 @@ export class TrainingManager {
         return { ok: false, message: `${label} must be a whole number from ${min} to ${max}.` };
       }
     }
+    if (options.explorationRate !== undefined && (!Number.isFinite(options.explorationRate) || options.explorationRate < 0 || options.explorationRate > 1)) {
+      return { ok: false, message: "Exploration rate must be a number from 0 to 1." };
+    }
+    if (options.stageIds !== undefined) {
+      const known = new Set(TRAINING_STAGES.map((stage) => stage.id));
+      const unknown = options.stageIds.filter((id) => !known.has(id));
+      if (options.stageIds.length === 0 || unknown.length > 0) {
+        return { ok: false, message: options.stageIds.length === 0 ? "Choose at least one curriculum stage." : `Unknown curriculum stage(s): ${unknown.join(", ")}. Known: ${[...known].join(", ")}.` };
+      }
+    }
     const current = await readTrainingState(this.paths).catch(() => null);
     if (this.isTrainingActive(current)) {
       return { ok: false, message: "Training is already running; pause or stop it first." };
+    }
+    const lock = readTrainingLock(this.options.root);
+    if (lock && lock.alive) {
+      return { ok: false, message: `Another process (${lock.pid}) is using this training directory (${lock.kind === "train" ? "a training run" : "an evaluation"} since ${lock.startedAt}). Wait for it to finish; two runs cannot share a directory.` };
     }
     if (current?.status === "completed" && !options.fresh) {
       return { ok: false, message: "The curriculum has already completed. Start fresh to train again." };
@@ -160,11 +293,26 @@ export class TrainingManager {
     if (this.evaluator && this.evaluator.exitCode === null) {
       return { ok: false, message: "An evaluation is running; wait for it to finish." };
     }
+    if (current && !options.fresh && options.stageIds !== undefined && current.stageIds && current.stageIds.join(",") !== options.stageIds.join(",")) {
+      return { ok: false, message: `The saved run uses the stages [${current.stageIds.join(", ")}]. A run can only be resumed with its own stages; start fresh to change them.` };
+    }
+    if (options.fresh) {
+      // A fresh start moves the current run aside. That is recoverable (nothing is deleted) but it is never silent:
+      // the caller must have shown the consequences and say so explicitly.
+      const artifacts = await describeTrainingArtifacts(this.paths);
+      const hasData = current !== null || artifacts.checkpoints > 0 || artifacts.experienceFiles > 0 || artifacts.evaluations > 0;
+      if (hasData && options.confirmFresh !== true) {
+        return { ok: false, message: `A fresh start archives the existing run in ${this.displayRoot} (${current?.totalEpisodes ?? 0} episode(s), ${artifacts.checkpoints} checkpoint(s)). Review the consequences and confirm it explicitly; nothing was changed.` };
+      }
+    }
     const args = ["train", "--dir", this.options.root];
     if (options.episodesPerStage !== undefined) args.push("--episodes-per-stage", String(options.episodesPerStage));
     if (options.maxEpisodes !== undefined) args.push("--max-episodes", String(options.maxEpisodes));
     if (options.maxMinutes !== undefined) args.push("--max-minutes", String(options.maxMinutes));
     if (options.fresh) args.push("--fresh");
+    // A resumed run keeps the rate it was collecting experience with; a fresh one starts from the default.
+    args.push("--explore", String(options.explorationRate ?? (options.fresh ? undefined : current?.explorationRate) ?? DEFAULT_TRAINING_EXPLORATION_RATE));
+    if (options.stageIds !== undefined) args.push("--stages", options.stageIds.join(","));
     await writeControlCommand(this.paths, "run");
     this.launchError = null;
     const child = this.spawnCli(args, this.paths.log);
@@ -224,6 +372,8 @@ export class TrainingManager {
     if (this.isTrainingActive(state)) return { ok: false, message: "Pause or stop training before evaluating." };
     if (this.evaluator && this.evaluator.exitCode === null) return { ok: false, message: "An evaluation is already running." };
     if (!state || state.checkpoints.length === 0) return { ok: false, message: "No checkpoint to evaluate yet; train first." };
+    const lock = readTrainingLock(this.options.root);
+    if (lock && lock.alive) return { ok: false, message: `Process ${lock.pid} is using this training directory; wait for it to finish before evaluating.` };
     const args = ["evaluate", "--dir", this.options.root];
     if (checkpointId) args.push("--checkpoint", checkpointId);
     const child = this.spawnCli(args, this.paths.log);
@@ -235,10 +385,43 @@ export class TrainingManager {
     return { ok: true, message: "Evaluation started; the verdict appears here when it finishes." };
   }
 
-  /** Asks an active trainer to stop after its current episode. The process is not killed mid-episode. */
-  async dispose(): Promise<void> {
+  /**
+   * Asks an active trainer to stop after its current episode, then waits for its process to exit. A trainer that has not
+   * exited within the grace period is terminated, so closing the app never leaves a training or evaluation child behind.
+   */
+  async dispose(graceMs = 8_000): Promise<void> {
     const state = await this.readState();
     if (this.isTrainingActive(state)) await writeControlCommand(this.paths, "stop");
+    await Promise.all([this.reap(this.trainer, graceMs), this.reap(this.evaluator, graceMs)]);
+  }
+
+  private async reap(child: ChildProcess | null, graceMs: number): Promise<void> {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        clearTimeout(grace);
+        clearTimeout(hard);
+        resolve();
+      };
+      child.once("exit", done);
+      const grace = setTimeout(() => {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          /* already gone */
+        }
+      }, graceMs);
+      const hard = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        resolve();
+      }, graceMs + 4_000);
+      grace.unref();
+      hard.unref();
+    });
   }
 
   private async readState(): Promise<TrainingState | null> {
@@ -316,7 +499,7 @@ export class TrainingManager {
       status,
       processAlive,
       pid: state && processAlive ? state.pid : null,
-      root: this.options.root,
+      root: this.displayRoot,
       episodesTotal: state?.totalEpisodes ?? 0,
       episodeBudget: state?.maxEpisodes ?? 0,
       episodesPerStage: state?.episodesPerStage ?? null,
@@ -353,6 +536,7 @@ export class TrainingManager {
         createdAt: entry.createdAt,
         episodes: entry.episodes,
         weightedContexts: entry.weightedContexts,
+        evaluable: entry.weightedContexts > 0,
       })),
       lastEvaluation: lastEvaluation
         ? {
@@ -362,11 +546,23 @@ export class TrainingManager {
             successRate: lastEvaluation.successRate,
             deltas,
             reasons: lastEvaluation.reasons,
+            conclusion: lastEvaluation.conclusion ?? null,
+            learnedContexts: lastEvaluation.learnedContexts ?? null,
+            behaviourChangedRuns: lastEvaluation.behaviourChangedRuns ?? null,
+            pairedRuns: lastEvaluation.pairedRuns ?? null,
           }
         : null,
+      availableStages: TRAINING_STAGES.map((entry) => ({ id: entry.id, label: entry.label, scenarioCount: entry.scenarioIds.length, minEpisodes: entry.minEpisodes })),
+      stageIds: state?.stageIds ?? null,
+      explorationRate: state?.explorationRate ?? null,
+      defaultExplorationRate: DEFAULT_TRAINING_EXPLORATION_RATE,
+      lock: (() => {
+        const holder = readTrainingLock(this.options.root);
+        return holder && holder.alive ? { pid: holder.pid, kind: holder.kind, startedAt: holder.startedAt, alive: holder.alive } : null;
+      })(),
       lastError: state?.lastError ?? this.launchError,
       updatedAt: state?.updatedAt ?? null,
-      note: "Training runs on the offline simulator in a separate process. Its checkpoints are measured on held-out seeds and are not promoted automatically.",
+      note: "Offline simulator training only: it is not learning in a real Minecraft world. Checkpoints are measured on held-out seeds and are never promoted automatically.",
       execution: "offline-simulator",
       render: "none",
       maxMinutes: state?.maxMinutes ?? null,
@@ -376,6 +572,31 @@ export class TrainingManager {
       rewardTrend: [...(state?.recent ?? [])].reverse().map((entry) => entry.reward),
       stopReason: state?.stopReason ?? null,
     };
+  }
+
+  /**
+   * The newest checkpoint evaluation reports in this directory, newest first. Reports are the files the evaluator wrote;
+   * unreadable or foreign files are skipped, and nothing is recomputed here.
+   */
+  async evaluationReports(limit = 8): Promise<TrainingEvaluationReport[]> {
+    let names: string[] = [];
+    try {
+      const { readdir } = await import("node:fs/promises");
+      names = (await readdir(this.paths.evaluations)).filter((name) => name.startsWith("ckpt-") && name.endsWith(".json"));
+    } catch {
+      return [];
+    }
+    names.sort().reverse();
+    const reports: TrainingEvaluationReport[] = [];
+    for (const name of names.slice(0, Math.max(1, limit))) {
+      try {
+        const parsed = JSON.parse(await readFile(join(this.paths.evaluations, name), "utf8")) as TrainingEvaluationReport;
+        if (parsed && parsed.schemaVersion === 1 && typeof parsed.checkpointId === "string") reports.push(parsed);
+      } catch {
+        // a torn or foreign file is not a report
+      }
+    }
+    return reports;
   }
 
   private async readDeltas(reportPath: string): Promise<ControlCenterTrainingDeltas | null> {

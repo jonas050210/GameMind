@@ -6,6 +6,11 @@
  * the state below.
  */
 
+import type { SchedulerSnapshot } from "../games/minecraft/task-scheduler.js";
+import type { AppEvent } from "../app/event-log.js";
+import type { JobView } from "../app/jobs.js";
+import type { SessionMode, SessionView } from "../app/types.js";
+
 export interface ControlCenterConnection {
   readonly adapterStatus: string;
   readonly gameId: string;
@@ -115,6 +120,8 @@ export interface ControlCenterGoal {
 }
 
 export interface ControlCenterWorld {
+  /** The player's own position, whole blocks, from the live observation; null when nothing was observed. */
+  readonly position?: { readonly x: number; readonly y: number; readonly z: number } | null;
   readonly dimension: string | null;
   readonly gameMode: string | null;
   readonly health: number | null;
@@ -487,6 +494,19 @@ export interface ControlCenterTrainingDeltas {
 }
 
 /** Training as reported from its state file and its child process. Nothing here is estimated. */
+/** What the Training form sends. `directory` is a name under the data directory, never a path. */
+export interface ControlCenterTrainingStart {
+  readonly episodesPerStage?: number;
+  readonly maxEpisodes?: number;
+  readonly maxMinutes?: number;
+  readonly fresh?: boolean;
+  /** Required for `fresh` when the directory already holds a run; the consequences are shown before it is sent. */
+  readonly confirmFresh?: boolean;
+  readonly explorationRate?: number;
+  readonly stageIds?: readonly string[];
+  readonly directory?: string;
+}
+
 export interface ControlCenterTraining {
   /** `interrupted` means the state says a run was active but its process is gone; it can be resumed. */
   readonly status: "idle" | "running" | "paused" | "stopped" | "completed" | "failed" | "interrupted" | "evaluating";
@@ -527,6 +547,8 @@ export interface ControlCenterTraining {
     readonly createdAt: string;
     readonly episodes: number;
     readonly weightedContexts: number;
+    /** False when the checkpoint holds no learned weights: it is the baseline policy and an evaluation cannot show learning. */
+    readonly evaluable: boolean;
   }[];
   readonly lastEvaluation: {
     readonly checkpointId: string;
@@ -535,7 +557,22 @@ export interface ControlCenterTraining {
     readonly successRate: { readonly baseline: number; readonly candidate: number };
     readonly deltas: ControlCenterTrainingDeltas | null;
     readonly reasons: readonly string[];
+    /** What the comparison established (no-learned-contexts, identical-behaviour, improved, ...); null for older reports. */
+    readonly conclusion: string | null;
+    readonly learnedContexts: number | null;
+    readonly behaviourChangedRuns: number | null;
+    readonly pairedRuns: number | null;
   } | null;
+  /** Curriculum stages a run may use; the form offers exactly these. */
+  readonly availableStages: readonly { readonly id: string; readonly label: string; readonly scenarioCount: number; readonly minEpisodes: number }[];
+  /** Stages the saved run was started with; null before any run. */
+  readonly stageIds: readonly string[] | null;
+  /** Exploration rate the saved run used; null before any run. */
+  readonly explorationRate: number | null;
+  /** The default exploration rate offered for a new run. */
+  readonly defaultExplorationRate: number;
+  /** Who holds this directory's lock, if anyone. */
+  readonly lock: { readonly pid: number; readonly kind: "train" | "evaluate"; readonly startedAt: string; readonly alive: boolean } | null;
   readonly lastError: string | null;
   readonly updatedAt: string | null;
   readonly note: string;
@@ -592,6 +629,46 @@ export interface ControlCenterSnapshot {
   readonly offlineNote?: string | null;
   /** Central Library catalog and recent executions. Null when the host has no Library. */
   readonly library?: ControlCenterLibrary | null;
+  /** The authoritative task scheduler: active task, queue, recent outcomes, refusals. Null when the host has none. */
+  readonly scheduler?: SchedulerSnapshot | null;
+  /** Whether the agent starts its own tasks when idle. Null when the host cannot say. */
+  readonly autonomyEnabled?: boolean | null;
+  /** The running app: version, bind address, platform, data folders. Absent when a run is served without the app. */
+  readonly app?: ControlCenterAppView | null;
+  /** The session lifecycle, including "no session yet". Absent when a run is served without the app. */
+  readonly session?: SessionView | null;
+  /** The newest entries of the searchable event log. */
+  readonly events?: ControlCenterEventsView | null;
+  /** Offline tests, offline evaluation and live verification started from the Control Center. */
+  readonly jobs?: ControlCenterJobsView | null;
+}
+
+export interface ControlCenterAppView {
+  readonly name: "GameMind";
+  readonly version: string;
+  readonly pid: number;
+  readonly startedAt: string;
+  readonly uptimeMs: number;
+  readonly bind: { readonly host: string; readonly port: number; readonly localOnly: boolean; readonly url: string };
+  readonly platform: { readonly os: string; readonly wsl: boolean; readonly wslVersion: number | null; readonly distro: string | null; readonly node: string };
+  /** Folders shown relative to the project; absolute paths never reach the page. */
+  readonly directories: { readonly data: string; readonly learning: string | null; readonly worldMemory: string; readonly traces: string; readonly training: string };
+  readonly defaultMode: SessionMode;
+  readonly learning: { readonly enabled: boolean; readonly evidence: readonly string[] | null };
+  /** URLs this process has asked a browser to open; proves a state change did not open another tab. */
+  readonly browserOpened: readonly string[];
+  readonly shuttingDown: boolean;
+}
+
+export interface ControlCenterEventsView {
+  readonly latestSeq: number;
+  readonly total: number;
+  readonly items: readonly AppEvent[];
+}
+
+export interface ControlCenterJobsView {
+  readonly busy: boolean;
+  readonly items: readonly JobView[];
 }
 
 /** Folded view of the offline evaluation report, read from disk by the host. */
@@ -646,15 +723,23 @@ export interface ControlCenterCommands {
   resetTrip?(): ControlCommandResult | Promise<ControlCommandResult>;
   enableCombat?(enabled: boolean): ControlCommandResult | Promise<ControlCommandResult>;
   setWorldSeed?(seed: string | null): ControlCommandResult | Promise<ControlCommandResult>;
-  startTraining?(options: { readonly episodesPerStage?: number; readonly maxEpisodes?: number; readonly maxMinutes?: number; readonly fresh?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
+  startTraining?(options: ControlCenterTrainingStart): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Reports what a start would do (resume or fresh) for a directory, without starting anything. */
   refreshRoadmap?(): ControlCommandResult | Promise<ControlCommandResult>;
   roadmapAction?(payload: { readonly fingerprint: string; readonly action: string; readonly value?: number; readonly note?: string }): ControlCommandResult | Promise<ControlCommandResult>;
   pauseTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   resumeTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   stopTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   evaluateTraining?(checkpointId?: string): ControlCommandResult | Promise<ControlCommandResult>;
-  startTask?(task: { readonly kind: string; readonly resource?: string; readonly count?: number }): ControlCommandResult | Promise<ControlCommandResult>;
+  /** `queue: true` runs the task after the current one instead of refusing while the agent is busy. */
+  startTask?(task: { readonly kind: string; readonly resource?: string; readonly count?: number; readonly queue?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
   stopTask?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Removes one queued task (by ticket id) from the scheduler. */
+  cancelQueuedTask?(payload: { readonly ticketId: string } | string): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Cancels every queued task; the running one is untouched. */
+  clearTaskQueue?(): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Turns autonomous idle behaviour on or off. Safety policy, budgets and combat restrictions are unaffected. */
+  setAutonomy?(payload: { readonly enabled: boolean } | boolean): ControlCommandResult | Promise<ControlCommandResult>;
   promotePolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   rejectPolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   /**
@@ -666,15 +751,32 @@ export interface ControlCenterCommands {
   panic?(): ControlCommandResult | Promise<ControlCommandResult>;
 }
 
+/** A read-only query served as `GET /api/<name>`; it receives the URL's query parameters. */
+export type ControlCenterQuery = (params: URLSearchParams) => unknown | Promise<unknown>;
+
 export interface ControlCenterHost {
   readonly title: string;
   snapshot(): ControlCenterSnapshot | Promise<ControlCenterSnapshot>;
+  /**
+   * Read at request time, so a host whose command set changes (a session starting or ending) can expose a getter.
+   * Only own properties are ever dispatched.
+   */
   readonly commands: ControlCenterCommands;
+  /** Extra read-only endpoints; names are lowercase words joined by dashes. */
+  readonly queries?: Readonly<Record<string, ControlCenterQuery>>;
+  /** Extra fields merged into `GET /api/health` (identity, version, session state). */
+  health?(): Readonly<Record<string, unknown>>;
 }
 
 export interface ControlCenterServerOptions {
+  /** Interface to bind. Defaults to 127.0.0.1: the Control Center is a local tool unless the operator says otherwise. */
   readonly host?: string;
   readonly port?: number;
+  /**
+   * Host header values (host names only, no port) accepted in addition to loopback names. When the server is bound to
+   * a loopback address only loopback names (and these) are accepted, which closes DNS-rebinding attacks.
+   */
+  readonly allowedHosts?: readonly string[];
   readonly logger?: { info(message: string): void; warn(message: string): void; error(message: string): void } | null;
   /** Extra static header text (e.g. a simulation warning) shown in the UI banner. */
   readonly banner?: string | null;
@@ -684,5 +786,9 @@ export interface ControlCenterHandle {
   readonly port: number;
   readonly url: string;
   readonly token: string;
+  /** The interface the server is bound to. */
+  readonly bindHost: string;
+  /** True when only this machine can reach the server. */
+  readonly localOnly: boolean;
   stop(reason?: string): Promise<void>;
 }

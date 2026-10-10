@@ -1,7 +1,5 @@
 import type { Logger } from "pino";
 import { readFile } from "node:fs/promises";
-import * as os from "node:os";
-import { performance } from "node:perf_hooks";
 import type { SafetyBroker } from "../../core/safety-broker.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
 import type { TraceEvent } from "../../core/trace.js";
@@ -14,7 +12,6 @@ import type { WorldMemory } from "./world-memory.js";
 import type {
   ControlCenterActionView,
   ControlCenterCommands,
-  ControlCenterRuntimePerformance,
   ControlCenterFailureView,
   ControlCenterSkillMetric,
   ControlCenterSnapshot,
@@ -41,6 +38,8 @@ function roadmapView(service: RoadmapService, loop: AgentLoopPerformance | null)
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import { LibraryExecutor, createMinecraftLibraryRegistry } from "./library.js";
+import { createRuntimePerformanceSampler } from "./runtime-performance.js";
+import type { SchedulerSnapshot, SchedulerTicketView, Submission, TaskOrigin, TaskScheduler } from "./task-scheduler.js";
 
 /** Adapters that can arm or disarm combat while running; the control is hidden when they cannot. */
 export interface CombatGateAdapter {
@@ -92,7 +91,14 @@ export interface ControlCenterSource {
   /** Builds the next task from a UI request; throws with a readable message when the kind is unknown. */
   taskFor?(request: { readonly kind: string; readonly resource?: string; readonly count?: number }): MinecraftTask;
   /** Called when the operator asks the UI to start a task; resolves when the run finishes. */
-  onStart?(task: MinecraftTask): Promise<void>;
+  onStart?(task: MinecraftTask, request?: { readonly origin?: TaskOrigin; readonly whenBusy?: "queue" | "reject" }): Promise<void>;
+  /** The authoritative scheduler. When present, task admission is decided there and refusals carry its codes. */
+  readonly scheduler?: TaskScheduler | null;
+  /** Synchronous admission through the scheduler; the `startTask` command uses it to report queued/refused honestly. */
+  submitTask?(task: MinecraftTask, request: { readonly origin: TaskOrigin; readonly whenBusy?: "queue" | "reject"; readonly label?: string }): Submission;
+  /** Runtime switch for autonomous idle behaviour, and its current value. */
+  setAutonomy?(enabled: boolean): void;
+  autonomyEnabled?(): boolean;
   /** Optional extra fields merged into the snapshot (used by the simulated demo host). */
   decorate?(base: ControlCenterSnapshot): ControlCenterSnapshot;
   /** Optional progress tracker for multi-task autonomous progression. */
@@ -110,7 +116,7 @@ export interface ControlCenterSource {
   /** Operator-entered world seed (manual; never auto-detected). */
   readonly worldSeed?: import("./world-seed.js").WorldSeedStore | null;
   /** Training and evaluation as separate processes; null when the host has no training support. */
-  readonly training?: import("../../training/manager.js").TrainingManager | null;
+  readonly training?: import("../../training/manager.js").TrainingControl | null;
 }
 
 const BAND_LABELS = ["safety", "survival", "progress"] as const;
@@ -304,49 +310,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
   commands: ControlCenterCommands;
 } {
   const { runtime, memory, learner, safety, traceSink, control } = source;
-  const logicalCpus = Math.max(1, typeof os.availableParallelism === "function" ? os.availableParallelism() : os.cpus().length);
-  let priorSampleAt = performance.now();
-  let priorCpu = process.cpuUsage();
-  let priorEventLoop = performance.eventLoopUtilization();
-
-  function sampleRuntimePerformance(): ControlCenterRuntimePerformance {
-    const now = performance.now();
-    const cpu = process.cpuUsage();
-    const eventLoop = performance.eventLoopUtilization();
-    const eventLoopDelta = performance.eventLoopUtilization(priorEventLoop, eventLoop);
-    const sampleWindowMs = Math.max(0, now - priorSampleAt);
-    const cpuTimeMs = ((cpu.user - priorCpu.user) + (cpu.system - priorCpu.system)) / 1_000;
-    const cpuCapacityPercent = sampleWindowMs > 0
-      ? Math.max(0, Math.min(100, cpuTimeMs / (sampleWindowMs * logicalCpus) * 100))
-      : 0;
-    const processMemory = process.memoryUsage();
-    const load = os.loadavg()[0] ?? null;
-    priorSampleAt = now;
-    priorCpu = cpu;
-    priorEventLoop = eventLoop;
-    return {
-      sampledAt: new Date().toISOString(),
-      sampleWindowMs,
-      nodeVersion: process.version,
-      platform: process.platform,
-      architecture: process.arch,
-      logicalCpus,
-      process: {
-        cpuCapacityPercent,
-        eventLoopUtilizationPercent: Math.max(0, Math.min(100, eventLoopDelta.utilization * 100)),
-        rssBytes: processMemory.rss,
-        heapUsedBytes: processMemory.heapUsed,
-        heapTotalBytes: processMemory.heapTotal,
-        externalBytes: processMemory.external,
-        uptimeSeconds: process.uptime(),
-      },
-      host: {
-        totalMemoryBytes: os.totalmem(),
-        freeMemoryBytes: os.freemem(),
-        loadAverage1m: process.platform === "win32" || !Number.isFinite(load) ? null : load,
-      },
-    };
-  }
+  const sampleRuntimePerformance = createRuntimePerformanceSampler();
 
   const noBroker = (): ControlCommandResult => ({
     ok: false,
@@ -516,11 +480,8 @@ export function createControlCenterSource(source: ControlCenterSource): {
       if (safety?.snapshot().paused) {
         return { ok: false, message: "The run is paused; resume it before starting a task." };
       }
-      if (!source.taskFor || !source.onStart) {
+      if (!source.taskFor || (!source.onStart && !source.submitTask)) {
         return { ok: false, message: "This run does not accept a new task from the Control Center." };
-      }
-      if (control.task) {
-        return { ok: false, message: "A task is already running; stop it first." };
       }
       let task: MinecraftTask;
       try {
@@ -528,10 +489,59 @@ export function createControlCenterSource(source: ControlCenterSource): {
       } catch (error) {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
-      void source.onStart(task).catch((error: unknown) => {
+      if (source.submitTask) {
+        // The scheduler decides synchronously: started now, queued, or refused with a code and a sentence.
+        const submission = source.submitTask(task, {
+          origin: "control-center",
+          whenBusy: request?.queue === true ? "queue" : "reject",
+        });
+        if (!submission.accepted) {
+          return { ok: false, message: submission.message, data: { code: submission.code } };
+        }
+        submission.done.catch((error: unknown) => {
+          source.logger.error({ err: error }, "Task started from the Control Center failed");
+        });
+        const message = submission.position === 0
+          ? `Started task '${task.id}' (${task.kind}).`
+          : submission.preempting
+            ? `Queued task '${task.id}' next: the autonomous task is stopping at its next action boundary.`
+            : `Queued task '${task.id}' at position ${submission.position}; it runs after the current task.`;
+        return { ok: true, message, data: { ticketId: submission.ticketId, position: submission.position, preempting: submission.preempting } };
+      }
+      if (control.task) {
+        return { ok: false, message: "A task is already running; stop it first." };
+      }
+      void source.onStart!(task).catch((error: unknown) => {
         source.logger.error({ err: error }, "Task started from the Control Center failed");
       });
       return { ok: true, message: `Started task '${task.id}' (${task.kind}).` };
+    },
+    cancelQueuedTask(payload) {
+      if (!source.scheduler) return { ok: false, message: "This run has no task scheduler." };
+      const ticketId = typeof payload === "string" ? payload : typeof payload === "object" && payload !== null ? String((payload as { ticketId?: unknown }).ticketId ?? "") : "";
+      if (ticketId.length === 0) return { ok: false, message: "A queued task id is required." };
+      const outcome = source.scheduler.cancel(ticketId, "cancelled from the Control Center");
+      if (outcome === null) return { ok: false, message: `No queued or running task has the id '${ticketId}'.` };
+      return {
+        ok: true,
+        message: outcome === "cancelled" ? "Queued task cancelled." : "Stop requested; the run ends after the current action.",
+      };
+    },
+    clearTaskQueue() {
+      if (!source.scheduler) return { ok: false, message: "This run has no task scheduler." };
+      const cancelled = source.scheduler.clearQueue("queue cleared from the Control Center");
+      return { ok: true, message: cancelled === 0 ? "The queue was already empty." : `Cancelled ${cancelled} queued task(s).` };
+    },
+    setAutonomy(payload) {
+      if (!source.setAutonomy) return { ok: false, message: "This run cannot change autonomy at runtime." };
+      const enabled = typeof payload === "boolean" ? payload : typeof payload === "object" && payload !== null && (payload as { enabled?: unknown }).enabled === true;
+      source.setAutonomy(enabled);
+      return {
+        ok: true,
+        message: enabled
+          ? "Autonomy is on: the agent starts its own survival and progress subgoals when idle. Safety limits are unchanged."
+          : "Autonomy is off: the agent acts only on tasks you start. Safety limits are unchanged.",
+      };
     },
     async promotePolicy() {
       if (!learner) return { ok: false, message: "No experience learner is attached to this run." };
@@ -657,6 +667,8 @@ export function createControlCenterSource(source: ControlCenterSource): {
         worldAvailable: status.adapterStatus === "connected" && status.worldLive,
       },
       companion: source.companion?.snapshot() ?? null,
+      scheduler: source.scheduler ? withClassification(source.scheduler.snapshot()) : null,
+      autonomyEnabled: source.autonomyEnabled ? source.autonomyEnabled() : null,
       agent: {
         // An operator hold is reported even between tasks: pausing while idle still blocks the next run,
         // and the UI must not make that look like an ordinary idle agent.
@@ -691,6 +703,9 @@ export function createControlCenterSource(source: ControlCenterSource): {
       world: {
         // No block or entity coordinates and no terrain census leave the agent: the Control Center is a status
         // surface, and those fields were only ever low-level diagnostics that the operator views did not need.
+        position: state
+          ? { x: Math.round(state.player.position.x), y: Math.round(state.player.position.y), z: Math.round(state.player.position.z) }
+          : null,
         dimension: state?.player.dimension ?? null,
         gameMode: state?.player.gameMode ?? null,
         health: state?.player.health ?? null,
@@ -777,35 +792,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         })),
       }
         : null,
-      learning: {
-        enabled: learning?.enabled ?? false,
-        runs: learning?.runs ?? 0,
-        episodes: learning?.episodes ?? 0,
-        contexts: learning?.contexts ?? [],
-        activePolicy: learning?.activePolicy ?? null,
-        candidatePolicy: learning?.candidatePolicy ?? { id: "baseline-v1", contexts: 0 },
-        blockedTargets: learning?.failureMemory ?? [],
-        history: (learning?.history ?? []).map((entry) => ({
-          runId: entry.runId,
-          at: entry.at,
-          note: entry.note,
-          promoted: entry.promoted,
-        })),
-        lastRun: control.result?.learning
-          ? {
-              episodes: control.result.learning.episodes,
-              successes: control.result.learning.successes,
-              failures: control.result.learning.failures,
-              blockedTargets: control.result.learning.blockedTargets,
-            }
-          : null,
-        evaluation: await readEvaluationSummary(source.evaluationReportPath ?? null),
-        reward: learning?.reward ?? null,
-        classPatterns: learning?.classPatterns ?? [],
-        checkpoints: learning?.checkpoints ?? null,
-        experiments: learning?.experiments ?? [],
-        rlReadiness: learning?.rlReadiness ?? null,
-      },
+      learning: buildLearningView(learning, control.result?.learning ?? null, await readEvaluationSummary(source.evaluationReportPath ?? null)),
       capabilities: runtime.adapter.capabilities.map((capability) => ({
         name: capability.name,
         risk: capability.risk,
@@ -882,6 +869,48 @@ export function createControlCenterSource(source: ControlCenterSource): {
   }
 
   return { snapshot, commands };
+}
+
+/** Adds the shared failure classification to every ticket that ended with a failure, so the page can explain it. */
+function withClassification(snapshot: SchedulerSnapshot): SchedulerSnapshot {
+  const annotate = (ticket: SchedulerTicketView): SchedulerTicketView =>
+    ticket.failure ? { ...ticket, classification: classifyFailure(ticket.failure.code, ticket.failure.message) } : ticket;
+  return { ...snapshot, active: snapshot.active ? annotate(snapshot.active) : null, queue: snapshot.queue.map(annotate), history: snapshot.history.map(annotate) };
+}
+
+/**
+ * The learning panel's data from a learner snapshot. A pure function of its inputs so the same view is built for a live
+ * session and for the app when no session exists: the policy store is on disk either way.
+ */
+export function buildLearningView(
+  learning: ReturnType<ExperienceLearner["snapshot"]> | null,
+  lastRun: { readonly episodes: number; readonly successes: number; readonly failures: number; readonly blockedTargets: number } | null,
+  evaluation: EvaluationSummary | null,
+): NonNullable<ControlCenterSnapshot["learning"]> {
+  return {
+    enabled: learning?.enabled ?? false,
+    runs: learning?.runs ?? 0,
+    episodes: learning?.episodes ?? 0,
+    contexts: learning?.contexts ?? [],
+    activePolicy: learning?.activePolicy ?? null,
+    candidatePolicy: learning?.candidatePolicy ?? { id: "baseline-v1", contexts: 0 },
+    blockedTargets: learning?.failureMemory ?? [],
+    history: (learning?.history ?? []).map((entry) => ({
+      runId: entry.runId,
+      at: entry.at,
+      note: entry.note,
+      promoted: entry.promoted,
+    })),
+    lastRun: lastRun
+      ? { episodes: lastRun.episodes, successes: lastRun.successes, failures: lastRun.failures, blockedTargets: lastRun.blockedTargets }
+      : null,
+    evaluation,
+    reward: learning?.reward ?? null,
+    classPatterns: learning?.classPatterns ?? [],
+    checkpoints: learning?.checkpoints ?? null,
+    experiments: learning?.experiments ?? [],
+    rlReadiness: learning?.rlReadiness ?? null,
+  };
 }
 
 /** Rebuilds a session fact for the dashboard from whatever the observation carried. */
