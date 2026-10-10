@@ -66,6 +66,12 @@ export const trainingStateSchema = z.object({
   recent: z.array(episodeRecordSchema).max(50),
   checkpoints: z.array(checkpointRecordSchema),
   lastEvaluation: evaluationSummarySchema.nullable(),
+  /** Wall-clock time spent inside episodes across all invocations. Pauses and waits are not counted. */
+  activeMs: z.number().min(0).default(0),
+  /** Optional time budget for the whole run, in minutes. Checked between episodes. */
+  maxMinutes: z.number().positive().nullable().default(null),
+  /** Why the run last stopped, for the operator. Null while running. */
+  stopReason: z.string().nullable().default(null),
 });
 
 export type TrainingState = z.infer<typeof trainingStateSchema>;

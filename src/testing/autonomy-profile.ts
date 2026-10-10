@@ -7,6 +7,8 @@
  *
  * Output is simulated behaviour (virtual clock, simplified physics), not live Minecraft evidence.
  */
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import pino from "pino";
 import { MemoryTraceSink, TraceRecorder } from "../core/trace.js";
 import { createMinecraftAgent } from "../games/minecraft/create-agent.js";
@@ -28,6 +30,8 @@ export interface AutonomyProfileTaskRecord {
 }
 
 export interface AutonomyProfileReport {
+  /** When the profile finished (ISO). The improvement roadmap uses it as the evidence timestamp. */
+  readonly generatedAt?: string;
   readonly scenario: string;
   readonly seed: number;
   readonly virtualSeconds: number;
@@ -129,6 +133,7 @@ export async function profileAutonomy(options: {
   }
   const finalFood = adapter.world.food;
   return {
+    generatedAt: new Date().toISOString(),
     scenario: options.scenario,
     seed: options.seed,
     virtualSeconds: Math.round(adapter.simulatedNowMs / 100) / 10,
@@ -154,7 +159,12 @@ async function main(): Promise<void> {
     seed: Number(read("--seed", "101")),
     virtualSeconds: Number(read("--virtual-seconds", "300")),
   });
+  // Written next to the other evidence so the Control Center's improvement roadmap can read it.
+  const out = read("--out", `data/profile/autonomy-${report.scenario}-${report.seed}.json`);
+  await mkdir(dirname(out), { recursive: true });
+  await writeFile(out, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   console.log(JSON.stringify(report, null, 2));
+  console.log(`Report written to ${out}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -33,8 +33,9 @@ for (const relative of sources) {
     if (!(await exists(path.join(root, output)))) continue;
     const candidate = path.join(root, output, relative.replace(/^src\//, ""));
     await mkdir(path.dirname(candidate), { recursive: true });
-    await cp(from, candidate, { recursive: true, force: true });
-    const files = await readdir(candidate);
+    // Declaration files exist only so TypeScript tests can type-check the browser modules; the browser never loads them.
+    await cp(from, candidate, { recursive: true, force: true, filter: (source) => !source.endsWith(".d.ts") });
+    const files = (await readdir(candidate)).filter((name) => !name.endsWith(".d.ts"));
     copied += files.length;
     console.log(`copy-assets: ${relative} -> ${path.relative(root, candidate)} (${files.length} files)`);
     break;

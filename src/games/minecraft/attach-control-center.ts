@@ -6,6 +6,7 @@ import { RuntimeMetrics } from "./runtime-metrics.js";
 import { describeReflex } from "./reflex.js";
 import { DEFAULT_WORLD_CONFIG_PATH, WorldSeedStore } from "./world-seed.js";
 import { TrainingManager } from "../../training/manager.js";
+import { RoadmapService, defaultRoadmapOptions } from "../../roadmap/service.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { WorldState } from "../../core/types.js";
 import type { SkillRuntime } from "../../core/skill-runtime.js";
@@ -163,6 +164,8 @@ export interface MinecraftRunHostOptions {
   readonly worldConfigPath?: string;
   /** Root directory for training state, checkpoints and evaluation reports. Defaults to data/training. */
   readonly trainingDirectory?: string;
+  /** Root of the data directory (evidence, roadmap). Defaults to data. */
+  readonly dataDirectory?: string;
   /** Period of the fast observation loop. Defaults to one second; tests shorten or stretch it. */
   readonly observationIntervalMs?: number;
   /** Starts the fast loop immediately. Tests that drive ticks by hand set this to false. */
@@ -303,6 +306,10 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   const metrics = new RuntimeMetrics(options.loopClock ?? (() => Date.now()));
   const worldSeed = new WorldSeedStore(options.worldConfigPath ?? DEFAULT_WORLD_CONFIG_PATH);
   const training = new TrainingManager({ root: options.trainingDirectory ?? "data/training" });
+  const roadmap = new RoadmapService(defaultRoadmapOptions(options.dataDirectory ?? "data"));
+  // Build the roadmap once at start; the Control Center refreshes it in the background afterwards.
+  void roadmap.refresh().catch(() => undefined);
+  // Closing waits for any roadmap write so a data directory can be removed or reused right after shutdown.
   const autonomy = new AutonomyController({ tracker: progressTracker, now: options.loopClock ?? (() => Date.now()) });
   let autonomousRunning = false;
 
@@ -404,6 +411,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     loop,
     worldSeed,
     training,
+    roadmap,
     landmarkMemory: memory.landmarks,
     ...(options.decorate ? { decorate: options.decorate } : {}),
     onStart: async (task) => {
@@ -486,6 +494,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       companion?.stop();
       loop.stop();
       await training.dispose();
+      await roadmap.idle();
       unsubscribeChat?.();
       await handle.stop("run host closing");
       if (memory instanceof PersistentWorldMemory) {

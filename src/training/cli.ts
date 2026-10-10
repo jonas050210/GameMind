@@ -6,7 +6,7 @@ import { runTraining } from "./trainer.js";
 
 const USAGE = `GameMind training
 
-  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--fresh]
+  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh]
       Runs the curriculum on the offline simulator. Resumes from DIR/state.json unless --fresh is given.
   npm run train -- evaluate [--dir DIR] [--checkpoint ID] [--seeds N]
       Scores a checkpoint against the baseline on held-out evaluation seeds and writes a JSON report.
@@ -21,6 +21,7 @@ interface ParsedArgs {
   readonly dir: string;
   readonly episodesPerStage?: number;
   readonly maxEpisodes?: number;
+  readonly maxMinutes?: number;
   readonly fresh: boolean;
   readonly checkpoint?: string;
   readonly seeds?: number;
@@ -55,6 +56,9 @@ export function parseTrainingArgs(argv: readonly string[]): ParsedArgs {
       case "--max-episodes":
         parsed.maxEpisodes = integerFlag(flag, value(), 1, 5000);
         break;
+      case "--max-minutes":
+        parsed.maxMinutes = integerFlag(flag, value(), 1, 24 * 60);
+        break;
       case "--fresh":
         parsed.fresh = true;
         break;
@@ -82,6 +86,7 @@ async function main(): Promise<number> {
         root: args.dir,
         ...(args.episodesPerStage !== undefined ? { episodesPerStage: args.episodesPerStage } : {}),
         ...(args.maxEpisodes !== undefined ? { maxEpisodes: args.maxEpisodes } : {}),
+        ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes } : {}),
         fresh: args.fresh,
         evaluationSeedCount: 10,
         logger,

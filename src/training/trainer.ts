@@ -38,6 +38,8 @@ export interface TrainingRunOptions {
   readonly episodesPerStage?: number;
   /** Total episode budget across all stages. */
   readonly maxEpisodes?: number;
+  /** Time budget for the whole run, counted as active episode time (pauses excluded). */
+  readonly maxMinutes?: number;
   /** Start over: deletes the experience store and state. Without it, an existing run is resumed. */
   readonly fresh?: boolean;
   readonly stages?: readonly CurriculumStage[];
@@ -57,7 +59,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function initialState(options: Required<Pick<TrainingRunOptions, "episodesPerStage" | "maxEpisodes">>, now: string): TrainingState {
+function initialState(
+  options: Required<Pick<TrainingRunOptions, "episodesPerStage" | "maxEpisodes">> & { maxMinutes: number | null },
+  now: string,
+): TrainingState {
   return {
     schemaVersion: TRAINING_SCHEMA_VERSION,
     status: "running",
@@ -76,6 +81,9 @@ function initialState(options: Required<Pick<TrainingRunOptions, "episodesPerSta
     recent: [],
     checkpoints: [],
     lastEvaluation: null,
+    activeMs: 0,
+    maxMinutes: options.maxMinutes,
+    stopReason: null,
   };
 }
 
@@ -108,6 +116,7 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
   const existing = await readTrainingState(paths);
   const episodesPerStage = options.episodesPerStage ?? existing?.episodesPerStage ?? DEFAULT_EPISODES_PER_STAGE;
   const maxEpisodes = options.maxEpisodes ?? existing?.maxEpisodes ?? episodesPerStage * stages.length * 2;
+  const maxMinutes = options.maxMinutes ?? existing?.maxMinutes ?? null;
   // On resume the saved progress is kept, but the budget and stage size come from this invocation, so a run can
   // be extended with a larger --max-episodes.
   const state: TrainingState = existing
@@ -119,9 +128,11 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
         lastError: null,
         episodesPerStage,
         maxEpisodes,
+        maxMinutes,
+        stopReason: null,
         updatedAt: now().toISOString(),
       }
-    : initialState({ episodesPerStage, maxEpisodes }, now().toISOString());
+    : initialState({ episodesPerStage, maxEpisodes, maxMinutes }, now().toISOString());
   if (options.evaluationSeedCount !== undefined) assertSeedSplit(options.evaluationSeedCount, maxEpisodes);
   await writeControlCommand(paths, "run");
   await persist(paths, state, now);
@@ -131,11 +142,17 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
   logger?.info({ episodes: state.totalEpisodes, stage: stages[state.stageIndex]?.id }, "Training started");
 
   let final: TrainingState["status"] = "completed";
+  let stopReason: string | null = null;
   try {
     while (state.stageIndex < stages.length && state.totalEpisodes < state.maxEpisodes) {
       const command = await readControlCommand(paths);
       if (command === "stop") {
         final = "stopped";
+        stopReason = "Stopped by the operator after the current episode.";
+        break;
+      }
+      if (state.maxMinutes !== null && state.activeMs >= state.maxMinutes * 60_000) {
+        stopReason = `Time budget of ${state.maxMinutes} min reached.`;
         break;
       }
       if (command === "pause") {
@@ -157,11 +174,13 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
       const scenario = scenarios.get(scenarioId)!;
       const seed = trainingSeed(state.totalEpisodes);
       const before = learner.rewardTotals;
+      const episodeStarted = performance.now();
       const run = await episodeRunner(scenario, seed, {
         learner,
         worldKey: `train:${scenario.id}:${seed}`,
         runId: `train-${String(state.totalEpisodes).padStart(6, "0")}`,
       });
+      state.activeMs += performance.now() - episodeStarted;
       const after = learner.rewardTotals;
       const episodeReward = after.episodes > before.episodes ? after.sum - before.sum : null;
 
@@ -201,7 +220,10 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
       }
       await persist(paths, state, now);
     }
-    if (state.stageIndex >= stages.length || state.totalEpisodes >= state.maxEpisodes) final = "completed";
+    if (final !== "stopped" && stopReason === null) {
+      if (state.stageIndex >= stages.length) stopReason = "Curriculum complete.";
+      else if (state.totalEpisodes >= state.maxEpisodes) stopReason = `Episode budget of ${state.maxEpisodes} reached.`;
+    }
   } catch (error) {
     final = "failed";
     state.lastError = error instanceof Error ? error.message : String(error);
@@ -216,6 +238,7 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
     state.checkpoints = [...state.checkpoints, checkpoint];
   }
   state.status = final;
+  state.stopReason = final === "failed" ? null : stopReason;
   state.pid = null;
   state.control = final === "stopped" ? "stop" : "run";
   state.updatedAt = now().toISOString();

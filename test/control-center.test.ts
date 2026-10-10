@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createLogger } from "../src/core/logger.js";
@@ -78,6 +78,7 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     autonomous: false,
     worldConfigPath: path.join(directory, "world-config.json"),
     trainingDirectory: path.join(directory, "training"),
+    dataDirectory: path.join(directory, "data"),
     port: 0,
     bindHost: "127.0.0.1",
     evaluationReportPath: path.join(directory, "no-report.json"),
@@ -701,6 +702,64 @@ test("training commands refuse what cannot honestly happen yet", async () => {
     const evaluate = await fixture.command("evaluateTraining");
     assert.equal(evaluate.body.ok, false);
     assert.match(evaluate.body.message ?? "", /No checkpoint/, "an evaluation needs a checkpoint to score");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("the roadmap is built from recorded evidence and its actions are saved or refused through the command endpoint", async () => {
+  const fixture = await startFixture();
+  try {
+    const evidenceDir = path.join(fixture.directory, "data", "evidence");
+    await mkdir(evidenceDir, { recursive: true });
+    await writeFile(
+      path.join(evidenceDir, "tests.json"),
+      JSON.stringify({ measuredAt: "2026-10-10T08:00:00.000Z", passed: 467, failed: 1, failures: ["fixture: a failing check"] }),
+    );
+    const refreshed = await fixture.command("refreshRoadmap");
+    assert.equal(refreshed.body.ok, true);
+    const snapshot = await fixture.snapshots();
+    const roadmap = snapshot.roadmap;
+    assert.ok(roadmap, "the snapshot carries the roadmap");
+    assert.ok((roadmap?.sources.length ?? 0) >= 6, "every evidence source is listed, whether or not it was found");
+    const item = roadmap?.items.find((candidate) => candidate.fingerprint === "reliability.test:fixture: a failing check");
+    assert.equal(item?.kind, "defect", "a failing test from the record is a measured defect");
+    assert.equal(item?.status, "proposed");
+
+    const planned = await fixture.command("roadmapAction", { fingerprint: item!.fingerprint, action: "plan", note: "from the test" });
+    assert.equal(planned.body.ok, true);
+    const afterPlan = (await fixture.snapshots()).roadmap?.items.find((candidate) => candidate.fingerprint === item!.fingerprint);
+    assert.equal(afterPlan?.status, "planned");
+    assert.ok(afterPlan?.history.some((entry) => entry.event.includes("from the test")), "the operator's note is kept in the history");
+
+    const unknown = await fixture.command("roadmapAction", { fingerprint: "not-a-real-item", action: "dismiss" });
+    assert.equal(unknown.status, 409, "an action on an unknown item is refused, not silently accepted");
+    const badAction = await fixture.command("roadmapAction", { fingerprint: item!.fingerprint, action: "delete-everything" });
+    assert.equal(badAction.status, 409);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("training refuses an out-of-range time budget at the endpoint, and the page serves the headless controls", async () => {
+  const fixture = await startFixture();
+  try {
+    const refused = await fixture.command("startTraining", { maxMinutes: 0 });
+    assert.equal(refused.status, 409);
+    assert.match(refused.body.message ?? "", /Time budget \(minutes\) must be a whole number/);
+    const snapshot = await fixture.snapshots();
+    assert.equal(snapshot.training?.execution, "offline-simulator");
+    assert.equal(snapshot.training?.render, "none");
+    assert.equal(snapshot.training?.processAlive, false, "the refused request started nothing");
+
+    const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
+    const html = await (await fetch(base)).text();
+    for (const id of ["training-headless", "training-minutes", "training-max-episodes", "render-notice", "roadmap-items", "roadmap-refresh", "training-reward"]) {
+      assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
+    }
+    const policy = await fetch(`${base}/policy.js`);
+    assert.equal(policy.status, 200, "the policy module the page imports is served");
+    assert.match(policy.headers.get("content-type") ?? "", /javascript/);
   } finally {
     await fixture.close();
   }

@@ -25,6 +25,7 @@ export interface ControlCenterConnection {
 
 import type { AgentLoopPerformance } from "../games/minecraft/runtime-metrics.js";
 import type { AutonomySnapshot } from "../games/minecraft/autonomy-controller.js";
+import type { RoadmapSnapshot } from "../roadmap/service.js";
 
 export interface ControlCenterAgent {
   readonly state: "idle" | "running" | "paused" | "tripped" | "stopping" | "stopped" | "autonomous";
@@ -519,6 +520,19 @@ export interface ControlCenterTraining {
   readonly lastError: string | null;
   readonly updatedAt: string | null;
   readonly note: string;
+  /** Where training runs. Always the offline simulator: no Minecraft client, no browser rendering. */
+  readonly execution: "offline-simulator";
+  readonly render: "none";
+  /** Time budget for the run, in minutes; null when only the episode budget applies. */
+  readonly maxMinutes: number | null;
+  /** Active episode time across all invocations, in seconds. Pauses are not counted. */
+  readonly activeSeconds: number;
+  /** Lifetime throughput: episodes divided by active minutes. Null before any active time. */
+  readonly episodesPerMinute: number | null;
+  /** Per-episode reward for the saved recent episodes, oldest first. Null entries had no learner reward. */
+  readonly rewardTrend: readonly (number | null)[];
+  /** Why the run last stopped (operator, time budget, episode budget, curriculum complete). */
+  readonly stopReason: string | null;
 }
 
 export interface ControlCenterSnapshot {
@@ -529,6 +543,8 @@ export interface ControlCenterSnapshot {
   readonly objective?: AutonomySnapshot | null;
   readonly worldSeed?: ControlCenterWorldSeed | null;
   readonly training?: ControlCenterTraining | null;
+  /** Improvement roadmap built from recorded evidence and the live loop. Null when the host has none. */
+  readonly roadmap?: RoadmapSnapshot | null;
   /** Lightweight process/host sampling; no inspector, profiler, or Minecraft tick hook is enabled. */
   readonly performance: ControlCenterRuntimePerformance;
   readonly connection: ControlCenterConnection;
@@ -609,7 +625,9 @@ export interface ControlCenterCommands {
   resetTrip?(): ControlCommandResult | Promise<ControlCommandResult>;
   enableCombat?(enabled: boolean): ControlCommandResult | Promise<ControlCommandResult>;
   setWorldSeed?(seed: string | null): ControlCommandResult | Promise<ControlCommandResult>;
-  startTraining?(options: { readonly episodesPerStage?: number; readonly maxEpisodes?: number; readonly fresh?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
+  startTraining?(options: { readonly episodesPerStage?: number; readonly maxEpisodes?: number; readonly maxMinutes?: number; readonly fresh?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
+  refreshRoadmap?(): ControlCommandResult | Promise<ControlCommandResult>;
+  roadmapAction?(payload: { readonly fingerprint: string; readonly action: string; readonly value?: number; readonly note?: string }): ControlCommandResult | Promise<ControlCommandResult>;
   pauseTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   resumeTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
   stopTraining?(): ControlCommandResult | Promise<ControlCommandResult>;

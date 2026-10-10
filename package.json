@@ -34,7 +34,9 @@
     "test:live": "tsx src/testing/live/live-test-runner.ts",
     "test:live:quick": "tsx src/testing/live/live-test-runner.ts --scenario live-connection",
     "profile:autonomy": "tsx src/testing/autonomy-profile.ts",
-    "train": "tsx src/training/cli.ts"
+    "train": "tsx src/training/cli.ts",
+    "test:record": "node scripts/record-test-run.mjs",
+    "roadmap": "tsx src/roadmap/cli.ts"
   },
   "dependencies": {
     "mineflayer": "4.39.0",

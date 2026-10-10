@@ -1,8 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { closeSync, openSync, mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import { setPriority } from "node:os";
 import { readFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ControlCenterTraining, ControlCenterTrainingDeltas, ControlCommandResult } from "../control-center/types.js";
 import { TRAINING_STAGES } from "./curriculum.js";
 import {
@@ -31,8 +33,12 @@ export interface TrainingManagerOptions {
 export interface TrainingStartOptions {
   readonly episodesPerStage?: number;
   readonly maxEpisodes?: number;
+  readonly maxMinutes?: number;
   readonly fresh?: boolean;
 }
+
+/** Nice value applied to the trainer child process (higher means less CPU priority). */
+const TRAINING_NICE = 10;
 
 function isAlive(pid: number | null): boolean {
   if (pid === null) return false;
@@ -44,14 +50,26 @@ function isAlive(pid: number | null): boolean {
   }
 }
 
+function tsxLoaderUrl(): string {
+  // Resolve the loader from this package, not the working directory: the Control Center can be started from
+  // another folder, and a bare "tsx" would then fail to load in the child process.
+  try {
+    return pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
+  } catch {
+    return "tsx";
+  }
+}
+
 function childArguments(entry: string): string[] {
   // Under tsx (development) the TypeScript entry needs the loader; the compiled build runs plain JS.
-  return extname(entry) === ".ts" ? ["--import", "tsx", entry] : [entry];
+  return extname(entry) === ".ts" ? ["--import", tsxLoaderUrl(), entry] : [entry];
 }
 
 export class TrainingManager {
   private trainer: ChildProcess | null = null;
   private evaluator: ChildProcess | null = null;
+  /** Why the most recent trainer failed to start or exited non-zero, when its state file has no error. */
+  private launchError: string | null = null;
   private readonly paths: TrainingPaths;
 
   constructor(private readonly options: TrainingManagerOptions) {
@@ -73,6 +91,15 @@ export class TrainingManager {
         env: process.env,
         cwd: process.cwd(),
       });
+      // Training is background work. A lower scheduling priority keeps the live observation and safety loops
+      // ahead of it when the machine is busy. Best effort: some platforms refuse the change, and that is fine.
+      if (child.pid !== undefined) {
+        try {
+          setPriority(child.pid, TRAINING_NICE);
+        } catch {
+          /* the child keeps its default priority */
+        }
+      }
       return child;
     } finally {
       closeSync(fd);
@@ -81,6 +108,17 @@ export class TrainingManager {
 
   /** Starts (or resumes) training in a child process. Refused while a run is already active. */
   async start(options: TrainingStartOptions = {}): Promise<ControlCommandResult> {
+    // The values come from the browser, so they are checked here with the same limits as the CLI.
+    const limits: [string, number | undefined, number, number][] = [
+      ["Episodes per stage", options.episodesPerStage, 1, 200],
+      ["Episode budget", options.maxEpisodes, 1, 5000],
+      ["Time budget (minutes)", options.maxMinutes, 1, 24 * 60],
+    ];
+    for (const [label, value, min, max] of limits) {
+      if (value !== undefined && (!Number.isInteger(value) || value < min || value > max)) {
+        return { ok: false, message: `${label} must be a whole number from ${min} to ${max}.` };
+      }
+    }
     const current = await readTrainingState(this.paths).catch(() => null);
     if (this.isTrainingActive(current)) {
       return { ok: false, message: "Training is already running; pause or stop it first." };
@@ -94,15 +132,19 @@ export class TrainingManager {
     const args = ["train", "--dir", this.options.root];
     if (options.episodesPerStage !== undefined) args.push("--episodes-per-stage", String(options.episodesPerStage));
     if (options.maxEpisodes !== undefined) args.push("--max-episodes", String(options.maxEpisodes));
+    if (options.maxMinutes !== undefined) args.push("--max-minutes", String(options.maxMinutes));
     if (options.fresh) args.push("--fresh");
     await writeControlCommand(this.paths, "run");
+    this.launchError = null;
     const child = this.spawnCli(args, this.paths.log);
     this.trainer = child;
-    child.on("exit", () => {
+    child.on("exit", (code, signal) => {
       if (this.trainer === child) this.trainer = null;
+      void this.noteUnexpectedExit(child, code, signal);
     });
-    child.on("error", () => {
+    child.on("error", (error) => {
       if (this.trainer === child) this.trainer = null;
+      this.launchError = `The training process could not start: ${error.message}`;
     });
     return {
       ok: true,
@@ -174,6 +216,20 @@ export class TrainingManager {
     return isAlive(state.pid) || (this.trainer !== null && this.trainer.exitCode === null);
   }
 
+  /**
+   * A trainer that exits non-zero is reported with the last lines of its own log, so a crash at start-up
+   * is never shown as "idle". A stop or pause the operator asked for is not an error and is not recorded.
+   */
+  private async noteUnexpectedExit(child: ChildProcess, code: number | null, signal: NodeJS.Signals | null): Promise<void> {
+    // Stop and pause are cooperative (a control file), so an operator stop exits 0 and is not recorded here.
+    if (code === 0) return;
+    const tail = await readFile(this.paths.log, "utf8")
+      .then((text) => text.split("\n").filter((line) => line.trim() !== "").slice(-3).join(" | "))
+      .catch(() => "");
+    const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+    this.launchError = `The training process stopped with ${reason}.${tail ? ` Last log lines: ${tail.slice(0, 600)}` : ""}`;
+  }
+
   async snapshot(): Promise<ControlCenterTraining> {
     const state = await this.readState();
     const processAlive = state ? this.isTrainingActive(state) : false;
@@ -241,9 +297,17 @@ export class TrainingManager {
             reasons: lastEvaluation.reasons,
           }
         : null,
-      lastError: state?.lastError ?? null,
+      lastError: state?.lastError ?? this.launchError,
       updatedAt: state?.updatedAt ?? null,
       note: "Training runs on the offline simulator in a separate process. Its checkpoints are measured on held-out seeds and are not promoted automatically.",
+      execution: "offline-simulator",
+      render: "none",
+      maxMinutes: state?.maxMinutes ?? null,
+      activeSeconds: Math.round((state?.activeMs ?? 0) / 100) / 10,
+      episodesPerMinute:
+        state && state.activeMs > 0 ? Math.round((state.totalEpisodes / (state.activeMs / 60_000)) * 10) / 10 : null,
+      rewardTrend: [...(state?.recent ?? [])].reverse().map((entry) => entry.reward),
+      stopReason: state?.stopReason ?? null,
     };
   }
 

@@ -29,6 +29,15 @@ import type { EvaluationSummary } from "../../control-center/types.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
 import { classifyFailure, type FailureKind } from "../../core/failure-taxonomy.js";
 import { MINECRAFT_SAFETY_POLICY } from "./safety-context.js";
+import { runtimeEvidenceOf } from "../../roadmap/evidence.js";
+import type { RoadmapService, RoadmapSnapshot } from "../../roadmap/service.js";
+import type { AgentLoopPerformance } from "./runtime-metrics.js";
+
+/** The roadmap view with the newest live measurements applied. The refresh itself runs in the background. */
+function roadmapView(service: RoadmapService, loop: AgentLoopPerformance | null): RoadmapSnapshot | null {
+  service.observeRuntime(runtimeEvidenceOf(loop));
+  return service.snapshot();
+}
 import { policyPromotionRefusalReasons } from "./policy-promotion.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 
@@ -94,6 +103,8 @@ export interface ControlCenterSource {
   readonly autonomy?: import("./autonomy-controller.js").AutonomyController | null;
   /** The fast loop itself, for its running and in-flight state. */
   readonly loop?: import("./agent-loop.js").FastObservationLoop | null;
+  /** Improvement roadmap; refreshed from evidence and the live loop. */
+  readonly roadmap?: import("../../roadmap/service.js").RoadmapService | null;
   /** Operator-entered world seed (manual; never auto-detected). */
   readonly worldSeed?: import("./world-seed.js").WorldSeedStore | null;
   /** Training and evaluation as separate processes; null when the host has no training support. */
@@ -422,6 +433,15 @@ export function createControlCenterSource(source: ControlCenterSource): {
     async resumeTraining() {
       if (!source.training) return { ok: false, message: "Training is not available in this host." };
       return source.training.resume();
+    },
+    async refreshRoadmap() {
+      if (!source.roadmap) return { ok: false, message: "The roadmap is not available in this host." };
+      const snapshot = await source.roadmap.refresh();
+      return { ok: true, message: `Roadmap refreshed: ${snapshot.items.length} open item(s).` };
+    },
+    async roadmapAction(payload) {
+      if (!source.roadmap) return { ok: false, message: "The roadmap is not available in this host." };
+      return source.roadmap.act(payload ?? {});
     },
     async stopTraining() {
       if (!source.training) return { ok: false, message: "Training is not available in this host." };
@@ -903,6 +923,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
           }
         : null,
       training: source.training ? await source.training.snapshot() : null,
+      roadmap: source.roadmap ? roadmapView(source.roadmap, source.metrics?.summary() ?? null) : null,
     };
     return source.decorate ? source.decorate(base) : base;
   }

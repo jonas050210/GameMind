@@ -4,7 +4,20 @@
   served by the same process that owns the agent, and every value on screen comes from GET /api/snapshot.
 */
 
-import { drawWorldView } from "./world-view.js";
+import { drawWorldView, setWorldViewSuspended } from "./world-view.js";
+import {
+  HEADLESS_STORAGE_KEY,
+  ROADMAP_ACTIONS_WITH_NOTE,
+  ROADMAP_ACTION_LABELS,
+  ROADMAP_KIND_LABELS,
+  ROADMAP_STATUS_LABELS,
+  filterRoadmap,
+  groupByCategory,
+  isClosed,
+  parseHeadless,
+  renderingSuspended,
+  roadmapActionsFor,
+} from "./policy.js";
 
 const boot = (() => {
   try {
@@ -15,7 +28,22 @@ const boot = (() => {
 })();
 
 const TOKEN = typeof boot.token === "string" ? boot.token : "";
-const state = { snapshot: null, lastError: null, busy: false, pollTimer: null };
+const state = {
+  snapshot: null,
+  lastError: null,
+  busy: false,
+  pollTimer: null,
+  // Headless training: on by default. It stops the browser drawing the 3D world while training runs.
+  headless: parseHeadless(readStoredHeadless()),
+};
+
+function readStoredHeadless() {
+  try {
+    return localStorage.getItem(HEADLESS_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
 /*
   The page pulls one snapshot per tick; there is no push channel. The interval widens while the agent is
@@ -104,6 +132,7 @@ function render() {
   renderObjective(snapshot);
   renderWorldSeed(snapshot);
   renderTraining(snapshot);
+  renderRoadmap(snapshot);
   renderSkills(snapshot);
   renderActions(snapshot);
   renderBlocker(snapshot);
@@ -884,7 +913,7 @@ function renderWorld(snapshot) {
   } else {
     hostiles.append(node("span", "item empty", (world.entities ?? []).length ? "no hostiles in view" : "no entities observed"));
   }
-  drawMinimap(world, { stale: stale === true, provenance: provenance?.source ?? "world-memory" });
+  drawMinimap(world, { stale: stale === true, provenance: provenance?.source ?? "world-memory" }, snapshot);
 }
 
 /** Renders one session fact as `value · evidence`; an unknown value is spelled out, never guessed. */
@@ -968,6 +997,38 @@ function renderWorldSeed(snapshot) {
   el("seed-note").textContent = seed ? seed.note : "";
 }
 
+/** One bar per saved episode, oldest first. Episodes with no learner reward are gaps, not zeros. */
+function renderRewardTrend(values) {
+  const box = el("training-reward");
+  if (!box) return;
+  box.replaceChildren();
+  const present = values.filter((value) => typeof value === "number");
+  if (values.length === 0) {
+    box.append(node("span", "hint", "Reward trend: no episodes recorded yet."));
+    return;
+  }
+  const scale = Math.max(1e-9, ...present.map((value) => Math.abs(value)));
+  const bars = document.createElement("div");
+  bars.className = "reward-bars";
+  for (const value of values) {
+    const bar = document.createElement("i");
+    if (typeof value === "number") {
+      bar.style.height = `${Math.max(4, Math.round((Math.abs(value) / scale) * 100))}%`;
+      bar.className = value < 0 ? "neg" : "pos";
+      bar.title = `reward ${num(value, 2)}`;
+    } else {
+      bar.className = "gap";
+      bar.title = "no learner reward for this episode";
+    }
+    bars.append(bar);
+  }
+  const mean = present.length ? present.reduce((sum, value) => sum + value, 0) / present.length : null;
+  box.append(
+    bars,
+    node("span", "hint", `Reward, last ${values.length} episodes${mean === null ? "" : ` · mean ${num(mean, 2)}`}`),
+  );
+}
+
 function renderTraining(snapshot) {
   const training = snapshot.training ?? null;
   const metrics = el("training-metrics");
@@ -987,7 +1048,14 @@ function renderTraining(snapshot) {
   const active = status === "running" || status === "paused" || status === "evaluating";
   const stage = training.stage;
   el("training-hint").textContent = training.updatedAt ? `updated ${ago(training.updatedAt)}` : "no run yet";
-  el("training-note").textContent = training.note;
+  const suspended = renderingSuspended(snapshot, state.headless);
+  el("training-note").textContent = `${training.note}${training.stopReason ? ` Last stop: ${training.stopReason}` : ""}`;
+  el("training-mode-note").textContent = state.headless
+    ? "Headless: the offline simulator runs in a separate process. No Minecraft window and no browser 3D rendering while it runs. Live agent observation is not affected."
+    : "Rendering on: the 3D world view is drawn during training. Training still runs on the offline simulator, not in the browser.";
+  const errorBox = el("training-error");
+  errorBox.hidden = !training.lastError;
+  errorBox.textContent = training.lastError ? `Training error: ${training.lastError}` : "";
   metrics.append(
     metric("Status", status, {
       tone: status === "failed" || status === "interrupted" ? "bad" : status === "running" ? "good" : status === "paused" ? "warn" : null,
@@ -1001,7 +1069,18 @@ function renderTraining(snapshot) {
     metric("Recent success", pct(training.recentSuccessRate), { note: "last episodes in the saved state" }),
     metric("Recent reward", num(training.recentMeanReward, 2), { note: "mean per-task reward from the learner" }),
     metric("Checkpoints", String(training.checkpoints.length), { note: training.checkpoints[0]?.id ?? "none yet" }),
+    metric("Active time", training.activeSeconds ? `${num(training.activeSeconds, 1)} s` : "0 s", {
+      note: training.maxMinutes ? `of a ${training.maxMinutes} min budget · pauses excluded` : "episode time · pauses excluded",
+    }),
+    metric("Throughput", training.episodesPerMinute === null ? "—" : `${num(training.episodesPerMinute, 1)} / min`, {
+      note: "episodes per active minute, lifetime",
+    }),
+    metric("3D view", suspended ? "paused" : "drawn", {
+      tone: suspended ? "warn" : null,
+      note: suspended ? "headless training is running" : state.headless ? "headless, idle" : "rendering on",
+    }),
   );
+  renderRewardTrend(training.rewardTrend ?? []);
   const bar = el("training-progress");
   const ratio = stage && stage.successRate !== null ? Math.min(1, Math.max(0, stage.successRate)) : 0;
   bar.style.width = `${Math.round(ratio * 100)}%`;
@@ -1150,8 +1229,207 @@ function vital(label, value, ratio, tone, className) {
  * WebGL geometry sourced only from current observed blocks plus wireframe, last-seen memory markers.
  * Unknown and unloaded terrain is never synthesized.
  */
-function drawMinimap(world, options) {
+function drawMinimap(world, options, snapshot = state.snapshot) {
+  const canvas = el("minimap");
+  const suspended = renderingSuspended(snapshot, state.headless);
+  el("render-notice").hidden = !suspended;
+  setWorldViewSuspended(suspended);
+  if (suspended) {
+    // Headless: no WebGL work at all while training runs. The last frame is kept but marked as not live.
+    if (canvas) {
+      canvas.dataset.live = "0";
+      canvas.dataset.renderer = "suspended";
+    }
+    return;
+  }
   drawWorldView(world, options ?? { stale: true, provenance: "world-memory" });
+}
+
+/* ------------------------------------------------------------------ improvement roadmap */
+
+function roadmapPill(text, tone) {
+  return node("span", `roadmap-pill${tone ? ` ${tone}` : ""}`, text);
+}
+
+function roadmapStatusTone(status) {
+  if (status === "verified") return "good";
+  if (status === "blocked") return "bad";
+  if (status === "in-progress" || status === "planned") return "warn";
+  return null;
+}
+
+let roadmapSignature = null;
+
+function renderRoadmap(snapshot) {
+  const roadmap = snapshot.roadmap ?? null;
+  const itemsBox = el("roadmap-items");
+  const next = el("roadmap-next");
+  if (!roadmap) {
+    itemsBox.replaceChildren();
+    roadmapSignature = null;
+    el("roadmap-hint").textContent = "unavailable";
+    next.replaceChildren(node("span", "hint", "The roadmap is not available in this host."));
+    el("roadmap-note").textContent = "";
+    el("roadmap-sources").replaceChildren();
+    return;
+  }
+  const open = roadmap.items.filter((item) => !isClosed(item)).length;
+  el("roadmap-hint").textContent = roadmap.evidenceAt
+    ? `evidence measured ${ago(roadmap.evidenceAt)} · ${open} open`
+    : "no evidence yet";
+  el("roadmap-note").textContent = roadmap.note;
+
+  if (roadmap.next) {
+    next.replaceChildren(
+      node("span", "roadmap-next-label", "Next recommended task"),
+      node("strong", null, roadmap.next.title),
+      node("span", "hint", roadmap.next.summary),
+    );
+  } else {
+    next.replaceChildren(node("span", "roadmap-next-label", "Next recommended task"), node("span", "hint", "Nothing open to recommend right now."));
+  }
+
+  const sources = el("roadmap-sources");
+  sources.replaceChildren();
+  for (const source of roadmap.sources ?? []) {
+    const chip = node("span", `source-chip ${source.available ? "on" : "off"}`, `${source.available ? "✓" : "–"} ${source.name}${source.measuredAt ? ` · ${ago(source.measuredAt)}` : ""}`);
+    chip.title = source.available ? `read from ${source.path}` : `not available: ${source.path}`;
+    sources.append(chip);
+  }
+
+  const filters = {
+    category: el("roadmap-category").value,
+    kind: el("roadmap-kind").value,
+    showClosed: el("roadmap-show-closed").checked,
+  };
+  // The item list is rebuilt only when something it shows has changed. Rebuilding every poll would close any
+  // open <details> and lose focus on the controls the operator is using.
+  const signature = JSON.stringify({ items: roadmap.items, filters, busy: state.busy, error: roadmap.error });
+  if (signature === roadmapSignature) return;
+  roadmapSignature = signature;
+  itemsBox.replaceChildren();
+  if (roadmap.error) itemsBox.append(node("p", "training-error", roadmap.error));
+  const visible = filterRoadmap(roadmap.items, filters);
+  const hiddenClosed = roadmap.items.length - roadmap.items.filter((item) => !isClosed(item)).length;
+  if (roadmap.items.length === 0) {
+    itemsBox.append(node("p", "empty", "No open items. The recorded evidence does not measure any problem right now. Refresh after a new run, or record the test suite with npm run test:record."));
+  } else if (visible.length === 0) {
+    itemsBox.append(node("p", "empty", "No items match these filters."));
+  }
+  for (const [category, list] of groupByCategory(visible)) {
+    const heading = node("h3", "roadmap-group", `${category.replace("-", " ")} · ${list.length}`);
+    itemsBox.append(heading);
+    for (const item of list) itemsBox.append(roadmapItemView(item));
+  }
+  if (!filters.showClosed && hiddenClosed > 0) {
+    itemsBox.append(node("p", "hint", `${hiddenClosed} dismissed or verified item(s) hidden. Tick “Show dismissed and verified” to see them.`));
+  }
+}
+
+function roadmapItemView(item) {
+  const article = document.createElement("article");
+  article.className = `roadmap-item kind-${item.kind} status-${item.status}`;
+  article.dataset.fingerprint = item.fingerprint;
+
+  const head = node("div", "roadmap-head");
+  head.append(
+    node("strong", null, item.title),
+    roadmapPill(ROADMAP_KIND_LABELS[item.kind] ?? item.kind, item.kind === "defect" ? "bad" : item.kind === "idea" ? null : "warn"),
+    roadmapPill(ROADMAP_STATUS_LABELS[item.status] ?? item.status, roadmapStatusTone(item.status)),
+    roadmapPill(`score ${num(item.score, 2)}`, null),
+  );
+  if (item.pinned) head.append(roadmapPill("pinned", "good"));
+  if (item.reopenedCount > 0) head.append(roadmapPill(`reopened ×${item.reopenedCount}`, "warn"));
+  article.append(head);
+
+  article.append(node("p", "roadmap-explain", item.explanation));
+
+  const facts = node("dl", "roadmap-facts");
+  const pairs = [
+    ["Impact", `${item.impact} / 5`],
+    ["Urgency", `${item.urgency} / 5`],
+    ["Confidence", `${Math.round(item.confidence * 100)}%`],
+    ["Effort", ["", "small", "medium", "large"][item.effort] ?? String(item.effort)],
+    ["Priority", item.priority === null ? "auto" : String(item.priority)],
+  ];
+  for (const [label, value] of pairs) facts.append(node("dt", null, label), node("dd", "mono", value));
+  article.append(facts);
+
+  article.append(node("p", "roadmap-benefit", `Expected benefit: ${item.expectedBenefit}`));
+  if (item.dependencies.length) {
+    article.append(node("p", "hint", `Depends on: ${item.dependencies.join("; ")}`));
+  }
+  if (item.verification) article.append(node("p", "hint", `Verification: ${item.verification}`));
+
+  const evidence = document.createElement("details");
+  evidence.append(node("summary", null, `Evidence (${item.evidence.length})`));
+  const evidenceList = node("ul", "roadmap-evidence");
+  for (const entry of item.evidence) {
+    evidenceList.append(node("li", null, `${entry.metric}: ${entry.value} — ${entry.source}${entry.measuredAt ? `, ${ago(entry.measuredAt)}` : ", a fact about the code, not a measurement"}`));
+  }
+  evidence.append(evidenceList);
+  article.append(evidence);
+
+  const history = document.createElement("details");
+  history.append(node("summary", null, `History (${item.history.length})`));
+  const historyList = node("ul", "roadmap-evidence");
+  for (const entry of [...item.history].reverse()) historyList.append(node("li", null, `${ago(entry.at)} · ${entry.event}`));
+  history.append(historyList);
+  article.append(history);
+
+  const actions = node("div", "roadmap-actions");
+  for (const action of roadmapActionsFor(item)) {
+    const button = node("button", "btn", ROADMAP_ACTION_LABELS[action] ?? action);
+    button.type = "button";
+    button.dataset.roadmapAction = action;
+    button.disabled = state.busy;
+    actions.append(button);
+  }
+  const pinButton = node("button", "btn", item.pinned ? "Unpin" : "Pin to top");
+  pinButton.type = "button";
+  pinButton.dataset.roadmapAction = item.pinned ? "unpin" : "pin";
+  pinButton.disabled = state.busy || isClosed(item);
+  actions.append(pinButton);
+  if (!isClosed(item)) {
+    const priority = document.createElement("select");
+    priority.dataset.roadmapPriority = "1";
+    priority.setAttribute("aria-label", `Priority for ${item.title}`);
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "Priority: auto";
+    priority.append(auto);
+    for (let value = 1; value <= 5; value += 1) {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = `Priority ${value}`;
+      if (item.priority === value) option.selected = true;
+      priority.append(option);
+    }
+    priority.disabled = state.busy;
+    actions.append(priority);
+  }
+  article.append(actions);
+
+  for (const button of actions.querySelectorAll("button[data-roadmap-action]")) {
+    button.addEventListener("click", () => {
+      const action = button.dataset.roadmapAction;
+      const payload = { fingerprint: item.fingerprint, action };
+      if (ROADMAP_ACTIONS_WITH_NOTE.has(action)) {
+        const note = window.prompt(`Optional note for “${item.title}”, saved in its history:`, "");
+        if (note === null) return;
+        if (note.trim()) payload.note = note.trim();
+      }
+      void sendCommand("roadmapAction", payload);
+    });
+  }
+  const priority = actions.querySelector("select[data-roadmap-priority]");
+  if (priority) {
+    priority.addEventListener("change", () => {
+      if (priority.value === "") return;
+      void sendCommand("roadmapAction", { fingerprint: item.fingerprint, action: "prioritize", value: Number(priority.value) });
+    });
+  }
+  return article;
 }
 
 function renderSkills(snapshot) {
@@ -1334,10 +1612,40 @@ function wireControls() {
       toast("startTraining: episodes per stage must be a whole number from 1 to 200.", "bad");
       return;
     }
-    const fresh = el("training-fresh").checked;
-    if (fresh && !window.confirm("Start over deletes the saved training experience and checkpoints. Continue?")) return;
-    void sendCommand("startTraining", { episodesPerStage, fresh });
+    const payload = { episodesPerStage, fresh: el("training-fresh").checked };
+    const budgets = [
+      ["training-max-episodes", "maxEpisodes", "Episode budget", 1, 5000],
+      ["training-minutes", "maxMinutes", "Time budget", 1, 1440],
+    ];
+    for (const [id, key, label, min, max] of budgets) {
+      const raw = el(id).value.trim();
+      if (raw === "") continue;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < min || value > max) {
+        toast(`startTraining: ${label.toLowerCase()} must be a whole number from ${min} to ${max}, or empty.`, "bad");
+        return;
+      }
+      payload[key] = value;
+    }
+    if (payload.fresh && !window.confirm("Start over deletes the saved training experience and checkpoints. Continue?")) return;
+    void sendCommand("startTraining", payload);
   });
+  el("training-headless").checked = state.headless;
+  el("training-headless").addEventListener("change", (event) => {
+    state.headless = event.currentTarget.checked;
+    try {
+      localStorage.setItem(HEADLESS_STORAGE_KEY, state.headless ? "1" : "0");
+    } catch {
+      /* the choice still applies for this page */
+    }
+    if (state.snapshot) render();
+  });
+  el("roadmap-refresh").addEventListener("click", () => void sendCommand("refreshRoadmap"));
+  for (const id of ["roadmap-category", "roadmap-kind", "roadmap-show-closed"]) {
+    el(id).addEventListener("change", () => {
+      if (state.snapshot) renderRoadmap(state.snapshot);
+    });
+  }
   const theme = el("theme-toggle");
   if (theme) {
     theme.addEventListener("click", () => {
