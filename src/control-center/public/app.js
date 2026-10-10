@@ -225,11 +225,11 @@ export function boot(env = {}) {
     let text = info.label;
     if (!snapshot) {
       tone = "neutral";
-      text = lost ? "No contact with GameMind" : "Connecting to GameMind…";
+      text = lost ? "Kein Kontakt zu GameMind" : "Verbindung zu GameMind wird aufgebaut…";
     }
     if (lost) {
       tone = "bad";
-      text = shutdownRequested ? "GameMind has shut down" : "No contact with GameMind";
+      text = shutdownRequested ? "GameMind ist beendet" : "Kein Kontakt zu GameMind";
     }
     setAttr(el("session-pill"), "data-tone", tone);
     setText(el("session-pill-text"), text);
@@ -246,7 +246,7 @@ export function boot(env = {}) {
     if (store.state.snapshotAt === null) setText(updated, "—");
     else {
       const age = Math.max(0, now() - store.state.snapshotAt);
-      setText(updated, lost ? `No contact for ${fmtDuration(age)}` : age < 3000 ? "Updated just now" : `Updated ${fmtDuration(age)} ago`);
+      setText(updated, lost ? `Kein Kontakt seit ${fmtDuration(age)}` : age < 3000 ? "Gerade aktualisiert" : `Vor ${fmtDuration(age)} aktualisiert`);
     }
 
     const active = snapshot?.session ? snapshot.session.state !== "none" && snapshot.session.state !== "shutdown" : false;
@@ -322,10 +322,10 @@ export function boot(env = {}) {
     setText(
       el("connect-hint"),
       unsupported
-        ? "This run has no session manager, so it cannot connect from here."
+        ? "Dieser Lauf hat keine Sitzungsverwaltung, deshalb ist hier kein Verbinden möglich."
         : canConnect
           ? ""
-          : `A session is ${sessionInfo(session).label.toLowerCase()}. Stop it from the Overview before connecting somewhere else.`,
+          : `Eine Sitzung ist ${sessionInfo(session).label.toLowerCase()}. Beende sie in der Übersicht, bevor du dich woanders verbindest.`,
     );
     const catalog = ctx.data.tasks.value;
     if (catalog?.simulatedScenarios) {
@@ -402,7 +402,7 @@ export function boot(env = {}) {
       text = ctx.data.tasks.status === "error" ? `The task list could not be loaded: ${ctx.data.tasks.error}` : "Loading the task list…";
     }
     el("task-submit").disabled = disabled || ctx.lost;
-    setText(el("task-submit"), snapshot?.scheduler?.active && queueChecked ? "Queue task" : "Start task");
+    setText(el("task-submit"), snapshot?.scheduler?.active && queueChecked ? "Aufgabe einreihen" : "Aufgabe starten");
     setText(el("task-hint"), text);
   }
 
@@ -457,7 +457,7 @@ export function boot(env = {}) {
     const folder = trainingFolder();
     let reason = null;
     if (!training) reason = "Training is not available in this run.";
-    else if (ctx.lost) reason = "No contact with GameMind.";
+    else if (ctx.lost) reason = "Kein Kontakt zu GameMind.";
     else if (busy) reason = "A run is already active here, so another cannot start. Stop it first: one run per folder, one run at a time.";
     else if (folder === "") reason = "Enter a name for the new folder.";
     else if (needsConfirm && !el("training-confirm-fresh").checked) reason = "Tick the box above to confirm the fresh start.";

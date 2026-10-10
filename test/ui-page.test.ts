@@ -76,13 +76,13 @@ test("the page shows a loading state until the first snapshot arrives, then the 
     for (const tab of ["overview", "training", "bots", "tasks", "evaluation", "learning", "memory"]) {
       assert.equal(page.byId(`panel-${tab}`).hasAttribute("hidden"), true, `${tab} is not shown before there is data`);
     }
-    assert.equal(page.visibleText("session-pill-text"), "Connecting to GameMind…");
+    assert.equal(page.visibleText("session-pill-text"), "Verbindung zu GameMind wird aufgebaut…");
     assert.equal(page.visibleText("source-badge"), "UNAVAILABLE");
     release();
     await booted.settle();
     assert.equal(page.byId("panel-loading").hasAttribute("hidden"), true);
     assert.equal(page.byId("panel-overview").hasAttribute("hidden"), false);
-    assert.match(page.visibleText("ov-session"), /Session/);
+    assert.match(page.visibleText("ov-session"), /Sitzung/);
   } finally {
     booted.app.stop();
     booted.restore();
@@ -160,25 +160,25 @@ test("only the open tab's detail queries are polled, so an idle page costs the a
 test("losing the server is shown, the last data is kept and labelled out of date, and recovery clears it", async () => {
   const stub = server(idleSession);
   await withPage(stub, async ({ page, settle, clock }) => {
-    assert.equal(page.visibleText("session-pill-text"), "Connected · idle");
+    assert.equal(page.visibleText("session-pill-text"), "Verbunden · untätig");
     assert.equal(page.byId("lost").hasAttribute("hidden"), true);
     stub.failSnapshot = true;
     await clock.advance(30_000);
     await settle();
     await settle();
     assert.equal(page.byId("lost").hasAttribute("hidden"), false);
-    assert.match(page.visibleText("lost"), /Lost contact|No contact|lost/i);
-    assert.equal(page.visibleText("session-pill-text"), "No contact with GameMind");
+    assert.match(page.visibleText("lost"), /Verbindung zu GameMind verloren|Kein Kontakt|verloren/i);
+    assert.equal(page.visibleText("session-pill-text"), "Kein Kontakt zu GameMind");
     assert.equal(page.visibleText("source-badge"), "UNAVAILABLE", "stale data is not presented as live or simulated");
-    assert.match(page.visibleText("updated"), /No contact for/);
-    assert.match(page.visibleText("ov-session"), /Connected · idle/, "the last data stays on the page");
+    assert.match(page.visibleText("updated"), /Kein Kontakt seit/);
+    assert.match(page.visibleText("ov-session"), /Verbunden · untätig/, "the last data stays on the page");
     assert.equal(page.byId("panic-btn").disabled, true, "no emergency stop is offered into the void");
 
     stub.failSnapshot = false;
     await settle();
     assert.equal(page.byId("lost").hasAttribute("hidden"), true);
-    assert.equal(page.visibleText("session-pill-text"), "Connected · idle");
-    assert.match(page.visibleText("updated"), /Updated/);
+    assert.equal(page.visibleText("session-pill-text"), "Verbunden · untätig");
+    assert.match(page.visibleText("updated"), /aktualisiert/);
   });
 });
 
@@ -226,7 +226,7 @@ test("a section that cannot be drawn says so on the page and the rest keeps work
       page.click("tab-bots");
       await settle();
       assert.equal(page.visibleText("render-error"), "", "another tab draws fine");
-      assert.match(page.visibleText("bots-list"), /Simulated bot/);
+      assert.match(page.visibleText("bots-list"), /Simulierter Bot/);
     },
   );
 });
@@ -273,12 +273,12 @@ test("a stale live observation is called out with its consequence, not shown as 
   const stub = server(liveObservation({ sequence: 41, observedAt, ageMs: 5 * 60_000, stale: true, reason: "stale" }));
   await withPage(stub, async ({ page }) => {
     const vitals = page.visibleText("ov-vitals");
-    assert.match(vitals, /The latest observation is stale/);
-    assert.match(vitals, /read 5 min \d\d s ago/, "says how old the observation is");
+    assert.match(vitals, /Die letzte Beobachtung ist veraltet/);
+    assert.match(vitals, /Gelesen vor 5 min \d\d s/, "says how old the observation is");
     assert.match(vitals, /STALE_OBSERVATION/, "names the safety rule that applies");
-    assert.match(vitals, /read-only actions still run/);
-    assert.match(vitals, /Observation #41 · 5 min \d\d s ago · stale/, "the card subtitle agrees");
-    assert.match(vitals, /Health\s*14 \/ 20/, "the last known values stay visible next to the warning");
+    assert.match(vitals, /lesende Aktionen laufen weiter/);
+    assert.match(vitals, /Beobachtung #41 · vor 5 min \d\d s · veraltet/, "the card subtitle agrees");
+    assert.match(vitals, /Gesundheit\s*14 \/ 20/, "the last known values stay visible next to the warning");
   });
 });
 
@@ -289,7 +289,7 @@ test("a fresh live observation carries no stale notice", async () => {
     const vitals = page.visibleText("ov-vitals");
     assert.doesNotMatch(vitals, /stale/i);
     assert.doesNotMatch(vitals, /STALE_OBSERVATION/);
-    assert.match(vitals, /Observation #42 · just now/);
+    assert.match(vitals, /Beobachtung #42 · gerade eben/);
   });
 });
 
@@ -302,9 +302,9 @@ test("when nothing is being observed the page says that, rather than calling an 
   });
   await withPage(stub, async ({ page }) => {
     const vitals = page.visibleText("ov-vitals");
-    assert.match(vitals, /Nothing is being observed/);
-    assert.match(vitals, /No observation yet/);
-    assert.doesNotMatch(vitals, /The latest observation is stale/);
+    assert.match(vitals, /Es wird nichts beobachtet/);
+    assert.match(vitals, /Noch keine Beobachtung/);
+    assert.doesNotMatch(vitals, /Die letzte Beobachtung ist veraltet/);
   });
 });
 
@@ -315,11 +315,11 @@ test("with no session nothing is invented: the world is unknown, not a default",
     snapshot.scheduler = null;
   });
   await withPage(stub, async ({ page }) => {
-    assert.equal(page.visibleText("session-pill-text"), "No session");
+    assert.equal(page.visibleText("session-pill-text"), "Keine Sitzung");
     assert.equal(page.visibleText("source-badge"), "UNAVAILABLE");
     const vitals = page.visibleText("ov-vitals");
-    assert.match(vitals, /Health\s*unknown/);
-    assert.match(vitals, /Food\s*unknown/);
+    assert.match(vitals, /Gesundheit\s*unknown/);
+    assert.match(vitals, /Nahrung\s*unknown/);
     assert.match(vitals, /Position\s*unknown/);
     assert.doesNotMatch(vitals, /Health\s*0|Food\s*0|20 \/ 20/);
     assert.equal(page.byId("panic-btn").disabled, true);
@@ -331,14 +331,14 @@ test("with no session nothing is invented: the world is unknown, not a default",
 test("a destructive button asks first, and declining sends nothing", async () => {
   const stub = server(idleSession);
   await withPage(stub, async ({ page, settle }) => {
-    const stop = page.button("Stop session", "ov-controls");
+    const stop = page.button("Sitzung beenden", "ov-controls");
     page.window.confirmAnswer = false;
     page.click(stop);
     await settle();
     assert.deepEqual(stub.commands(), []);
-    assert.match(page.window.confirmations.at(-1) ?? "", /Stop the session/);
+    assert.match(page.window.confirmations.at(-1) ?? "", /Sitzung beenden/);
     page.window.confirmAnswer = true;
-    page.click(page.button("Stop session", "ov-controls"));
+    page.click(page.button("Sitzung beenden", "ov-controls"));
     await settle();
     assert.deepEqual(stub.commands().map((c) => c.type), ["stopSession"]);
   });
@@ -358,7 +358,7 @@ test("the same command is not sent twice while it is in flight, and its answer b
   const booted = await bootPage({ fetch: slow });
   try {
     const { page } = booted;
-    const pause = page.button("Pause", "ov-controls");
+    const pause = page.button("Pausieren", "ov-controls");
     page.click(pause);
     page.click(pause);
     release();
@@ -380,7 +380,7 @@ test("a refused command is shown as a refusal with the server's reason", async (
   });
   stub.commandResults.stopTask = { status: 409, body: { ok: false, message: "The task already finished." } };
   await withPage(stub, async ({ page, settle }) => {
-    page.click(page.button("Stop task", "ov-controls"));
+    page.click(page.button("Aufgabe stoppen", "ov-controls"));
     await settle();
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.match(page.visibleText("toasts"), /Not done.*The task already finished\./);
@@ -399,7 +399,7 @@ test("quitting the app stops the page from polling a process that is gone and sa
     assert.equal(app.store.isRunning, false, "polling stopped");
     assert.equal(page.byId("lost").hasAttribute("hidden"), false);
     assert.match(page.visibleText("lost"), /python3 main\.py/);
-    assert.equal(page.visibleText("session-pill-text"), "GameMind has shut down");
+    assert.equal(page.visibleText("session-pill-text"), "GameMind ist beendet");
   });
 });
 
@@ -485,7 +485,7 @@ test("the simulator is offered as its own choice, with every scenario, and says 
 test("while a session exists the connect form is disabled and says why", async () => {
   await openBots(server(idleSession), async ({ page }) => {
     assert.equal(page.byId("connect-submit").disabled, true);
-    assert.match(page.visibleText("connect-hint"), /session is connected · idle.*Stop it/i);
+    assert.match(page.visibleText("connect-hint"), /Sitzung ist verbunden · untätig.*Beende/i);
   });
 });
 
@@ -565,7 +565,7 @@ test("while a task runs a second one cannot overlap: it is blocked unless queued
     page.check("task-queue", true);
     await settle();
     assert.equal(page.byId("task-submit").disabled, false);
-    assert.equal(page.visibleText("task-submit"), "Queue task");
+    assert.equal(page.visibleText("task-submit"), "Aufgabe einreihen");
   });
   const stub = server(running);
   await openTasks(stub, async ({ page, settle }) => {
@@ -648,12 +648,12 @@ test("the Tasks tab explains the latest decision: what was chosen, what was reje
   assert.ok(overtaken, "the real record explains the goal it put aside");
   await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = [event]; }), async ({ page }) => {
     const text = page.visibleText("tasks-decision");
-    assert.match(text, /Latest decision/);
+    assert.match(text, /Letzte Entscheidung/);
     assert.ok(text.includes(data.summary), "the model's own summary is shown");
     assert.match(text, /avoid-hazard/);
-    assert.match(text, /Safety \(band 0\)/);
+    assert.match(text, /Sicherheit \(Stufe 0\)/);
     assert.ok(text.includes(data.selected?.rationale ?? "missing"), "the reason it chose this is shown verbatim");
-    assert.match(text, /Rejected candidates \(1\)/);
+    assert.match(text, /Verworfene Kandidaten \(1\)/);
     assert.match(text, /lower band/);
     assert.ok(text.includes(overtaken.detail), "the reason each candidate was dropped is the model's own detail text");
     assert.match(text, /survival · single-source/, "the game mode the decision was made under is shown with its evidence");
@@ -671,17 +671,17 @@ test("a decision that stopped the task shows its blocking code and reason, and a
     const text = page.visibleText("tasks-decision");
     assert.ok(text.includes("TASK_BLOCKED_SHELTER"), "the blocking code is a badge on the card");
     assert.ok(text.includes(data.summary));
-    assert.match(text, /None: the model stopped without choosing/);
+    assert.match(text, /Keines: das Modell hat ohne Wahl angehalten/);
     assert.ok(text.includes(data.rejected[0]?.detail ?? "missing"), "why the only candidate was dropped");
-    assert.match(text, /Safety verdict\s*unknown/, "no verdict was recorded, and the page does not make one up");
-    assert.ok(!/Exploration switch/.test(text), "a row that does not apply is left out rather than shown as unknown");
+    assert.match(text, /Sicherheitsurteil\s*unknown/, "no verdict was recorded, and the page does not make one up");
+    assert.ok(!/Erkundungswechsel/.test(text), "a row that does not apply is left out rather than shown as unknown");
   });
 });
 
 test("with no decision recorded the card says so instead of showing an empty table", async () => {
   await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = []; }), async ({ page }) => {
     const text = page.visibleText("tasks-decision");
-    assert.match(text, /No decision recorded yet/);
+    assert.match(text, /Noch keine Entscheidung aufgezeichnet/);
     assert.ok(!/Alternatives considered|Rejected candidates/.test(text));
   });
 });
@@ -1057,12 +1057,12 @@ test("a Library action with parameters gets an inline form that survives polling
     assert.equal(page.all("form[data-library-id]")[0], form, "the form is the same element after a refresh");
     page.type("lib-navigation.goto-note", "  hello  ");
     page.choose("lib-navigation.goto-mode", "fast");
-    page.click(page.button("Run", "bots-library"));
+    page.click(page.button("Ausführen", "bots-library"));
     await settle();
     assert.deepEqual(stub.commands(), [{ type: "libraryExecute", payload: { id: "navigation.goto", params: { x: 10, z: -4, sprint: true, note: "hello", mode: "fast" } } }]);
 
     page.type("lib-navigation.goto-x", "1.5");
-    page.click(page.button("Run", "bots-library"));
+    page.click(page.button("Ausführen", "bots-library"));
     await settle();
     assert.equal(stub.commands().length, 1, "a non-integer for an integer field is refused on the page");
     assert.match(page.visibleText("toasts"), /X must be a whole number/);

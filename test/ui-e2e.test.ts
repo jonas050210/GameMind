@@ -69,7 +69,7 @@ test("end to end: connect a simulated session from the page, run a task, reload 
     booted = await openPage(fixture, log);
     const { page } = booted;
     assert.equal(sessionOf(fixture), null, "the Control Center is up before any session exists");
-    assert.equal(page.visibleText("session-pill-text"), "No session");
+    assert.equal(page.visibleText("session-pill-text"), "Keine Sitzung");
 
     // Connect through the real form.
     await openTab(booted, "bots");
@@ -77,10 +77,10 @@ test("end to end: connect a simulated session from the page, run a task, reload 
     page.check("connect-autonomy", false);
     page.click("connect-submit");
     await waitUntil(() => sessionOf(fixture)?.state === "idle", "the session became idle");
-    await until(booted, () => page.visibleText("session-pill-text") === "Connected · idle", "the pill shows connected · idle");
+    await until(booted, () => page.visibleText("session-pill-text") === "Verbunden · untätig", "the pill shows connected · idle");
     assert.equal(page.visibleText("source-badge"), "SIMULATED");
     assert.match(page.visibleText("banner"), /simulated/i);
-    assert.match(page.visibleText("bots-list"), /Simulated bot.*Connected · idle/);
+    assert.match(page.visibleText("bots-list"), /Simulierter Bot.*Verbunden · untätig/);
     const firstSessionId = sessionOf(fixture)?.view().id;
     assert.ok(firstSessionId);
 
@@ -94,7 +94,7 @@ test("end to end: connect a simulated session from the page, run a task, reload 
     assert.match(page.visibleText("tasks-history"), /Gather 1 oak_log.*PASS/);
     await openTab(booted, "bots");
     assert.match(page.visibleText("bots-history"), /PASS/);
-    assert.match(page.visibleText("bots-list"), /Last task\s*PASS/);
+    assert.match(page.visibleText("bots-list"), /Letzte Aufgabe\s*PASS/);
     assert.equal(sessionOf(fixture)?.state, "idle", "the task finished and the session stayed connected");
 
     // Reloading the page (a second page on the same server) restarts nothing and opens no browser.
@@ -103,7 +103,7 @@ test("end to end: connect a simulated session from the page, run a task, reload 
     const reloadLog: Logged[] = [];
     const reloaded = await openPage(fixture, reloadLog);
     try {
-      await until(reloaded, () => reloaded.page.visibleText("session-pill-text") === "Connected · idle", "the reloaded page shows the same session");
+      await until(reloaded, () => reloaded.page.visibleText("session-pill-text") === "Verbunden · untätig", "the reloaded page shows the same session");
       assert.deepEqual(reloadLog.filter((entry) => entry.method !== "GET"), [], "reloading sends no command");
       assert.equal(sessionOf(fixture)?.view().id, firstSessionId, "the session is the one that was already running");
       assert.equal(fixture.spawned.length, opened, "reloading never opens another browser tab");
@@ -116,9 +116,9 @@ test("end to end: connect a simulated session from the page, run a task, reload 
     // Stop it from the Overview: confirmed, the session ends and the Control Center stays up.
     await openTab(booted, "overview");
     page.window.confirmAnswer = true;
-    page.click(page.button("Stop session", "ov-controls"));
+    page.click(page.button("Sitzung beenden", "ov-controls"));
     await waitUntil(() => sessionOf(fixture)?.state === "shutdown", "the session shut down");
-    await until(booted, () => page.visibleText("session-pill-text") === "Disconnected", "the pill shows disconnected");
+    await until(booted, () => page.visibleText("session-pill-text") === "Getrennt", "the pill shows disconnected");
     assert.equal((await fixture.get<{ ok: boolean }>("api/health")).ok, true, "the Control Center is still serving");
     assert.equal(page.byId("panic-btn").disabled, true);
     await openTab(booted, "bots");
@@ -129,7 +129,7 @@ test("end to end: connect a simulated session from the page, run a task, reload 
     page.check("connect-autonomy", false);
     page.click("connect-submit");
     await waitUntil(() => sessionOf(fixture)?.state === "idle" && sessionOf(fixture)?.view().id !== firstSessionId, "a second session became idle");
-    await until(booted, () => page.visibleText("session-pill-text") === "Connected · idle", "connected again");
+    await until(booted, () => page.visibleText("session-pill-text") === "Verbunden · untätig", "connected again");
 
     assert.deepEqual(page.window.console.errors, [], "the page reported no errors");
     const refusals = log.filter((entry) => entry.method === "POST" && entry.status >= 400);

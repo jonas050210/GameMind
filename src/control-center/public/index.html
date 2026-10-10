@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="auto">
+<html lang="de" data-theme="auto">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -9,7 +9,7 @@
   </head>
   <body>
     <script id="boot-data" type="application/json">{"token":"__CONTROL_TOKEN__","banner":"__BANNER__","title":"__TITLE__"}</script>
-    <a class="skip-link" href="#main">Skip to the content</a>
+    <a class="skip-link" href="#main">Zum Inhalt springen</a>
 
     <header class="topbar">
       <div class="topbar-inner">
@@ -17,43 +17,43 @@
           <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
           <div>
             <h1 id="title">GameMind</h1>
-            <p id="subtitle" class="muted small">Control Center</p>
+            <p id="subtitle" class="muted small">Steuerzentrale</p>
           </div>
         </div>
 
-        <nav id="tabs" class="tabs" role="tablist" aria-label="Sections">
-          <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">Overview</button>
+        <nav id="tabs" class="tabs" role="tablist" aria-label="Bereiche">
+          <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">Übersicht</button>
           <button type="button" role="tab" id="tab-training" data-tab="training" aria-controls="panel-training">Training</button>
           <button type="button" role="tab" id="tab-bots" data-tab="bots" aria-controls="panel-bots">Bots</button>
-          <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="panel-tasks">Tasks</button>
-          <button type="button" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Tests &amp; Evaluation</button>
-          <button type="button" role="tab" id="tab-learning" data-tab="learning" aria-controls="panel-learning">Learning &amp; Policy</button>
-          <button type="button" role="tab" id="tab-memory" data-tab="memory" aria-controls="panel-memory">World Memory &amp; Events</button>
+          <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="panel-tasks">Aufgaben</button>
+          <button type="button" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Tests &amp; Auswertung</button>
+          <button type="button" role="tab" id="tab-learning" data-tab="learning" aria-controls="panel-learning">Lernen &amp; Richtlinie</button>
+          <button type="button" role="tab" id="tab-memory" data-tab="memory" aria-controls="panel-memory">Weltgedächtnis &amp; Ereignisse</button>
         </nav>
 
         <div class="status-cluster" aria-label="Status">
-          <div class="status-pill" id="session-pill" data-tone="neutral" title="Session state">
+          <div class="status-pill" id="session-pill" data-tone="neutral" title="Sitzungsstatus">
             <span class="dot" aria-hidden="true"></span>
-            <span id="session-pill-text">Connecting to GameMind…</span>
+            <span id="session-pill-text">Verbindung zu GameMind wird aufgebaut…</span>
           </div>
-          <span id="source-badge" class="badge source source-unavailable" title="Where the numbers on this page come from">UNAVAILABLE</span>
-          <span id="updated" class="muted small" title="When this page last heard from GameMind">—</span>
-          <button type="button" class="btn danger compact" id="panic-btn" data-command="panic" title="Emergency stop: trips safety, stops the task and disarms combat at once">Emergency stop</button>
-          <button type="button" class="btn ghost compact" id="theme-toggle" data-action="toggle-theme" aria-label="Switch between light and dark" title="Switch between light and dark">◐</button>
+          <span id="source-badge" class="badge source source-unavailable" title="Woher die Zahlen auf dieser Seite stammen">UNAVAILABLE</span>
+          <span id="updated" class="muted small" title="Wann diese Seite zuletzt von GameMind gehört hat">—</span>
+          <button type="button" class="btn danger compact" id="panic-btn" data-command="panic" title="Not-Halt: löst die Sicherheitsbremse aus, stoppt die Aufgabe und schaltet den Kampf sofort ab">Not-Halt</button>
+          <button type="button" class="btn ghost compact" id="theme-toggle" data-action="toggle-theme" aria-label="Hell und dunkel umschalten" title="Hell und dunkel umschalten">◐</button>
         </div>
       </div>
     </header>
 
     <div id="banner" class="banner" hidden></div>
     <div id="lost" class="banner lost" role="alert" hidden>
-      <strong>Lost contact with GameMind.</strong>
-      <span id="lost-detail">The process may have been stopped. This page keeps retrying and shows the last data it received as out of date.</span>
+      <strong>Verbindung zu GameMind verloren.</strong>
+      <span id="lost-detail">Der Prozess wurde vielleicht beendet. Diese Seite versucht es weiter und zeigt die letzten Daten als veraltet an.</span>
     </div>
 
     <main id="main" class="content" tabindex="-1">
       <section id="panel-loading" class="panel" aria-busy="true">
         <div class="skeleton tall"></div>
-        <p id="loading-text" class="muted" role="status">Contacting GameMind…</p>
+        <p id="loading-text" class="muted" role="status">GameMind wird kontaktiert…</p>
       </section>
 
       <!-- A. OVERVIEW -->
@@ -142,13 +142,13 @@
         <div id="bots-testserver"></div>
         <div class="grid two">
           <section class="card" aria-labelledby="connect-title">
-            <header class="card-head"><div><h3 id="connect-title">Connect a bot</h3><p class="muted small">One bot per process today. The list above is built per bot, so more can be added later.</p></div></header>
+            <header class="card-head"><div><h3 id="connect-title">Bot verbinden</h3><p class="muted small">Heute ein Bot pro Prozess. Die Liste oben ist pro Bot aufgebaut, weitere lassen sich später ergänzen.</p></div></header>
             <div class="card-body">
               <form id="connect-form" class="form" autocomplete="off" novalidate>
-                <label for="connect-source">Where to connect</label>
+                <label for="connect-source">Wohin verbinden</label>
                 <select id="connect-source" name="source">
-                  <option value="live">A Minecraft Java server (live)</option>
-                  <option value="simulated">The offline simulator (simulated, no server)</option>
+                  <option value="live">Ein Minecraft-Java-Server (live)</option>
+                  <option value="simulated">Der Offline-Simulator (simuliert, ohne Server)</option>
                 </select>
                 <div id="connect-live-fields">
                   <div class="field-row">
@@ -156,25 +156,25 @@
                     <div><label for="connect-port">Port</label><input id="connect-port" name="port" type="number" min="1" max="65535" placeholder="25565" /></div>
                   </div>
                   <div class="field-row">
-                    <div><label for="connect-username">Bot name</label><input id="connect-username" name="username" type="text" placeholder="GameMind" maxlength="16" /></div>
+                    <div><label for="connect-username">Bot-Name</label><input id="connect-username" name="username" type="text" placeholder="GameMind" maxlength="16" /></div>
                     <div><label for="connect-version">Version</label><input id="connect-version" name="version" type="text" placeholder="1.20.4" maxlength="12" /></div>
-                    <div><label for="connect-auth">Sign-in</label><select id="connect-auth" name="auth"><option value="">default (offline)</option><option value="offline">offline</option><option value="microsoft">microsoft</option></select></div>
+                    <div><label for="connect-auth">Anmeldung</label><select id="connect-auth" name="auth"><option value="">Standard (offline)</option><option value="offline">offline</option><option value="microsoft">microsoft</option></select></div>
                   </div>
-                  <div class="button-row"><button type="button" class="btn compact" id="connect-check" data-action="check-port">Check the port first</button></div>
+                  <div class="button-row"><button type="button" class="btn compact" id="connect-check" data-action="check-port">Port zuerst prüfen</button></div>
                   <p id="connect-probe" class="hint" aria-live="polite"></p>
-                  <p class="hint">Blank fields use the environment or the defaults (127.0.0.1:25565, Minecraft 1.20.4). A world opened to LAN gets a new port each time; use the one printed in the game chat. Credentials are never entered or stored here.</p>
-                  <p id="connect-wsl-hint" class="hint" hidden><span id="connect-wsl-text"></span> <button type="button" class="btn compact" id="connect-use-windows" data-action="use-windows-host">Use it</button></p>
+                  <p class="hint">Leere Felder nehmen die Umgebung oder die Standardwerte (127.0.0.1:25565, Minecraft 1.20.4). Eine per LAN geöffnete Welt bekommt jedes Mal einen neuen Port; nimm den, der im Spiel-Chat steht. Zugangsdaten werden hier nie eingegeben oder gespeichert.</p>
+                  <p id="connect-wsl-hint" class="hint" hidden><span id="connect-wsl-text"></span> <button type="button" class="btn compact" id="connect-use-windows" data-action="use-windows-host">Übernehmen</button></p>
                 </div>
                 <div id="connect-sim-fields" hidden>
-                  <label for="connect-scenario">Scenario</label>
+                  <label for="connect-scenario">Szenario</label>
                   <select id="connect-scenario" name="scenarioId"></select>
-                  <p class="hint">Everything from a simulated session is labelled SIMULATED and recorded in its own store.</p>
+                  <p class="hint">Alles aus einer simulierten Sitzung ist als SIMULIERT gekennzeichnet und wird in einem eigenen Speicher abgelegt.</p>
                 </div>
                 <div class="field-row">
-                  <div><label for="connect-mode">After a task finishes</label><select id="connect-mode" name="mode"><option value="persistent">stay connected until I stop it</option><option value="one-shot">disconnect when the task finishes</option></select></div>
+                  <div><label for="connect-mode">Nach Ende einer Aufgabe</label><select id="connect-mode" name="mode"><option value="persistent">verbunden bleiben, bis ich es beende</option><option value="one-shot">trennen, wenn die Aufgabe endet</option></select></div>
                 </div>
-                <label class="choice"><input type="checkbox" id="connect-autonomy" name="autonomy" checked /> <span>Let the agent start its own survival and progress tasks while idle (safety limits are the same either way)</span></label>
-                <div class="button-row"><button type="submit" class="btn primary" id="connect-submit">Connect</button></div>
+                <label class="choice"><input type="checkbox" id="connect-autonomy" name="autonomy" checked /> <span>Der Agent darf im Leerlauf eigene Überlebens- und Fortschrittsaufgaben starten (die Sicherheitsgrenzen gelten in beiden Fällen gleich)</span></label>
+                <div class="button-row"><button type="submit" class="btn primary" id="connect-submit">Verbinden</button></div>
                 <p id="connect-hint" class="hint" aria-live="polite"></p>
               </form>
             </div>
@@ -196,21 +196,21 @@
         <div class="grid two">
           <div id="tasks-active"></div>
           <section class="card" aria-labelledby="task-title">
-            <header class="card-head"><div><h3 id="task-title">Start a task</h3><p class="muted small">Only tasks the agent implements and validates are offered. The limits are enforced by the same schema the command line uses.</p></div></header>
+            <header class="card-head"><div><h3 id="task-title">Aufgabe starten</h3><p class="muted small">Angeboten werden nur Aufgaben, die der Agent umsetzt und prüft. Die Grenzen prüft dasselbe Schema wie die Kommandozeile.</p></div></header>
             <div class="card-body">
               <form id="task-form" class="form" autocomplete="off" novalidate>
-                <label for="task-kind">Task</label>
+                <label for="task-kind">Aufgabe</label>
                 <select id="task-kind" name="kind"></select>
                 <p id="task-description" class="hint"></p>
                 <div class="field-row">
-                  <div id="task-resource-row"><label for="task-resource" id="task-resource-label">Target</label><select id="task-resource" name="resource"></select></div>
-                  <div id="task-count-row"><label for="task-count" id="task-count-label">Amount</label><input id="task-count" name="count" type="number" min="1" max="64" step="1" /></div>
+                  <div id="task-resource-row"><label for="task-resource" id="task-resource-label">Ziel</label><select id="task-resource" name="resource"></select></div>
+                  <div id="task-count-row"><label for="task-count" id="task-count-label">Menge</label><input id="task-count" name="count" type="number" min="1" max="64" step="1" /></div>
                 </div>
                 <div id="task-needs" class="hint"></div>
-                <label class="choice"><input type="checkbox" id="task-queue" name="queue" /> <span>Queue it to run after the current task if the agent is busy</span></label>
+                <label class="choice"><input type="checkbox" id="task-queue" name="queue" /> <span>In die Warteschlange stellen, falls der Agent gerade beschäftigt ist</span></label>
                 <p id="task-hint" class="hint" aria-live="polite"></p>
                 <div id="task-limits" class="limits"></div>
-                <div class="button-row"><button type="submit" class="btn primary" id="task-submit">Start task</button></div>
+                <div class="button-row"><button type="submit" class="btn primary" id="task-submit">Aufgabe starten</button></div>
               </form>
             </div>
           </section>
@@ -327,8 +327,8 @@
     </main>
 
     <footer class="footer">
-      <span class="muted small" id="footer-note">GameMind · local Control Center. Reloading this page restarts nothing.</span>
-      <button type="button" class="btn ghost compact" id="footer-quit" data-command="shutdownApp" data-confirm="Quit GameMind? The bot disconnects and this page stops responding.">Quit GameMind</button>
+      <span class="muted small" id="footer-note">GameMind · lokale Steuerzentrale. Ein Neuladen dieser Seite startet nichts neu.</span>
+      <button type="button" class="btn ghost compact" id="footer-quit" data-command="shutdownApp" data-confirm="GameMind beenden? Der Bot trennt die Verbindung und diese Seite reagiert danach nicht mehr.">GameMind beenden</button>
     </footer>
 
     <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>

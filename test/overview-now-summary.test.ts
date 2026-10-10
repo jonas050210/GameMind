@@ -7,10 +7,10 @@ const { nowSummary } = (await import(
 )) as { nowSummary: (state: Record<string, unknown>) => string };
 
 test("not connected, connecting and idle each say what the operator should do", () => {
-  assert.match(nowSummary({ session: { state: "none" } }), /Not connected.*connect/);
-  assert.match(nowSummary({ session: { state: "connecting" } }), /Connecting/);
-  assert.match(nowSummary({ session: { state: "idle" }, autonomyEnabled: false }), /Start a task, or turn autonomy on/);
-  assert.match(nowSummary({ session: { state: "idle" }, autonomyEnabled: true }), /Autonomy is on/);
+  assert.match(nowSummary({ session: { state: "none" } }), /Nicht verbunden.*verbinde/);
+  assert.match(nowSummary({ session: { state: "connecting" } }), /Verbindung zum Server/);
+  assert.match(nowSummary({ session: { state: "idle" }, autonomyEnabled: false }), /Starte eine Aufgabe oder schalte die Autonomie ein/);
+  assert.match(nowSummary({ session: { state: "idle" }, autonomyEnabled: true }), /Die Autonomie ist an/);
 });
 
 test("a running task names the task and the reason the planner gave", () => {
@@ -19,15 +19,15 @@ test("a running task names the task and the reason the planner gave", () => {
     scheduler: { active: { label: "Gather 2 oak_log" } },
     goal: { rationale: "Health is 20/20; moving toward the nearest log." },
   });
-  assert.equal(text, "Working on: Gather 2 oak_log. Health is 20/20; moving toward the nearest log.");
+  assert.equal(text, "Arbeitet an: Gather 2 oak_log. Health is 20/20; moving toward the nearest log.");
 });
 
 test("a safety trip or pause overrides the session state, because it decides what runs", () => {
-  assert.match(nowSummary({ session: { state: "running" }, safety: { tripped: true, paused: true } }), /Safety stop raised/);
-  assert.match(nowSummary({ session: { state: "idle" }, safety: { paused: true, pauseReason: "operator pause" } }), /Paused: operator pause/);
+  assert.match(nowSummary({ session: { state: "running" }, safety: { tripped: true, paused: true } }), /Sicherheitsbremse ausgelöst/);
+  assert.match(nowSummary({ session: { state: "idle" }, safety: { paused: true, pauseReason: "operator pause" } }), /Pausiert: operator pause/);
 });
 
 test("missing data never produces an invented state", () => {
-  assert.equal(nowSummary({}), "Not connected. Enter a host and port on the Bots tab and connect.");
-  assert.equal(nowSummary({ session: { state: "weird" } }), "Session state: weird.");
+  assert.equal(nowSummary({}), "Nicht verbunden. Trage im Bots-Tab Host und Port ein und verbinde dich.");
+  assert.equal(nowSummary({ session: { state: "weird" } }), "Sitzungsstatus: weird.");
 });

@@ -708,7 +708,7 @@ test("the Control Center shows the new panels and no longer offers an action cap
     const bundle = await loadPageBundle(base);
     const html = bundle.html;
     const script = bundle.all;
-    for (const heading of ["Objective & subgoal", "World seed", "Training", "Observation rate", "Observation age", "Reaction p95"]) {
+    for (const heading of ["Ziel & Teilziel", "World seed", "Training", "Beobachtungsrate", "Alter der Beobachtung", "Reaktion p95"]) {
       assert.ok(script.includes(heading) || script.includes(heading.replace("&", "&amp;")), `the UI shows ${heading}`);
     }
     assert.ok(!script.includes("budget-input") && !script.includes("budget-form"), "the action-cap input is gone");

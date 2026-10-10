@@ -10,7 +10,7 @@ export function botsFrom(snapshot) {
   return [
     {
       id: session.id ?? "session",
-      name: session.target?.username ?? (session.source === "simulated" ? "Simulated bot" : "Bot"),
+      name: session.target?.username ?? (session.source === "simulated" ? "Simulierter Bot" : "Bot"),
       session,
       snapshot,
     },
@@ -31,30 +31,30 @@ function botCard(bot, now) {
     h(
       "header",
       { class: "bot-head" },
-      h("div", null, h("h3", null, bot.name), h("p", { class: "muted small" }, session.target ? `${session.target.host}:${session.target.port} · Minecraft ${session.target.version}` : "Built-in offline simulator")),
+      h("div", null, h("h3", null, bot.name), h("p", { class: "muted small" }, session.target ? `${session.target.host}:${session.target.port} · Minecraft ${session.target.version}` : "Eingebauter Offline-Simulator")),
       h("div", { class: "bot-badges" }, badge(state.label, state.tone), sourceBadge(session.source ?? "unavailable")),
     ),
     kv([
-      ["Connection", snapshot.connection?.adapterStatus ?? null],
-      ["World", session.worldKey ?? null],
-      ["Task", task ? task.label : active ? "none (idle)" : null],
-      ["Health", typeof world.health === "number" ? `${fmtNumber(world.health, 1)} / 20` : null],
-      ["Food", typeof world.food === "number" ? `${fmtNumber(world.food)} / 20` : null],
-      ["Runtime", session.runtimeMs !== null && session.runtimeMs !== undefined ? fmtDuration(session.runtimeMs) : null],
-      ["Mode", session.mode ?? null],
-      ["Autonomy", session.autonomy === null || session.autonomy === undefined ? null : session.autonomy ? "on" : "off"],
-      ["Last task", lastTask ? h("span", null, statusBadge(lastTask.status ?? lastTask.state), " ", lastTask.label) : null],
+      ["Verbindung", snapshot.connection?.adapterStatus ?? null],
+      ["Welt", session.worldKey ?? null],
+      ["Aufgabe", task ? task.label : active ? "keine (untätig)" : null],
+      ["Gesundheit", typeof world.health === "number" ? `${fmtNumber(world.health, 1)} / 20` : null],
+      ["Nahrung", typeof world.food === "number" ? `${fmtNumber(world.food)} / 20` : null],
+      ["Laufzeit", session.runtimeMs !== null && session.runtimeMs !== undefined ? fmtDuration(session.runtimeMs) : null],
+      ["Modus", session.mode ?? null],
+      ["Autonomie", session.autonomy === null || session.autonomy === undefined ? null : session.autonomy ? "an" : "aus"],
+      ["Letzte Aufgabe", lastTask ? h("span", null, statusBadge(lastTask.status ?? lastTask.state), " ", lastTask.label) : null],
     ]),
-    source === "historical" ? h("p", { class: "muted small" }, "These values are from the last observation before the session ended.") : null,
+    source === "historical" ? h("p", { class: "muted small" }, "Diese Werte stammen von der letzten Beobachtung, bevor die Sitzung endete.") : null,
     // Exact coordinates are for debugging, not for watching the agent: they stay one click away.
-    world.position ? h("details", { class: "small" }, h("summary", null, "Exact position"), kv([["Position", `${world.position.x}, ${world.position.y}, ${world.position.z}`]])) : null,
+    world.position ? h("details", { class: "small" }, h("summary", null, "Genaue Position"), kv([["Position", `${world.position.x}, ${world.position.y}, ${world.position.z}`]])) : null,
     h(
       "footer",
       { class: "button-row" },
-      active ? button("Stop session", { command: "stopSession", payload: "stopped from the Bots tab", tone: "warn", data: { confirm: "Stop this session and disconnect the bot?" } }) : null,
-      active ? button(session.autonomy ? "Turn autonomy off" : "Turn autonomy on", { command: "setAutonomy", payload: { enabled: !session.autonomy }, title: "Autonomy starts survival and progress subgoals when the bot is idle. Safety limits are the same either way." }) : null,
-      button("Start a task…", { action: "goto-tab", data: { tab: "tasks" }, tone: "primary", disabled: !active }),
-      button("Stop task", { command: "stopTask", payload: "stopped from the Bots tab", disabled: !task }),
+      active ? button("Sitzung beenden", { command: "stopSession", payload: "von der Bots-Seite beendet", tone: "warn", data: { confirm: "Diese Sitzung beenden und den Bot trennen?" } }) : null,
+      active ? button(session.autonomy ? "Autonomie aus" : "Autonomie an", { command: "setAutonomy", payload: { enabled: !session.autonomy }, title: "Die Autonomie startet im Leerlauf Überlebens- und Fortschrittsziele. Die Sicherheitsgrenzen gelten in beiden Fällen gleich." }) : null,
+      button("Aufgabe starten …", { action: "goto-tab", data: { tab: "tasks" }, tone: "primary", disabled: !active }),
+      button("Aufgabe stoppen", { command: "stopTask", payload: "von der Bots-Seite gestoppt", disabled: !task }),
     ),
   );
 }
@@ -65,11 +65,11 @@ function diagnostics(snapshot, now) {
   const parts = [];
   if (session?.error) {
     parts.push(
-      notice("bad", session.error.summary, h("p", { class: "small" }, "Things to check:"), h("ul", null, session.error.hints.map((hint) => h("li", null, hint))), h("p", { class: "small muted" }, `Error reported by the game connection: ${session.error.detail || "none"}`), h("p", { class: "small muted" }, session.error.retryable ? "Trying again can help once the cause is fixed." : "Retrying will not help until the cause is fixed.")),
+      notice("bad", session.error.summary, h("p", { class: "small" }, "Das solltest du prüfen:"), h("ul", null, session.error.hints.map((hint) => h("li", null, hint))), h("p", { class: "small muted" }, `Error reported by the game connection: ${session.error.detail || "none"}`), h("p", { class: "small muted" }, session.error.retryable ? "Trying again can help once the cause is fixed." : "Retrying will not help until the cause is fixed.")),
     );
   }
   if (session?.reconnect) {
-    parts.push(notice("warn", `Reconnecting: attempt ${session.reconnect.attempt} of ${session.reconnect.maxAttempts}`, session.reconnect.lastError ? `Last problem: ${session.reconnect.lastError}` : null));
+    parts.push(notice("warn", `Wiederverbindung: Versuch ${session.reconnect.attempt} von ${session.reconnect.maxAttempts}`, session.reconnect.lastError ? `Letztes Problem: ${session.reconnect.lastError}` : null));
   }
   if (platform?.wsl) {
     parts.push(
@@ -77,57 +77,57 @@ function diagnostics(snapshot, now) {
     );
   }
   if (!parts.length) {
-    parts.push(h("p", { class: "muted" }, session?.state === "idle" || session?.state === "running" ? "No connection problems." : "Connection diagnostics appear here when a connection fails or drops."));
+    parts.push(h("p", { class: "muted" }, session?.state === "idle" || session?.state === "running" ? "Keine Verbindungsprobleme." : "Verbindungsdiagnosen erscheinen hier, wenn eine Verbindung fehlschlägt oder abbricht."));
   }
   const history = (session?.history ?? []).slice(-8).reverse();
   return card(
-    { title: "Connection diagnostics", subtitle: "Why a connection failed, and what to check" },
+    { title: "Verbindungsdiagnose", subtitle: "Warum eine Verbindung fehlschlug und was du prüfen kannst" },
     ...parts,
-    history.length ? h("details", null, h("summary", null, "Session timeline"), h("ol", { class: "timeline" }, history.map((entry) => h("li", null, h("time", { datetime: entry.at }, fmtTime(entry.at)), " ", badge(entry.state, "neutral"), entry.reason ? ` ${entry.reason}` : "")))) : null,
+    history.length ? h("details", null, h("summary", null, "Zeitleiste der Sitzung"), h("ol", { class: "timeline" }, history.map((entry) => h("li", null, h("time", { datetime: entry.at }, fmtTime(entry.at)), " ", badge(entry.state, "neutral"), entry.reason ? ` ${entry.reason}` : "")))) : null,
   );
 }
 
 function safety(snapshot) {
   const safetyState = snapshot.safety;
-  if (!safetyState) return card({ title: "Safety and run control" }, empty("No Safety Broker attached", "Without a session there is nothing to pause or trip."));
+  if (!safetyState) return card({ title: "Sicherheit und Laufsteuerung" }, empty("Keine Sicherheitsbremse angeschlossen", "Ohne Sitzung gibt es nichts zu pausieren oder auszulösen."));
   return card(
-    { title: "Safety and run control", subtitle: "The Safety Broker gates every world-changing action" },
+    { title: "Sicherheit und Laufsteuerung", subtitle: "Die Sicherheitsbremse prüft jede Aktion, die die Welt verändert" },
     kv([
-      ["Policy", safetyState.policyId],
-      ["State", safetyState.tripped ? badge("TRIPPED", "bad") : safetyState.paused ? badge("PAUSED", "warn") : badge("ARMED", "good")],
-      ["Approved / denied actions", `${fmtNumber(safetyState.actionsApproved)} / ${fmtNumber(safetyState.actionsDenied)}`],
-      ["Combat", snapshot.combatAllowed === null || snapshot.combatAllowed === undefined ? null : snapshot.combatAllowed ? badge("armed", "warn") : badge("off (default)", "good")],
+      ["Richtlinie", safetyState.policyId],
+      ["State", safetyState.tripped ? badge("AUSGELÖST", "bad") : safetyState.paused ? badge("PAUSIERT", "warn") : badge("BEREIT", "good")],
+      ["Erlaubt / abgelehnt", `${fmtNumber(safetyState.actionsApproved)} / ${fmtNumber(safetyState.actionsDenied)}`],
+      ["Kampf", snapshot.combatAllowed === null || snapshot.combatAllowed === undefined ? null : snapshot.combatAllowed ? badge("erlaubt", "warn") : badge("aus (Standard)", "good")],
     ]),
     h(
       "div",
       { class: "button-row" },
-      safetyState.paused ? button("Resume", { command: "resume", tone: "primary" }) : button("Pause", { command: "pause", payload: "paused from the Bots tab" }),
-      button("Trip", { command: "trip", payload: "manual trip from the Bots tab", tone: "danger", data: { confirm: "Raise a safety trip? Only read-only actions run until you reset it." } }),
-      button("Reset trip", { command: "resetTrip", disabled: !safetyState.tripped }),
+      safetyState.paused ? button("Fortsetzen", { command: "resume", tone: "primary" }) : button("Pausieren", { command: "pause", payload: "von der Bots-Seite pausiert" }),
+      button("Bremse auslösen", { command: "trip", payload: "manuell von der Bots-Seite ausgelöst", tone: "danger", data: { confirm: "Sicherheitsbremse auslösen? Bis du sie zurücksetzt, laufen nur lesende Aktionen." } }),
+      button("Bremse zurücksetzen", { command: "resetTrip", disabled: !safetyState.tripped }),
       snapshot.combatAllowed === null || snapshot.combatAllowed === undefined
         ? null
-        : button(snapshot.combatAllowed ? "Fighting allowed: turn off" : "Fighting off: allow", { command: "enableCombat", payload: { enabled: !snapshot.combatAllowed }, tone: snapshot.combatAllowed ? "" : "warn", data: snapshot.combatAllowed ? {} : { confirm: "Allow the bot to fight back against hostile mobs that threaten it? It attacks only with a weapon, enough health, and one enemy at a time, and it withdraws when health gets low." } }),
+        : button(snapshot.combatAllowed ? "Kampf erlaubt: ausschalten" : "Kampf aus: erlauben", { command: "enableCombat", payload: { enabled: !snapshot.combatAllowed }, tone: snapshot.combatAllowed ? "" : "warn", data: snapshot.combatAllowed ? {} : { confirm: "Allow the bot to fight back against hostile mobs that threaten it? It attacks only with a weapon, enough health, and one enemy at a time, and it withdraws when health gets low." } }),
     ),
     (safetyState.recentVerdicts ?? []).length
-      ? h("details", null, h("summary", null, "Recent safety verdicts"), table({ dense: true, columns: [{ label: "Time", cell: (v) => fmtTime(v.evaluatedAt) }, { label: "Capability", cell: (v) => v.capability }, { label: "Verdict", cell: (v) => (v.allowed ? badge("allowed", "good") : badge("denied", "warn")) }, { label: "Why", cell: (v) => v.message }], rows: safetyState.recentVerdicts.map((v, index) => ({ key: index, value: v })) }))
+      ? h("details", null, h("summary", null, "Letzte Sicherheitsurteile"), table({ dense: true, columns: [{ label: "Time", cell: (v) => fmtTime(v.evaluatedAt) }, { label: "Capability", cell: (v) => v.capability }, { label: "Verdict", cell: (v) => (v.allowed ? badge("allowed", "good") : badge("denied", "warn")) }, { label: "Why", cell: (v) => v.message }], rows: safetyState.recentVerdicts.map((v, index) => ({ key: index, value: v })) }))
       : null,
   );
 }
 
 function loop(snapshot) {
   const loopState = snapshot.agentLoop;
-  if (!loopState) return card({ title: "Agent loop" }, empty("Not measured", "The observation loop is measured while a session runs."));
+  if (!loopState) return card({ title: "Agentenschleife" }, empty("Nicht gemessen", "Die Beobachtungsschleife wird während einer laufenden Sitzung gemessen."));
   const sample = (summary) => (summary && summary.p95Ms !== null ? `${fmtNumber(summary.p95Ms, 0)} ms` : null);
   return card(
-    { title: "Agent loop", subtitle: "Measured timing of the fast observation loop" },
+    { title: "Agentenschleife", subtitle: "Gemessene Zeiten der schnellen Beobachtungsschleife" },
     kv([
-      ["Observation rate", loopState.observation.frequencyHz !== null ? `${fmtNumber(loopState.observation.frequencyHz, 1)} per second` : null],
-      ["Observation age", loopState.observation.ageMs !== null ? `${fmtNumber(loopState.observation.ageMs, 0)} ms${loopState.observation.stale ? " (stale)" : ""}` : null],
-      ["Reaction p95", sample(loopState.reactionMs)],
-      ["Decision p95", sample(loopState.decisionMs)],
-      ["Action p95", sample(loopState.actionMs)],
-      ["Observation errors", `${fmtNumber(loopState.observation.errors)} of ${fmtNumber(loopState.observation.total)}`],
-      ["Time idle", loopState.idle.idleFraction !== null ? fmtPercent(loopState.idle.idleFraction, 0) : null],
+      ["Beobachtungsrate", loopState.observation.frequencyHz !== null ? `${fmtNumber(loopState.observation.frequencyHz, 1)} pro Sekunde` : null],
+      ["Alter der Beobachtung", loopState.observation.ageMs !== null ? `${fmtNumber(loopState.observation.ageMs, 0)} ms${loopState.observation.stale ? " (veraltet)" : ""}` : null],
+      ["Reaktion p95", sample(loopState.reactionMs)],
+      ["Entscheidung p95", sample(loopState.decisionMs)],
+      ["Aktion p95", sample(loopState.actionMs)],
+      ["Beobachtungsfehler", `${fmtNumber(loopState.observation.errors)} of ${fmtNumber(loopState.observation.total)}`],
+      ["Leerlaufzeit", loopState.idle.idleFraction !== null ? fmtPercent(loopState.idle.idleFraction, 0) : null],
     ]),
     h("div", null, loopState.targets.length ? h("ul", { class: "targets" }, loopState.targets.map((target) => h("li", null, target.met === null ? badge("not measured", "neutral") : target.met ? badge("met", "good") : badge("missed", "warn"), ` ${target.label}: ${target.measuredMs === null ? "unknown" : `${fmtNumber(target.measuredMs, 0)} ms`} (target ${fmtNumber(target.targetMs, 0)} ms)`))) : null),
   );
@@ -136,17 +136,17 @@ function loop(snapshot) {
 function history(snapshot) {
   const entries = snapshot.scheduler?.history ?? [];
   return card(
-    { title: "Task history and failure explanations", subtitle: "Newest first. A failure names what stopped the task and what you can do about it." },
+    { title: "Aufgabenverlauf und Fehlererklärungen", subtitle: "Neueste zuerst. Ein Fehler nennt, was die Aufgabe gestoppt hat, und was du dagegen tun kannst." },
     table({
-      caption: "Recent tasks",
-      empty: { title: "No tasks yet", detail: "Tasks started by you, the command line, the Library or autonomy appear here with their outcome." },
+      caption: "Letzte Aufgaben",
+      empty: { title: "Noch keine Aufgaben", detail: "Aufgaben, die du, die Kommandozeile, die Bibliothek oder die Autonomie gestartet hat, erscheinen hier mit ihrem Ergebnis." },
       columns: [
-        { label: "Finished", cell: (t) => (t.finishedAt ? fmtTime(t.finishedAt) : "—") },
-        { label: "Task", cell: (t) => t.label },
-        { label: "Started by", cell: (t) => t.origin },
-        { label: "Outcome", cell: (t) => statusBadge(t.status ?? t.state) },
-        { label: "Actions", align: "right", cell: (t) => orUnknown(t.actions, fmtNumber) },
-        { label: "Why it ended", cell: (t) => failureCell(t) },
+        { label: "Beendet", cell: (t) => (t.finishedAt ? fmtTime(t.finishedAt) : "—") },
+        { label: "Aufgabe", cell: (t) => t.label },
+        { label: "Gestartet von", cell: (t) => t.origin },
+        { label: "Ergebnis", cell: (t) => statusBadge(t.status ?? t.state) },
+        { label: "Aktionen", align: "right", cell: (t) => orUnknown(t.actions, fmtNumber) },
+        { label: "Warum es endete", cell: (t) => failureCell(t) },
       ],
       rows: entries.slice(0, 15).map((t) => ({ key: t.ticketId, value: t })),
     }),
@@ -192,21 +192,21 @@ function libraryParamInput(entryId, param) {
 
 function libraryRunControl(entry) {
   if (entry.status === "unavailable") return null;
-  if (entry.params.length === 0) return button("Run", { command: "libraryExecute", payload: { id: entry.id, params: {} } });
-  return h.stat(`library-form-${entry.id}`, h("form", { class: "inline-form", "data-library-id": entry.id }, entry.params.map((param) => libraryParamInput(entry.id, param)), button("Run", { type: "submit" })));
+  if (entry.params.length === 0) return button("Ausführen", { command: "libraryExecute", payload: { id: entry.id, params: {} } });
+  return h.stat(`library-form-${entry.id}`, h("form", { class: "inline-form", "data-library-id": entry.id }, entry.params.map((param) => libraryParamInput(entry.id, param)), button("Ausführen", { type: "submit" })));
 }
 
 function library(snapshot) {
   const catalog = snapshot.library?.catalog ?? [];
-  if (!catalog.length) return card({ title: "Library actions (advanced)" }, empty("Not available", "The Library needs a connected session."));
+  if (!catalog.length) return card({ title: "Bibliotheksaktionen (fortgeschritten)" }, empty("Nicht verfügbar", "Die Bibliothek braucht eine verbundene Sitzung."));
   const categories = [...new Set(catalog.map((entry) => entry.category))];
   const operations = (snapshot.library?.operations ?? []).slice(0, 6);
   return card(
-    { title: "Library actions (advanced)", subtitle: `${catalog.length} typed actions the agent implements; each runs through the same safety gates` },
+    { title: "Bibliotheksaktionen (fortgeschritten)", subtitle: `${catalog.length} typisierte Aktionen, die der Agent umsetzt; jede läuft durch dieselben Sicherheitsprüfungen` },
     h(
       "details",
       null,
-      h("summary", null, "Show actions"),
+      h("summary", null, "Aktionen anzeigen"),
       categories.map((category) =>
         h(
           "div",
@@ -222,42 +222,42 @@ function library(snapshot) {
         ),
       ),
     ),
-    operations.length ? h("div", null, h("h4", null, "Recent Library operations"), table({ dense: true, columns: [{ label: "Started", cell: (o) => fmtTime(o.startedAt) }, { label: "Action", cell: (o) => o.title }, { label: "State", cell: (o) => statusBadge(o.state === "succeeded" ? "passed" : o.state === "refused" ? "blocked" : o.state) }, { label: "Message", cell: (o) => o.message }], rows: operations.map((o) => ({ key: o.id, value: o })) })) : null,
+    operations.length ? h("div", null, h("h4", null, "Letzte Bibliotheksvorgänge"), table({ dense: true, columns: [{ label: "Started", cell: (o) => fmtTime(o.startedAt) }, { label: "Action", cell: (o) => o.title }, { label: "State", cell: (o) => statusBadge(o.state === "succeeded" ? "passed" : o.state === "refused" ? "blocked" : o.state) }, { label: "Message", cell: (o) => o.message }], rows: operations.map((o) => ({ key: o.id, value: o })) })) : null,
   );
 }
 
 const TEST_SERVER_LABELS = {
-  unknown: ["Not checked yet", "neutral"],
-  "docker-missing": ["Docker missing", "bad"],
-  "docker-stopped": ["Docker not running", "bad"],
-  stopped: ["Stopped", "neutral"],
-  starting: ["Starting…", "neutral"],
-  running: ["Running", "good"],
-  stopping: ["Stopping…", "neutral"],
-  failed: ["Failed", "bad"],
+  unknown: ["Noch nicht geprüft", "neutral"],
+  "docker-missing": ["Docker fehlt", "bad"],
+  "docker-stopped": ["Docker läuft nicht", "bad"],
+  stopped: ["Gestoppt", "neutral"],
+  starting: ["Startet…", "neutral"],
+  running: ["Läuft", "good"],
+  stopping: ["Stoppt…", "neutral"],
+  failed: ["Fehlgeschlagen", "bad"],
 };
 
 /** The offline test server (Docker, vanilla 1.20.4) with the three things an operator needs: state, connection details, and the buttons. */
 export function testServerCard(status) {
-  if (!status) return card({ title: "Offline test server" }, empty("Not checked yet", "The state of the Docker test server appears here in a moment."));
+  if (!status) return card({ title: "Offline-Testserver" }, empty("Noch nicht geprüft", "Der Zustand des Docker-Testservers erscheint gleich hier."));
   const [label, tone] = TEST_SERVER_LABELS[status.state] ?? ["Unknown", "neutral"];
   const running = status.state === "running";
   const docker = status.state !== "docker-missing" && status.state !== "docker-stopped";
   const busy = Boolean(status.busy);
   return card(
-    { title: "Offline test server", subtitle: "Vanilla Minecraft 1.20.4 in Docker on this machine. Offline sign-in, nothing leaves this PC.", actions: badge(label, tone) },
+    { title: "Offline-Testserver", subtitle: "Vanilla Minecraft 1.20.4 in Docker auf diesem Rechner. Anmeldung offline, nichts verlässt diesen PC.", actions: badge(label, tone) },
     notice(tone === "bad" ? "warn" : "neutral", status.message),
     kv([
-      ["Connect to", `${status.connection.host}:${status.connection.port}`],
+      ["Verbinden mit", `${status.connection.host}:${status.connection.port}`],
       ["Version", status.connection.version],
-      ["Sign-in", status.connection.auth],
+      ["Anmeldung", status.connection.auth],
     ]),
     h(
       "footer",
       { class: "button-row" },
-      button("Start test server", { command: "startTestServer", tone: "primary", disabled: running || busy || !docker }),
-      button("Stop test server", { command: "stopTestServer", tone: "warn", disabled: !running || busy, data: { confirm: "Stop the test server? The world is kept in its Docker volume." } }),
-      button("Fill in the connection", { action: "use-test-server", title: "Fills the host, port, version and sign-in in the form below" }),
+      button("Testserver starten", { command: "startTestServer", tone: "primary", disabled: running || busy || !docker }),
+      button("Testserver stoppen", { command: "stopTestServer", tone: "warn", disabled: !running || busy, data: { confirm: "Testserver stoppen? Die Welt bleibt im Docker-Volume erhalten." } }),
+      button("Verbindung übernehmen", { action: "use-test-server", title: "Füllt Host, Port, Version und Anmeldung im Formular unten aus" }),
     ),
   );
 }
@@ -272,7 +272,7 @@ export function renderBots(ctx) {
       { class: "bot-list" },
       bots.length
         ? bots.map((bot) => botCard(bot, now))
-        : card({ title: "No bot yet" }, empty("No session", "Connect to a Minecraft server or to the offline simulator below. One bot runs per process today; this list is built per bot so more can be added later.")),
+        : card({ title: "Noch kein Bot" }, empty("Keine Sitzung", "Verbinde dich unten mit einem Minecraft-Server oder dem Offline-Simulator. Heute läuft ein Bot pro Prozess.")),
     ),
     "bots-diagnostics": diagnostics(snapshot, now),
     "bots-safety": safety(snapshot),

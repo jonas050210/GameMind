@@ -71,8 +71,8 @@ export function fmtAgo(iso, now = Date.now()) {
   const ms = parse(iso);
   if (ms === null) return UNKNOWN;
   const delta = Math.max(0, now - ms);
-  if (delta < 5_000) return "just now";
-  return `${fmtDuration(delta)} ago`;
+  if (delta < 5_000) return "gerade eben";
+  return `vor ${fmtDuration(delta)}`;
 }
 
 export function plural(count, one, many = `${one}s`) {
