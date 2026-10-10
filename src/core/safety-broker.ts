@@ -1,4 +1,5 @@
 import type { RiskLevel } from "./types.js";
+import { DROWNING_ACTION_BLOCK_AIR_TICKS } from "./survival-thresholds.js";
 
 /**
  * The Safety Broker is the single place where "may this action run at all?" is answered. It sits
@@ -76,8 +77,8 @@ export interface SafetyPolicy {
   readonly drowningBlockedCapabilities: readonly string[];
 }
 
-/** Air ticks below which stationary actions are refused; a normal player has 300. */
-export const DROWNING_AIR_TICKS = 80;
+/** Air ticks below which stationary actions are refused; a normal player has 300. Shared with the reflex layer. */
+export const DROWNING_AIR_TICKS = DROWNING_ACTION_BLOCK_AIR_TICKS;
 
 export const RISK_ORDER: Readonly<Record<RiskLevel, number>> = {
   low: 0,

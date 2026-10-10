@@ -631,6 +631,55 @@ function hazardCandidate(
  * Defensive strike. Exists only when the operator enabled combat **and** the shared safety function
  * approves the specific target, and it never outranks fleeing when several hostiles are close.
  */
+/** Crafting range the craft executor accepts is larger; this stays well inside it so the attempt is not wasted. */
+const WEAPON_TABLE_RANGE_BLOCKS = 3.5;
+
+/**
+ * A wooden sword from materials already in the inventory, crafted at a table already in reach. Offered only when every
+ * requirement holds now: a sword is 2 planks and 1 stick, with the table observed within range. Nothing is fetched here,
+ * so a missing requirement is reported, not planned around.
+ */
+function weaponPreparationCandidate(
+  state: MinecraftObservation,
+  hostile: MinecraftObservation["entities"][number],
+  context: MinecraftDecisionContext,
+): DecisionCandidate | null {
+  const key = `hostile:${hostile.id}`;
+  const note = (reason: string) =>
+    context.ledger?.note({ goalId: "defend", targetKey: key, priorityBand: BAND_SAFETY }, "no_skill", reason);
+  if (!available(context, "minecraft.craft-item")) {
+    note("no weapon, and no craft skill is available to make one");
+    return null;
+  }
+  const planks = totalPlanks(state);
+  const sticks = inventoryCount(state, "stick");
+  if (planks < 2 || sticks < 1) {
+    note(`no weapon; a wooden sword needs 2 planks and 1 stick (have ${planks} planks, ${sticks} sticks)`);
+    return null;
+  }
+  const table = state.nearbyBlocks
+    .filter((block) => block.name === "crafting_table")
+    .map((block) => ({ block, distance: distanceBetween(block.position, state.player.position) }))
+    .sort((left, right) => left.distance - right.distance)[0];
+  if (!table || table.distance > WEAPON_TABLE_RANGE_BLOCKS) {
+    note("no weapon; crafting a wooden sword needs a crafting table within 3.5 blocks, none is in reach");
+    return null;
+  }
+  const { x, y, z } = table.block.position;
+  const crafted = notExcluded(craftCandidate("wooden_sword", inventoryCount(state, "wooden_sword") + 1, { x, y, z }), context);
+  if (!crafted) {
+    note("weapon crafting already failed for this run; the agent flees");
+    return null;
+  }
+  return {
+    ...crafted,
+    goalId: "prepare-weapon",
+    priorityBand: BAND_SAFETY,
+    score: 1900,
+    rationale: `Unarmed with ${hostile.name} ${hostile.distance.toFixed(1)} blocks away: craft a wooden sword at the table in reach before engaging.`,
+  };
+}
+
 function defendCandidate(
   state: MinecraftObservation,
   task: MinecraftTask,
@@ -650,6 +699,16 @@ function defendCandidate(
   if (!available(context, "minecraft.attack-hostile")) return null;
   const hostile = threats.nearby[0];
   if (!hostile) return null;
+  const hasWeapon = bestWeapon([
+    ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
+    ...state.inventory.map((item) => ({ name: item.name })),
+  ]) !== null;
+  if (!hasWeapon) {
+    // Unarmed with a hostile close: preparing a weapon in place beats fleeing from it, when the materials and a
+    // table are already here. Otherwise the agent flees, and the ledger says exactly what was missing.
+    const preparation = weaponPreparationCandidate(state, hostile, context);
+    if (preparation) return preparation;
+  }
   if ((context.combatAttempts ?? 0) >= MAX_COMBAT_ATTEMPTS_PER_RUN) {
     context.ledger?.note(
       { goalId: "defend", targetKey: `hostile:${hostile.id}`, priorityBand: BAND_SAFETY },

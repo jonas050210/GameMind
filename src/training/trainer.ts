@@ -29,8 +29,10 @@ export interface TrainingRunOptions {
   readonly maxEpisodes?: number;
   /** Time budget for the whole run, counted as active episode time (pauses excluded). */
   readonly maxMinutes?: number;
-  /** Start over: deletes the experience store and state. Without it, an existing run is resumed. */
+  /** Start over: archives (never deletes) the previous state, experience and checkpoints first. Without it, an existing run is resumed. */
   readonly fresh?: boolean;
+  /** Probability that an eligible progress decision tries an alternative (0 = greedy, the default). Seeded per episode. */
+  readonly explorationRate?: number;
   readonly stages?: readonly CurriculumStage[];
   readonly episodeRunner?: EpisodeRunner;
   /** How often a paused trainer re-reads its control file. */
@@ -167,11 +169,13 @@ export async function runTraining(options: TrainingRunOptions): Promise<Training
       const seed = trainingSeed(state.totalEpisodes);
       const before = learner.rewardTotals;
       const episodeStarted = performance.now();
+      const explorationRate = options.explorationRate ?? 0;
       const run = await episodeRunner(scenario, seed, {
         learner,
         worldKey: `train:${scenario.id}:${seed}`,
         runId: `train-${String(state.totalEpisodes).padStart(6, "0")}`,
         provenance: "training",
+        explore: explorationRate > 0 ? { epsilon: explorationRate, seed } : null,
       });
       state.activeMs += performance.now() - episodeStarted;
       const after = learner.rewardTotals;

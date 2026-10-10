@@ -36,6 +36,7 @@
     "profile:autonomy": "tsx src/testing/autonomy-profile.ts",
     "perf:observe": "tsx src/testing/perf/observe-benchmark.ts",
     "train": "tsx src/training/cli.ts",
+    "train:experiment": "tsx src/training/experiment-cli.ts",
     "test:record": "node scripts/record-test-run.mjs",
     "roadmap": "tsx src/roadmap/cli.ts"
   },

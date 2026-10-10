@@ -1,6 +1,7 @@
 import pino from "pino";
 import { MemoryTraceSink, TraceRecorder } from "../../core/trace.js";
 import { ExperienceLearner } from "../../core/learning/learner.js";
+import type { ExplorationConfig } from "../../games/minecraft/training-exploration.js";
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { createMinecraftAgent } from "../../games/minecraft/create-agent.js";
 import { MinecraftTaskDecisionModel } from "../../games/minecraft/decision-model.js";
@@ -99,6 +100,8 @@ export interface EvaluationRunOptions {
   readonly allowCombat?: boolean;
   /** Provenance written on each recorded episode. Evaluation is the default; training passes "training". */
   readonly provenance?: EpisodeProvenance;
+  /** Training only: seeded exploration of progress-band alternatives. Evaluation never passes this. */
+  readonly explore?: ExplorationConfig | null;
 }
 
 export async function runEvaluationOnce(
@@ -118,6 +121,7 @@ export async function runEvaluationOnce(
     ...(options.learner ? { learner: options.learner } : {}),
     ...(options.worldKey ? { worldKey: options.worldKey } : {}),
     ...(options.runId ? { runId: options.runId } : {}),
+    ...(options.explore ? { explore: options.explore } : {}),
     provenance: options.provenance ?? "simulator-eval",
     ...(allowCombat ? { allowCombat: true } : {}),
   });

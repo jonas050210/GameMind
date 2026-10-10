@@ -9,6 +9,7 @@ import {
   type MinecraftDecisionRecord,
 } from "./decision-model.js";
 import { ExperienceLearner } from "../../core/learning/learner.js";
+import { exploreDecision, type ExplorationConfig } from "./training-exploration.js";
 import {
   distanceBandOf,
   goalClassOf,
@@ -98,6 +99,8 @@ export interface TaskMetrics {
   readonly rejectedAlternatives: number;
   /** Actions that ended without any observable progress; the efficiency metric learning should reduce. */
   readonly wastedActions: number;
+  /** Decisions switched to an alternative by training-only exploration. Zero outside training. */
+  readonly explorations: number;
   readonly minedBlocks: number;
   readonly shelterSidesClosed: number;
   readonly combatActions: number;
@@ -142,6 +145,8 @@ export interface MinecraftTaskRunnerOptions {
   readonly worldKey?: string | null;
   /** Lets the planner *propose* defence. The safety policy and the adapter still have to agree. */
   readonly allowCombat?: boolean;
+  /** Training only: occasionally try a progress-band alternative so the learner sees counterfactual outcomes. */
+  readonly explore?: ExplorationConfig | null;
   /** Unique id for the episode log; derived from the task when omitted. */
   readonly runId?: string;
   /**
@@ -413,6 +418,7 @@ export class MinecraftTaskRunner {
     let safetyDenials = 0;
     let rejectedAlternatives = 0;
     let wastedActions = 0;
+    let explorations = 0;
     let minedBlocks = 0;
     let combatActions = 0;
     let hungerRecoveryActions = 0;
@@ -596,8 +602,11 @@ export class MinecraftTaskRunner {
         };
         stuck = null;
         const decideStartedMs = performance.now();
-        const decision: MinecraftDecisionRecord = this.decisionModel.decide(world.state, task, context, world.sequence);
+        const modelDecision: MinecraftDecisionRecord = this.decisionModel.decide(world.state, task, context, world.sequence);
         this.options.metrics?.recordDecision(performance.now() - decideStartedMs);
+        const explored = this.options.explore ? exploreDecision(modelDecision, this.options.explore, world.sequence) : null;
+        const decision: MinecraftDecisionRecord = explored?.decision ?? modelDecision;
+        if (explored?.choice) explorations += 1;
         decisions += 1;
 
         rejectedAlternatives += (decision.rejected?.length ?? 0) + decision.alternatives.length;
@@ -613,7 +622,8 @@ export class MinecraftTaskRunner {
           gameId: world.gameId,
           sessionId: world.sessionId,
           correlationId: actions.at(-1)?.actionId ?? null,
-          data: { ...decision },
+          // A switch made for training is recorded on the decision itself, never applied silently.
+          data: { ...decision, ...(explored?.choice ? { exploration: explored.choice } : {}) },
         });
 
         if (decision.terminalStatus === "completed") {
@@ -1082,6 +1092,7 @@ export class MinecraftTaskRunner {
       safetyDenials,
       rejectedAlternatives,
       wastedActions,
+      explorations,
       minedBlocks,
       shelterSidesClosed: finalObservation && task.kind === "build_shelter"
         ? shelterCardinalSolidCount(finalObservation.state)

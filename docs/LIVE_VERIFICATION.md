@@ -280,3 +280,19 @@ policy is to block on a verified wrong value and to proceed while stating the un
 | Does Mineflayer auto-respawn by default, and does the task runner wait action-free until alive? | §14 | Unverified |
 
 Only mark a row verified when the check was run against a server and the evidence is recorded in your notes.
+
+## 16. Run the harness against your server (added with the headless-learning work)
+
+The automated live runner already exists. Run it from your own machine, against your server, with a disposable world:
+
+```bash
+# Connection, observation, and a single decision. Read-only; it never dispatches a world-changing action.
+npm run test:live -- --host 127.0.0.1 --port 61889 --mode verify --output test-results
+
+# Full learn mode: adds episode recording, a learning update, and the Control Center check.
+npm run test:live -- --host 127.0.0.1 --port 61889 --mode learn --output test-results
+```
+
+The report is written to `test-results/live-verification-report.json`. It separates per-phase `PASS`/`FAIL`, and it exits non-zero when the server is not reached. A run where the server refused connections reports **no** live result; that is what happened in the last attempt from the development sandbox (`ECONNREFUSED 127.0.0.1:61889`).
+
+**What the harness does not yet cover, and therefore has not verified live:** movement to a chosen block, digging, block placement, entity attacks, swimming and leaving water, drowning response, and task completion as individual capabilities. Each of those needs a controlled phase with a known-good setup (for example, a flat platform the operator builds, and a pool built for the swim test). They are listed as open work in `docs/HEADLESS_LEARNING.md` and in the change notes, and must not be described as verified until a run records them.
