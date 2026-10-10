@@ -12,6 +12,18 @@ let lastOptions = { stale: false, provenance: "world-memory" };
  * of times a second while the agent was running.
  */
 let rendererAttempted = false;
+let suspended = false;
+
+/**
+ * Stops all drawing while headless training runs, and redraws the last frame when it resumes. Camera input
+ * still updates the orbit state, so the view is correct the moment rendering comes back.
+ */
+export function setWorldViewSuspended(value) {
+  const next = value === true;
+  if (next === suspended) return;
+  suspended = next;
+  if (!suspended && lastWorld) drawWorldView(lastWorld, lastOptions);
+}
 
 function compileShader(gl, type, source) {
   const shader = gl.createShader(type);
@@ -286,6 +298,8 @@ export function drawWorldView(world, options) {
   if (options) lastOptions = options;
   const canvas = document.getElementById("minimap");
   if (!canvas) return;
+  // Suspended (headless training): no WebGL or 2D drawing from any caller, including camera input.
+  if (suspended) return;
   canvas.dataset.live = lastOptions.stale ? "0" : "1";
   if (!renderer && !rendererAttempted) {
     rendererAttempted = true;

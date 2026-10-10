@@ -6,6 +6,7 @@ import {
   episodeContextKey,
   episodeFailureKey,
   episodeSchema,
+  type EpisodeProvenance,
   type Episode,
   type EpisodeFeatures,
   type EpisodeOutcome,
@@ -44,6 +45,8 @@ export interface EpisodeDraft {
   readonly policyVersion: string | null;
   readonly targetKey: string | null;
   readonly features: EpisodeFeatures;
+  /** Where the episode came from; defaults to "unlabelled" for callers that do not say. */
+  readonly provenance?: EpisodeProvenance | undefined;
   readonly outcome: EpisodeOutcome;
 }
 
@@ -126,6 +129,7 @@ export class ExperienceLearner {
   // Running reward statistics (computed from every recorded episode)
   private rewardEpisodeCount = 0;
   private rewardMean = 0;
+  private rewardSum = 0;
   private rewardEwma = 0;
   private rewardPositiveCount = 0;
 
@@ -257,6 +261,14 @@ export class ExperienceLearner {
   }
 
   /** Records one attempted action. Cheap and non-throwing: learning must never break a run. */
+  /**
+   * Unrounded running totals of the per-action reward. A caller that wants the reward of one task takes the
+   * difference between two readings around it, which is exact (the snapshot values are rounded for display).
+   */
+  get rewardTotals(): { readonly episodes: number; readonly sum: number } {
+    return { episodes: this.rewardEpisodeCount, sum: this.rewardSum };
+  }
+
   recordEpisode(draft: EpisodeDraft): Episode | null {
     if (!this.enabled) return null;
     try {
@@ -270,6 +282,7 @@ export class ExperienceLearner {
         timestamp: new Date().toISOString(),
         policyVersion: draft.policyVersion,
         worldKey: draft.worldKey,
+        provenance: draft.provenance ?? "unlabelled",
         targetKey: draft.targetKey,
         features: draft.features,
         outcome: draft.outcome,
@@ -281,6 +294,8 @@ export class ExperienceLearner {
         const rewardInput: RewardInput = {
           status: draft.outcome.status,
           confirmed: draft.outcome.confirmed,
+          attemptsOnTarget: draft.features.attemptsOnTarget,
+          distanceBefore: draft.features.distance,
           progress: draft.outcome.progress,
           safetyDenied: draft.outcome.safetyDenied,
           itemsGained: draft.outcome.itemsGained,
@@ -298,6 +313,7 @@ export class ExperienceLearner {
 
         // Update running reward statistics
         this.rewardEpisodeCount++;
+        this.rewardSum += reward.total;
         this.rewardMean += (reward.total - this.rewardMean) / this.rewardEpisodeCount;
         this.rewardEwma = this.rewardEpisodeCount === 1
           ? reward.total

@@ -193,6 +193,28 @@ Every attempted action becomes an episode in `data/learning/episodes.jsonl` (ban
 
 The design keeps the door open for real RL: episodes are the training records, the store is append-only JSONL, and `ExperienceLearner` is the only consumer. There is no gradient training and no LLM in the loop — the "learning" here is measured experience, not model fitting.
 
+Training (below) uses this same learner: it runs curriculum episodes in the offline simulator, records each action as an episode, and writes a checkpoint of the candidate weights when a stage passes. There is no gradient training, no neural network and no LLM in the loop; the "learning" is count-based experience statistics. Checkpoints are compared against the baseline on held-out evaluation seeds, and a checkpoint is promoted only through the existing gate.
+
+## Autonomy, observation and training
+
+The agent runs two loops. A fast loop observes about once per second (`observationIntervalMs`, default 1000), checks reflexes (critical health, starvation, a close hostile, and so on), and interrupts an in-flight action only when the action is not protected (eating, attacking, looking and inspecting are never interrupted). A slower planner chooses the next task from the current observation and from its progress tracker, with cooldowns and a fallback when a subgoal repeatedly fails. Neither loop waits for the other, and training runs in a separate process, so observation never waits on training.
+
+The Control Center shows observation age, loop frequency, decision latency, action latency and reaction time in the performance panel. There is no per-run action-count cap. Actions are bounded by per-action timeouts, stuck detection, retry limits, and the emergency stop.
+
+```bash
+# Offline (no server needed)
+npm run profile:autonomy -- --scenario berries --seed 101 --virtual-seconds 900
+npm run eval:offline -- --learning-dir data/training/experience
+
+# Training (separate process; the Control Center can start and watch it too)
+npm run train -- train --dir data/training --episodes-per-stage 8 --max-episodes 48
+npm run train -- evaluate --dir data/training --seeds 10
+npm run train -- status --dir data/training
+npm run train -- pause|resume|stop --dir data/training   # pause and stop take effect after the current episode
+```
+
+Training data (`data/training/`) is git-ignored. Training seeds are split from evaluation seeds and asserted disjoint at start-up. The world seed can be entered manually in the Control Center. It is not auto-detected; anything derived from it is labelled as predicted until it is verified in the world.
+
 ## Live Minecraft
 
 Start a private or local Java server first. Use only an account and server you are authorized to use, and keep the world disposable. The exact checks, expected evidence, and server setup commands are in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md).
@@ -275,6 +297,10 @@ When the Control Center is enabled, its companion chat accepts `#follow`, `#come
 - **The Control Center keeps only the recent window.** A 400-event trace ring feeds recent action, decision, event and failure panels. The JSONL trace and separate world-memory snapshots are durable; the dashboard itself is for live operations, not long-term trace browsing.
 - **Performance data is scoped and low-overhead.** The Control Center samples Node process CPU, event-loop utilization, RSS/heap, host memory/load on snapshot requests, plus live adapter scan timings and skill durations. It does not profile Minecraft server TPS, GPU, GC pauses, per-core counters, or end-to-end networking; no diagnostic profiler or Minecraft tick hook is installed.
 - **Simulator fidelity.** Walking, hostiles, hunger, and regeneration are simplified; the simulator has no collisions beyond solid cells, no lighting, no mob pathing, and no protocol.
+- **Live verification of the autonomy loop has not been run.** The fast loop, reflexes, the planner, the performance panel and the observation cadence are tested with the simulator and unit tests only. The ~1 s cadence is a design target, not a measured live figure.
+- **Repeated failures are bounded, not eliminated.** In the `berries` profile (seed 101, 900 virtual seconds), `autonomous:mine-iron-ore` is retried 8 times and fails each time after 2 actions with no simulated time spent. Cooldowns and the fallback stop the retries from growing without bound, but a task that always fails in the same way is still attempted repeatedly.
+- **No measured training gain.** The latest run (24 episodes, 3 checkpoints, 10 evaluation seeds per scenario) gives a candidate success rate equal to the baseline (73.5% → 73.5%). Its verdict is `not-promotable`. Training works end to end, but it has not produced a measured improvement.
+- **Seed is manual only.** No auto-detection is implemented, so seed-derived information is always a prediction until it is checked in the world.
 - **Recovery is bounded, not exhaustive.** A route blocked everywhere, or one whose shortest paths all pass through an unobservable block, ends in a bounded stop.
 
 ## Traces and tests

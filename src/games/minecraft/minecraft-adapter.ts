@@ -81,6 +81,7 @@ import type {
   GameObservation,
   GameSession,
 } from "../../core/types.js";
+import { standingReaches } from "./reach.js";
 
 const require = createRequire(import.meta.url);
 const unsafePlacementSupportNames = new Set([
@@ -1227,7 +1228,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const to = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
     const horizontalDistance = Math.hypot(to.x - (x + 0.5), to.z - (z + 0.5));
     const verticalDistance = Math.abs(to.y - y);
-    const confirmed = horizontalDistance <= range + 1.25 && verticalDistance <= 2;
+    const confirmed =
+      horizontalDistance <= range + 1.25 && standingReaches(to.y, { x, y, z }, horizontalDistance, range + 1.25);
     return {
       confirmed,
       confirmation: "pathfinder_goal_reached_and_position_checked",
@@ -1866,9 +1868,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       if (!bot.pathfinder) {
         throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
       }
+      // An elevated block (a log in a tree) cannot be stood beside; a wider radius finds a cell below it in reach.
+      const elevated = y - bot.entity.position.y > 2;
       await this.navigateWithProgressWatchdog(
         bot,
-        new pathfinderApi.goals.GoalNear(x, y, z, 1.5),
+        new pathfinderApi.goals.GoalNear(x, y, z, elevated ? 3 : 1.5),
         signal,
       );
     }

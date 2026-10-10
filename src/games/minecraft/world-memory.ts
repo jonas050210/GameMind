@@ -183,6 +183,11 @@ export function markLoadedChunkCoverage(
  * known, non-truncated scan volume that is no longer reported. Unknown or truncated regions never
  * invalidate anything, so memory errs on the side of remembering a resource.
  */
+/** Distance the agent must move from a refusal before a refused target is tried again. */
+export const REFUSED_RECHECK_DISTANCE = 24;
+/** Radius around a refused frontier point that is skipped as an exploration destination. */
+export const REFUSED_AREA_RADIUS = 12;
+
 export class WorldMemory {
   private readonly blocks = new Map<string, BlockSighting>();
   /**
@@ -195,6 +200,18 @@ export class WorldMemory {
   private readonly explored = new Set<string>();
   /** Persistent landmarks: villages, shelters, resource veins, danger zones. Survive restarts. */
   readonly landmarks = new LandmarkMemory();
+  /**
+   * Targets whose path was refused (PATH_NOT_FOUND), keyed by target, with where the agent stood when
+   * it was refused. The refusal is only trusted while the agent stays near that spot: moving away
+   * can make a target reachable again.
+   */
+  private readonly refusedTargets = new Map<string, { readonly x: number; readonly z: number }>();
+  /**
+   * Points beyond which no path was found. Unlike refused targets these are permanent: unexplored ground
+   * past a refused frontier does not become reachable by walking elsewhere, so the same frontier must not be
+   * chosen again after the agent moves on.
+   */
+  private readonly refusedAreas: { readonly x: number; readonly z: number }[] = [];
   private observationCount = 0;
   private lastSequence = Number.NEGATIVE_INFINITY;
 
@@ -395,6 +412,36 @@ export class WorldMemory {
 
   isPointExplored(point: { readonly x: number; readonly z: number }): boolean {
     return this.isCellExplored(coverageCellOf(point.x), coverageCellOf(point.z));
+  }
+
+  /** Records a PATH_NOT_FOUND for `targetKey` from the agent's position; `area` marks an unreachable frontier point. */
+  markRefused(
+    targetKey: string,
+    from: { readonly x: number; readonly z: number },
+    area?: { readonly x: number; readonly z: number },
+  ): void {
+    this.refusedTargets.set(targetKey, { x: from.x, z: from.z });
+    if (area && !this.refusedAreas.some((known) => known.x === area.x && known.z === area.z)) {
+      this.refusedAreas.push({ x: area.x, z: area.z });
+    }
+  }
+
+  /** Target keys refused from close enough to `at` that they should still be avoided. */
+  refusedTargetKeys(at: { readonly x: number; readonly z: number }): Set<string> {
+    const keys = new Set<string>();
+    for (const [key, spot] of this.refusedTargets) {
+      if (Math.hypot(spot.x - at.x, spot.z - at.z) < REFUSED_RECHECK_DISTANCE) keys.add(key);
+    }
+    return keys;
+  }
+
+  /** Whether a point lies within the refused-frontier radius of a point where no path was found. */
+  isInRefusedArea(point: { readonly x: number; readonly z: number }): boolean {
+    return this.refusedAreas.some((area) => Math.hypot(area.x - point.x, area.z - point.z) <= REFUSED_AREA_RADIUS);
+  }
+
+  get refusedCount(): number {
+    return this.refusedTargets.size;
   }
 
   get exploredCellCount(): number {

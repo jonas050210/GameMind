@@ -4,7 +4,20 @@
   served by the same process that owns the agent, and every value on screen comes from GET /api/snapshot.
 */
 
-import { drawWorldView } from "./world-view.js";
+import { drawWorldView, setWorldViewSuspended } from "./world-view.js";
+import {
+  HEADLESS_STORAGE_KEY,
+  ROADMAP_ACTIONS_WITH_NOTE,
+  ROADMAP_ACTION_LABELS,
+  ROADMAP_KIND_LABELS,
+  ROADMAP_STATUS_LABELS,
+  filterRoadmap,
+  groupByCategory,
+  isClosed,
+  parseHeadless,
+  renderingSuspended,
+  roadmapActionsFor,
+} from "./policy.js";
 
 const boot = (() => {
   try {
@@ -15,7 +28,22 @@ const boot = (() => {
 })();
 
 const TOKEN = typeof boot.token === "string" ? boot.token : "";
-const state = { snapshot: null, lastError: null, busy: false, pollTimer: null };
+const state = {
+  snapshot: null,
+  lastError: null,
+  busy: false,
+  pollTimer: null,
+  // Headless training: on by default. It stops the browser drawing the 3D world while training runs.
+  headless: parseHeadless(readStoredHeadless()),
+};
+
+function readStoredHeadless() {
+  try {
+    return localStorage.getItem(HEADLESS_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
 
 /*
   The page pulls one snapshot per tick; there is no push channel. The interval widens while the agent is
@@ -101,6 +129,10 @@ function render() {
   renderLearning(snapshot);
   renderWorld(snapshot);
   renderPerformance(snapshot);
+  renderObjective(snapshot);
+  renderWorldSeed(snapshot);
+  renderTraining(snapshot);
+  renderRoadmap(snapshot);
   renderSkills(snapshot);
   renderActions(snapshot);
   renderBlocker(snapshot);
@@ -139,9 +171,7 @@ function renderRun(snapshot) {
   clear(metrics);
   metrics.append(
     metric("Task", agent.taskId ?? "none", { note: agent.taskKind ? String(agent.taskKind) : null }),
-    metric("Actions", `${agent.actionsUsed ?? 0}${agent.maxActions ? ` / ${agent.maxActions}` : ""}`, {
-      tone: agent.maxActions && agent.actionsUsed / agent.maxActions > 0.8 ? "warn" : null,
-    }),
+    metric("Actions", `${agent.actionsUsed ?? 0}`, { note: "no action cap; guarded by timeouts and stuck detection" }),
     metric("Approved", safety.actionsApproved ?? 0, { tone: "good" }),
     metric("Denied", safety.actionsDenied ?? 0, { tone: safety.actionsDenied ? "bad" : null }),
     metric("Elapsed", agent.elapsedMs != null ? `${num(agent.elapsedMs / 1000, 1)}s` : "—"),
@@ -149,21 +179,19 @@ function renderRun(snapshot) {
       tone: ["succeeded", "idle", "stopped"].includes(agent.status ?? agent.state) ? "good" : agent.status ? "bad" : null,
     }),
   );
+  // The bar shows the goal's own progress when the goal reports one; it is not an action budget.
   const progress = el("run-progress");
-  const actionsUsed = Math.max(0, agent.actionsUsed ?? 0);
-  const maxActions = Math.max(1, agent.maxActions ?? 100);
-  const ratio = Math.min(1, actionsUsed / maxActions);
+  const goalProgress = snapshot.goal?.progress ?? null;
+  const ratio = goalProgress && goalProgress.of > 0 ? Math.min(1, Math.max(0, goalProgress.have / goalProgress.of)) : 0;
   progress.style.width = `${Math.round(ratio * 100)}%`;
-  progress.parentElement?.setAttribute("aria-valuemax", String(maxActions));
-  progress.parentElement?.setAttribute("aria-valuenow", String(Math.min(actionsUsed, maxActions)));
+  progress.parentElement?.setAttribute("aria-valuemax", "100");
+  progress.parentElement?.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
   el("run-hint").textContent = agent.startedAt ? `started ${ago(agent.startedAt)}` : "no run in progress";
   const blocker = agent.blocker;
   if (blocker && blocker.kind !== "none") {
     el("run-hint").textContent = blocker.headline;
     el("run-hint").title = [blocker.detail, blocker.hint].filter(Boolean).join("\n\n");
   }
-  const budget = el("budget-input");
-  if (document.activeElement !== budget && agent.maxActions != null) budget.value = String(agent.maxActions);
   const combat = el("combat-toggle");
   if (snapshot.combatAllowed === null || snapshot.combatAllowed === undefined) {
     combat.closest(".switch").hidden = true;
@@ -283,7 +311,7 @@ function renderSituationBar(snapshot) {
     if (agent.autonomous) {
       taskEl.textContent = "Autonomous";
     } else if (agent.taskId) {
-      taskEl.textContent = `${agent.taskKind ?? "task"} (${agent.actionsUsed ?? 0}/${agent.maxActions ?? "?"})`;
+      taskEl.textContent = `${agent.taskKind ?? "task"} (${agent.actionsUsed ?? 0} actions)`;
     } else {
       taskEl.textContent = "None";
     }
@@ -545,7 +573,7 @@ function renderSafety(snapshot) {
   const metrics = el("safety-metrics");
   clear(metrics);
   metrics.append(
-    metric("Policy", safety.policyId ?? "—", { note: safety.enabled === false ? "disabled" : `max risk ${safety.maxRisk ?? "—"} · budget ${safety.maxActionsPerRun ?? "—"}` }),
+    metric("Policy", safety.policyId ?? "—", { note: safety.enabled === false ? "disabled" : `max risk ${safety.maxRisk ?? "—"}` }),
     metric("Paused", safety.paused ? "yes" : "no", { tone: safety.paused ? "warn" : null, note: safety.pauseReason ?? null }),
     metric("Tripped", safety.tripped ? "yes" : "no", { tone: safety.tripped ? "bad" : null, note: safety.tripReason ?? null }),
     metric("Denied", safety.actionsDenied ?? 0, { tone: safety.actionsDenied ? "bad" : "good" }),
@@ -885,7 +913,7 @@ function renderWorld(snapshot) {
   } else {
     hostiles.append(node("span", "item empty", (world.entities ?? []).length ? "no hostiles in view" : "no entities observed"));
   }
-  drawMinimap(world, { stale: stale === true, provenance: provenance?.source ?? "world-memory" });
+  drawMinimap(world, { stale: stale === true, provenance: provenance?.source ?? "world-memory" }, snapshot);
 }
 
 /** Renders one session fact as `value · evidence`; an unknown value is spelled out, never guessed. */
@@ -925,10 +953,226 @@ function freshnessReason(freshness, provenance, connection) {
   return `live — observation #${freshness.sequence} (${age} old)${extra}`;
 }
 
+function renderObjective(snapshot) {
+  const panel = el("objective-panel");
+  if (!panel) return;
+  clear(panel);
+  const objective = snapshot.objective ?? null;
+  if (!objective) {
+    el("objective-hint").textContent = "no decision yet";
+    panel.append(node("p", "note", "Autonomy has not chosen a subgoal yet."));
+    return;
+  }
+  el("objective-hint").textContent = objective.fallback ? "fallback route" : objective.subgoal && objective.subgoal !== "none" ? "preferred route" : "waiting";
+  panel.append(
+    metric("Objective", objective.objective ?? "none"),
+    metric("Subgoal", objective.subgoal ?? "none", { note: objective.completion ?? null }),
+    metric("No-progress streak", String(objective.consecutiveNoProgress ?? 0), { tone: (objective.consecutiveNoProgress ?? 0) >= 2 ? "warn" : null }),
+    metric("Decisions", String(objective.decided ?? 0), { note: `${objective.fallbacksUsed ?? 0} fallbacks used` }),
+  );
+  panel.append(node("p", "note", objective.reason ?? ""));
+  if ((objective.cooldowns ?? []).length) {
+    const list = node("ul", null);
+    for (const cooldown of objective.cooldowns) {
+      list.append(node("li", null, `cooling: ${cooldown.signature} until ${clock(cooldown.until)} — ${cooldown.reason}`));
+    }
+    panel.append(list);
+  }
+  if ((objective.recentOutcomes ?? []).length) {
+    const list = node("ul", null);
+    for (const outcome of objective.recentOutcomes.slice(0, 5)) {
+      list.append(node("li", null, `${outcome.kind} · ${outcome.taskId} · ${outcome.reason}`));
+    }
+    panel.append(list);
+  }
+}
+
+function renderWorldSeed(snapshot) {
+  const seed = snapshot.worldSeed ?? null;
+  const input = el("seed-input");
+  if (seed && document.activeElement !== input) input.value = seed.value ?? "";
+  el("seed-hint").textContent = !seed
+    ? "unavailable"
+    : seed.source === "manual" ? "entered by hand · unverified" : "not set";
+  el("seed-note").textContent = seed ? seed.note : "";
+}
+
+/** One bar per saved episode, oldest first. Episodes with no learner reward are gaps, not zeros. */
+function renderRewardTrend(values) {
+  const box = el("training-reward");
+  if (!box) return;
+  box.replaceChildren();
+  const present = values.filter((value) => typeof value === "number");
+  if (values.length === 0) {
+    box.append(node("span", "hint", "Reward trend: no episodes recorded yet."));
+    return;
+  }
+  const scale = Math.max(1e-9, ...present.map((value) => Math.abs(value)));
+  const bars = document.createElement("div");
+  bars.className = "reward-bars";
+  for (const value of values) {
+    const bar = document.createElement("i");
+    if (typeof value === "number") {
+      bar.style.height = `${Math.max(4, Math.round((Math.abs(value) / scale) * 100))}%`;
+      bar.className = value < 0 ? "neg" : "pos";
+      bar.title = `reward ${num(value, 2)}`;
+    } else {
+      bar.className = "gap";
+      bar.title = "no learner reward for this episode";
+    }
+    bars.append(bar);
+  }
+  const mean = present.length ? present.reduce((sum, value) => sum + value, 0) / present.length : null;
+  box.append(
+    bars,
+    node("span", "hint", `Reward, last ${values.length} episodes${mean === null ? "" : ` · mean ${num(mean, 2)}`}`),
+  );
+}
+
+function renderTraining(snapshot) {
+  const training = snapshot.training ?? null;
+  const metrics = el("training-metrics");
+  if (!metrics) return;
+  clear(metrics);
+  const setEnabled = (selector, allowed) => {
+    const button = document.querySelector(selector);
+    if (button instanceof HTMLButtonElement) button.disabled = state.busy || !allowed;
+  };
+  if (!training) {
+    el("training-hint").textContent = "unavailable";
+    metrics.append(metric("Training", "unavailable", { note: "this host has no training support" }));
+    for (const selector of ['[data-command="pauseTraining"]', '[data-command="resumeTraining"]', '[data-command="stopTraining"]', '[data-command="evaluateTraining"]', "#training-start"]) setEnabled(selector, false);
+    return;
+  }
+  const status = training.status;
+  const active = status === "running" || status === "paused" || status === "evaluating";
+  const stage = training.stage;
+  el("training-hint").textContent = training.updatedAt ? `updated ${ago(training.updatedAt)}` : "no run yet";
+  const suspended = renderingSuspended(snapshot, state.headless);
+  el("training-note").textContent = `${training.note}${training.stopReason ? ` Last stop: ${training.stopReason}` : ""}`;
+  el("training-mode-note").textContent = state.headless
+    ? "Headless: the offline simulator runs in a separate process. No Minecraft window and no browser 3D rendering while it runs. Live agent observation is not affected."
+    : "Rendering on: the 3D world view is drawn during training. Training still runs on the offline simulator, not in the browser.";
+  const errorBox = el("training-error");
+  errorBox.hidden = !training.lastError;
+  errorBox.textContent = training.lastError ? `Training error: ${training.lastError}` : "";
+  metrics.append(
+    metric("Status", status, {
+      tone: status === "failed" || status === "interrupted" ? "bad" : status === "running" ? "good" : status === "paused" ? "warn" : null,
+      note: training.processAlive ? `separate process · pid ${training.pid}` : "no training process",
+    }),
+    metric("Episodes", `${training.episodesTotal} / ${training.episodeBudget}`, { note: "trained so far / budget" }),
+    metric("Stage", stage ? `${stage.index + 1} of ${stage.total} · ${stage.id}` : "complete", { note: stage ? stage.label : null }),
+    metric("Stage success", stage && stage.successRate !== null ? pct(stage.successRate) : "—", {
+      note: stage ? `passes at ${pct(stage.passRate)} after ${training.episodesPerStage ?? "?"}+ episodes` : null,
+    }),
+    metric("Recent success", pct(training.recentSuccessRate), { note: "last episodes in the saved state" }),
+    metric("Recent reward", num(training.recentMeanReward, 2), { note: "mean per-task reward from the learner" }),
+    metric("Checkpoints", String(training.checkpoints.length), { note: training.checkpoints[0]?.id ?? "none yet" }),
+    metric("Active time", training.activeSeconds ? `${num(training.activeSeconds, 1)} s` : "0 s", {
+      note: training.maxMinutes ? `of a ${training.maxMinutes} min budget · pauses excluded` : "episode time · pauses excluded",
+    }),
+    metric("Throughput", training.episodesPerMinute === null ? "—" : `${num(training.episodesPerMinute, 1)} / min`, {
+      note: "episodes per active minute, lifetime",
+    }),
+    metric("3D view", suspended ? "paused" : "drawn", {
+      tone: suspended ? "warn" : null,
+      note: suspended ? "headless training is running" : state.headless ? "headless, idle" : "rendering on",
+    }),
+  );
+  renderRewardTrend(training.rewardTrend ?? []);
+  const bar = el("training-progress");
+  const ratio = stage && stage.successRate !== null ? Math.min(1, Math.max(0, stage.successRate)) : 0;
+  bar.style.width = `${Math.round(ratio * 100)}%`;
+  bar.parentElement?.setAttribute("aria-valuenow", String(Math.round(ratio * 100)));
+  setEnabled('[data-command="pauseTraining"]', status === "running");
+  setEnabled('[data-command="resumeTraining"]', status === "paused" || status === "interrupted");
+  setEnabled('[data-command="stopTraining"]', status === "running" || status === "paused");
+  setEnabled('[data-command="evaluateTraining"]', !active && training.checkpoints.length > 0);
+  setEnabled("#training-start", !active);
+
+  const body = el("training-episodes-table").tBodies[0];
+  body.replaceChildren();
+  for (const episode of training.recentEpisodes) {
+    const row = document.createElement("tr");
+    row.append(
+      node("td", "mono", String(episode.index)),
+      node("td", null, episode.stageId),
+      node("td", "mono", episode.scenarioId),
+      node("td", episode.success ? "ok" : "no", episode.success ? "success" : `${episode.status}${episode.failureCode ? ` · ${episode.failureCode}` : ""}`),
+      node("td", null, `${episode.actions} (${episode.wastedActions} wasted)`),
+      node("td", null, episode.reward === null ? "—" : num(episode.reward, 2)),
+    );
+    body.append(row);
+  }
+  if (!body.childElementCount) body.append(emptyRow(6, "No training episodes yet."));
+
+  const checkpoints = el("training-checkpoints");
+  checkpoints.replaceChildren();
+  for (const checkpoint of training.checkpoints) {
+    checkpoints.append(node("div", "list-item", `${checkpoint.id} · ${checkpoint.stageId} · ${checkpoint.episodes} episodes · ${checkpoint.weightedContexts} weighted contexts`));
+  }
+
+  const evaluation = el("training-evaluation");
+  evaluation.replaceChildren();
+  const last = training.lastEvaluation;
+  if (last) {
+    const deltas = last.deltas;
+    evaluation.append(
+      node("div", "list-item", `${last.verdict === "promotable" ? "Promotable" : "Not promotable"} · ${last.checkpointId} · ${clock(last.generatedAt)}`),
+      node("div", "list-item", `Held-out success: ${pct(last.successRate.baseline)} baseline → ${pct(last.successRate.candidate)} checkpoint`
+        + (deltas ? ` · median actions ${num(deltas.medianActions, 1)} · wasted actions ${num(deltas.meanWastedActions, 2)} · unsafe ${deltas.unsafeActions} · deaths ${deltas.deaths}` : "")),
+    );
+    for (const reason of last.reasons ?? []) evaluation.append(node("div", "list-item", reason));
+  }
+  if (training.lastError) evaluation.append(node("div", "list-item bad", `Last error: ${training.lastError}`));
+}
+
+function renderLoopPerformance(snapshot, container) {
+  const loop = snapshot.agentLoop ?? null;
+  const ms = (value) => (typeof value === "number" && Number.isFinite(value) ? `${num(value, 0)} ms` : "—");
+  if (!loop) {
+    container.append(metric("Observation loop", "unavailable", { note: "this host does not run the fast loop" }));
+    return;
+  }
+  const observation = loop.observation;
+  container.append(
+    metric("Observation rate", observation.frequencyHz === null ? "—" : `${num(observation.frequencyHz, 2)} Hz`, {
+      tone: !loop.running ? null : observation.frequencyHz !== null && observation.frequencyHz >= 0.8 ? "good" : "warn",
+      note: `${observation.total} total · ${observation.errors} errors · ${observation.skippedTicks} skipped${loop.running ? "" : " · loop stopped"}`,
+    }),
+    metric("Observation age", ms(observation.ageMs), {
+      tone: observation.stale ? "bad" : "good",
+      note: observation.stale ? "stale: older than the decision bound" : "fresh",
+    }),
+    metric("Interval p95", ms(observation.intervalMs.p95Ms), { note: `observation duration p95 ${ms(observation.durationMs.p95Ms)}` }),
+    metric("Decision p95", ms(loop.decisionMs.p95Ms), { note: `${loop.decisionMs.count} decisions` }),
+    metric("Action p95", ms(loop.actionMs.p95Ms), { note: `${loop.actionMs.count} actions` }),
+    metric("Reaction p95", ms(loop.reactionMs.p95Ms), { note: `urgent → dispatch · ${loop.urgent.events} urgent events` }),
+    metric("Interrupts", String(loop.urgent.interruptsDispatched), { note: `${loop.urgent.interruptsSkippedProtected} skipped (protected action)` }),
+    metric("Idle share", loop.idle.idleFraction === null ? "—" : `${num(loop.idle.idleFraction * 100, 0)}%`, { note: "time with no task running" }),
+  );
+  const body = el("loop-targets")?.tBodies[0];
+  if (!body) return;
+  body.replaceChildren();
+  for (const target of loop.targets ?? []) {
+    const row = document.createElement("tr");
+    const status = target.met === null ? "no data" : target.met ? "met" : "missed";
+    row.append(
+      node("td", null, target.label),
+      node("td", "mono", `≤ ${target.targetMs} ms`),
+      node("td", "mono", ms(target.measuredMs)),
+      node("td", target.met === false ? "no" : target.met ? "ok" : null, status),
+    );
+    body.append(row);
+  }
+}
+
 function renderPerformance(snapshot) {
   const metrics = el("performance-metrics");
   if (!metrics) return;
   clear(metrics);
+  renderLoopPerformance(snapshot, metrics);
   const runtime = snapshot.performance ?? null;
   const perception = snapshot.world?.perception ?? null;
   const mb = (bytes) => typeof bytes === "number" && Number.isFinite(bytes) ? `${num(bytes / (1024 * 1024), 1)} MB` : "—";
@@ -985,8 +1229,207 @@ function vital(label, value, ratio, tone, className) {
  * WebGL geometry sourced only from current observed blocks plus wireframe, last-seen memory markers.
  * Unknown and unloaded terrain is never synthesized.
  */
-function drawMinimap(world, options) {
+function drawMinimap(world, options, snapshot = state.snapshot) {
+  const canvas = el("minimap");
+  const suspended = renderingSuspended(snapshot, state.headless);
+  el("render-notice").hidden = !suspended;
+  setWorldViewSuspended(suspended);
+  if (suspended) {
+    // Headless: no WebGL work at all while training runs. The last frame is kept but marked as not live.
+    if (canvas) {
+      canvas.dataset.live = "0";
+      canvas.dataset.renderer = "suspended";
+    }
+    return;
+  }
   drawWorldView(world, options ?? { stale: true, provenance: "world-memory" });
+}
+
+/* ------------------------------------------------------------------ improvement roadmap */
+
+function roadmapPill(text, tone) {
+  return node("span", `roadmap-pill${tone ? ` ${tone}` : ""}`, text);
+}
+
+function roadmapStatusTone(status) {
+  if (status === "verified") return "good";
+  if (status === "blocked") return "bad";
+  if (status === "in-progress" || status === "planned") return "warn";
+  return null;
+}
+
+let roadmapSignature = null;
+
+function renderRoadmap(snapshot) {
+  const roadmap = snapshot.roadmap ?? null;
+  const itemsBox = el("roadmap-items");
+  const next = el("roadmap-next");
+  if (!roadmap) {
+    itemsBox.replaceChildren();
+    roadmapSignature = null;
+    el("roadmap-hint").textContent = "unavailable";
+    next.replaceChildren(node("span", "hint", "The roadmap is not available in this host."));
+    el("roadmap-note").textContent = "";
+    el("roadmap-sources").replaceChildren();
+    return;
+  }
+  const open = roadmap.items.filter((item) => !isClosed(item)).length;
+  el("roadmap-hint").textContent = roadmap.evidenceAt
+    ? `evidence measured ${ago(roadmap.evidenceAt)} · ${open} open`
+    : "no evidence yet";
+  el("roadmap-note").textContent = roadmap.note;
+
+  if (roadmap.next) {
+    next.replaceChildren(
+      node("span", "roadmap-next-label", "Next recommended task"),
+      node("strong", null, roadmap.next.title),
+      node("span", "hint", roadmap.next.summary),
+    );
+  } else {
+    next.replaceChildren(node("span", "roadmap-next-label", "Next recommended task"), node("span", "hint", "Nothing open to recommend right now."));
+  }
+
+  const sources = el("roadmap-sources");
+  sources.replaceChildren();
+  for (const source of roadmap.sources ?? []) {
+    const chip = node("span", `source-chip ${source.available ? "on" : "off"}`, `${source.available ? "✓" : "–"} ${source.name}${source.measuredAt ? ` · ${ago(source.measuredAt)}` : ""}`);
+    chip.title = source.available ? `read from ${source.path}` : `not available: ${source.path}`;
+    sources.append(chip);
+  }
+
+  const filters = {
+    category: el("roadmap-category").value,
+    kind: el("roadmap-kind").value,
+    showClosed: el("roadmap-show-closed").checked,
+  };
+  // The item list is rebuilt only when something it shows has changed. Rebuilding every poll would close any
+  // open <details> and lose focus on the controls the operator is using.
+  const signature = JSON.stringify({ items: roadmap.items, filters, busy: state.busy, error: roadmap.error });
+  if (signature === roadmapSignature) return;
+  roadmapSignature = signature;
+  itemsBox.replaceChildren();
+  if (roadmap.error) itemsBox.append(node("p", "training-error", roadmap.error));
+  const visible = filterRoadmap(roadmap.items, filters);
+  const hiddenClosed = roadmap.items.length - roadmap.items.filter((item) => !isClosed(item)).length;
+  if (roadmap.items.length === 0) {
+    itemsBox.append(node("p", "empty", "No open items. The recorded evidence does not measure any problem right now. Refresh after a new run, or record the test suite with npm run test:record."));
+  } else if (visible.length === 0) {
+    itemsBox.append(node("p", "empty", "No items match these filters."));
+  }
+  for (const [category, list] of groupByCategory(visible)) {
+    const heading = node("h3", "roadmap-group", `${category.replace("-", " ")} · ${list.length}`);
+    itemsBox.append(heading);
+    for (const item of list) itemsBox.append(roadmapItemView(item));
+  }
+  if (!filters.showClosed && hiddenClosed > 0) {
+    itemsBox.append(node("p", "hint", `${hiddenClosed} dismissed or verified item(s) hidden. Tick “Show dismissed and verified” to see them.`));
+  }
+}
+
+function roadmapItemView(item) {
+  const article = document.createElement("article");
+  article.className = `roadmap-item kind-${item.kind} status-${item.status}`;
+  article.dataset.fingerprint = item.fingerprint;
+
+  const head = node("div", "roadmap-head");
+  head.append(
+    node("strong", null, item.title),
+    roadmapPill(ROADMAP_KIND_LABELS[item.kind] ?? item.kind, item.kind === "defect" ? "bad" : item.kind === "idea" ? null : "warn"),
+    roadmapPill(ROADMAP_STATUS_LABELS[item.status] ?? item.status, roadmapStatusTone(item.status)),
+    roadmapPill(`score ${num(item.score, 2)}`, null),
+  );
+  if (item.pinned) head.append(roadmapPill("pinned", "good"));
+  if (item.reopenedCount > 0) head.append(roadmapPill(`reopened ×${item.reopenedCount}`, "warn"));
+  article.append(head);
+
+  article.append(node("p", "roadmap-explain", item.explanation));
+
+  const facts = node("dl", "roadmap-facts");
+  const pairs = [
+    ["Impact", `${item.impact} / 5`],
+    ["Urgency", `${item.urgency} / 5`],
+    ["Confidence", `${Math.round(item.confidence * 100)}%`],
+    ["Effort", ["", "small", "medium", "large"][item.effort] ?? String(item.effort)],
+    ["Priority", item.priority === null ? "auto" : String(item.priority)],
+  ];
+  for (const [label, value] of pairs) facts.append(node("dt", null, label), node("dd", "mono", value));
+  article.append(facts);
+
+  article.append(node("p", "roadmap-benefit", `Expected benefit: ${item.expectedBenefit}`));
+  if (item.dependencies.length) {
+    article.append(node("p", "hint", `Depends on: ${item.dependencies.join("; ")}`));
+  }
+  if (item.verification) article.append(node("p", "hint", `Verification: ${item.verification}`));
+
+  const evidence = document.createElement("details");
+  evidence.append(node("summary", null, `Evidence (${item.evidence.length})`));
+  const evidenceList = node("ul", "roadmap-evidence");
+  for (const entry of item.evidence) {
+    evidenceList.append(node("li", null, `${entry.metric}: ${entry.value} — ${entry.source}${entry.measuredAt ? `, ${ago(entry.measuredAt)}` : ", a fact about the code, not a measurement"}`));
+  }
+  evidence.append(evidenceList);
+  article.append(evidence);
+
+  const history = document.createElement("details");
+  history.append(node("summary", null, `History (${item.history.length})`));
+  const historyList = node("ul", "roadmap-evidence");
+  for (const entry of [...item.history].reverse()) historyList.append(node("li", null, `${ago(entry.at)} · ${entry.event}`));
+  history.append(historyList);
+  article.append(history);
+
+  const actions = node("div", "roadmap-actions");
+  for (const action of roadmapActionsFor(item)) {
+    const button = node("button", "btn", ROADMAP_ACTION_LABELS[action] ?? action);
+    button.type = "button";
+    button.dataset.roadmapAction = action;
+    button.disabled = state.busy;
+    actions.append(button);
+  }
+  const pinButton = node("button", "btn", item.pinned ? "Unpin" : "Pin to top");
+  pinButton.type = "button";
+  pinButton.dataset.roadmapAction = item.pinned ? "unpin" : "pin";
+  pinButton.disabled = state.busy || isClosed(item);
+  actions.append(pinButton);
+  if (!isClosed(item)) {
+    const priority = document.createElement("select");
+    priority.dataset.roadmapPriority = "1";
+    priority.setAttribute("aria-label", `Priority for ${item.title}`);
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "Priority: auto";
+    priority.append(auto);
+    for (let value = 1; value <= 5; value += 1) {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = `Priority ${value}`;
+      if (item.priority === value) option.selected = true;
+      priority.append(option);
+    }
+    priority.disabled = state.busy;
+    actions.append(priority);
+  }
+  article.append(actions);
+
+  for (const button of actions.querySelectorAll("button[data-roadmap-action]")) {
+    button.addEventListener("click", () => {
+      const action = button.dataset.roadmapAction;
+      const payload = { fingerprint: item.fingerprint, action };
+      if (ROADMAP_ACTIONS_WITH_NOTE.has(action)) {
+        const note = window.prompt(`Optional note for “${item.title}”, saved in its history:`, "");
+        if (note === null) return;
+        if (note.trim()) payload.note = note.trim();
+      }
+      void sendCommand("roadmapAction", payload);
+    });
+  }
+  const priority = actions.querySelector("select[data-roadmap-priority]");
+  if (priority) {
+    priority.addEventListener("change", () => {
+      if (priority.value === "") return;
+      void sendCommand("roadmapAction", { fingerprint: item.fingerprint, action: "prioritize", value: Number(priority.value) });
+    });
+  }
+  return article;
 }
 
 function renderSkills(snapshot) {
@@ -1078,8 +1521,13 @@ async function loadSnapshot(force) {
   }
 }
 
+/** Until this time, the page polls at the running cadence after a training command (see desiredPollDelay). */
+let trainingSettlingUntil = 0;
+const TRAINING_COMMANDS = new Set(["startTraining", "pauseTraining", "resumeTraining", "stopTraining"]);
+
 async function sendCommand(type, payload) {
   if (state.busy) return;
+  if (TRAINING_COMMANDS.has(type)) trainingSettlingUntil = Date.now() + 10_000;
   state.busy = true;
   render();
   toast(`${type}: waiting for the agent…`);
@@ -1158,15 +1606,51 @@ function wireControls() {
     input.value = "";
     void sendCommand("chat", message);
   });
-  el("budget-form").addEventListener("submit", (event) => {
+  el("seed-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    const value = Number(el("budget-input").value);
-    if (!Number.isInteger(value) || value < 1) {
-      toast("setActionBudget: enter a whole number of at least 1.", "bad");
+    void sendCommand("setWorldSeed", el("seed-input").value.trim());
+  });
+  el("training-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const episodesPerStage = Number(el("training-episodes").value);
+    if (!Number.isInteger(episodesPerStage) || episodesPerStage < 1 || episodesPerStage > 200) {
+      toast("startTraining: episodes per stage must be a whole number from 1 to 200.", "bad");
       return;
     }
-    void sendCommand("setActionBudget", { maxActions: value });
+    const payload = { episodesPerStage, fresh: el("training-fresh").checked };
+    const budgets = [
+      ["training-max-episodes", "maxEpisodes", "Episode budget", 1, 5000],
+      ["training-minutes", "maxMinutes", "Time budget", 1, 1440],
+    ];
+    for (const [id, key, label, min, max] of budgets) {
+      const raw = el(id).value.trim();
+      if (raw === "") continue;
+      const value = Number(raw);
+      if (!Number.isInteger(value) || value < min || value > max) {
+        toast(`startTraining: ${label.toLowerCase()} must be a whole number from ${min} to ${max}, or empty.`, "bad");
+        return;
+      }
+      payload[key] = value;
+    }
+    if (payload.fresh && !window.confirm("Start over deletes the saved training experience and checkpoints. Continue?")) return;
+    void sendCommand("startTraining", payload);
   });
+  el("training-headless").checked = state.headless;
+  el("training-headless").addEventListener("change", (event) => {
+    state.headless = event.currentTarget.checked;
+    try {
+      localStorage.setItem(HEADLESS_STORAGE_KEY, state.headless ? "1" : "0");
+    } catch {
+      /* the choice still applies for this page */
+    }
+    if (state.snapshot) render();
+  });
+  el("roadmap-refresh").addEventListener("click", () => void sendCommand("refreshRoadmap"));
+  for (const id of ["roadmap-category", "roadmap-kind", "roadmap-show-closed"]) {
+    el(id).addEventListener("change", () => {
+      if (state.snapshot) renderRoadmap(state.snapshot);
+    });
+  }
   const theme = el("theme-toggle");
   if (theme) {
     theme.addEventListener("click", () => {
@@ -1228,6 +1712,9 @@ function wireControls() {
 /** How hard the page should look at the agent right now. */
 function desiredPollDelay(snapshot) {
   if (typeof document !== "undefined" && document.hidden) return POLL_HIDDEN_MS;
+  // A training command returns before the trainer process has written its own state, and a live trainer changes
+  // the buttons on every episode. Poll at the running cadence while either applies, so the controls follow the process.
+  if (Date.now() < trainingSettlingUntil || snapshot?.training?.processAlive) return POLL_RUNNING_MS;
   const agent = snapshot?.agent ?? null;
   if (!agent) return POLL_IDLE_MS;
   if (agent.state === "running" || agent.state === "stopping" || state.busy) return POLL_RUNNING_MS;

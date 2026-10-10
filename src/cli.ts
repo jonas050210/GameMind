@@ -803,7 +803,7 @@ async function runSimulatedScenario(
       learner,
       worldKey: `${scenarioId}#${seed}`,
       offlineNote: "Simulated world: this is the offline evaluation adapter, not a Minecraft server.",
-      extraRunnerOptions: { clock: () => adapter.simulatedNowMs },
+      extraRunnerOptions: { clock: () => adapter.simulatedNowMs, provenance: "simulator-demo" },
       report,
     });
     const result = await run(task);
@@ -896,7 +896,7 @@ async function runMinecraft(
           worldKey,
           memory: persistentMemory,
           offlineNote: null,
-          extraRunnerOptions: {},
+          extraRunnerOptions: { provenance: "live" },
           report: (result, source) =>
             console.log(JSON.stringify({ type: "task-report", startedBy: source, ...result, ...failureClassification(result) }, null, 2)),
         })

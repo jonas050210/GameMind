@@ -97,7 +97,8 @@ export const DEFAULT_SAFETY_POLICY: SafetyPolicy = {
   allowlist: [],
   denylist: [],
   optedInCapabilities: [],
-  maxActionsPerRun: 100,
+  // Runaway guard only, not a task budget: tasks end by completion, timeout, stuck detection or stop.
+  maxActionsPerRun: 5000,
   perCapabilityMaxPerRun: {},
   cooldownMsByCapability: {},
   protectedHealthFloor: null,

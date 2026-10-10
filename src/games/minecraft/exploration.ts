@@ -42,6 +42,13 @@ export function explorationWaypointKey(cellX: number, cellZ: number): string {
   return `explore:${cellX},${cellZ}`;
 }
 
+/** Centre of the coverage cell named by an exploration target key, or null for any other key. */
+export function explorationKeyCenter(key: string): { x: number; z: number } | null {
+  const match = /^explore:(-?\d+),(-?\d+)$/.exec(key);
+  if (!match) return null;
+  return coverageCellCenter(Number(match[1]), Number(match[2]));
+}
+
 function scoreWaypoints(memory: WorldMemory, request: ExplorationRequest, minLeg: number): ExplorationWaypoint | null {
   const ring = Math.ceil(request.maxLeg / 8) + 1;
   const fromCellX = coverageCellOf(request.from.x);
@@ -54,6 +61,8 @@ function scoreWaypoints(memory: WorldMemory, request: ExplorationRequest, minLeg
       if (memory.isCellExplored(cellX, cellZ)) continue;
       const key = explorationWaypointKey(cellX, cellZ);
       if (request.excludedKeys.has(key)) continue;
+      // A frontier where a path was already refused stays refused: skip the whole neighbourhood, not only the cell.
+      if (memory.isInRefusedArea(coverageCellCenter(cellX, cellZ))) continue;
       const center = coverageCellCenter(cellX, cellZ);
       const distance = Math.hypot(center.x - request.from.x, center.z - request.from.z);
       if (distance < minLeg || distance > request.maxLeg) continue;

@@ -1,3 +1,4 @@
+import { heldItems } from "./inventory-accounting.js";
 import type { MinecraftObservation } from "./observation.js";
 import { isMinecraftFoodName } from "./recipes.js";
 import { bestWeapon } from "./combat.js";
@@ -27,10 +28,11 @@ import { ProgressTracker, type MilestoneId, type ProgressSnapshot } from "./prog
  * Progress-based continuation: if the agent is making progress, the task continues.
  */
 
-// Raised from 100 to 300 to support multi-step progression chains.
+// This is a runaway guard, not a progress budget: the Control Center has no action cap. Stuck detection,
+// per-subgoal cooldowns and the per-action timeouts stop unproductive work long before it is reached.
 // A full stone-age progression (wood → planks → sticks → table → pickaxe → mine → stone pickaxe)
-// requires ~40-60 actions minimum. With exploration overhead, 300 provides adequate headroom.
-export const MAX_AUTONOMOUS_ACTIONS = 300;
+// requires about 40-60 actions; the guard is far above that so it only ends a task that is genuinely runaway.
+export const MAX_AUTONOMOUS_ACTIONS = 5_000;
 
 // 5 minutes (at 20 TPS) to allow long progression chains to complete
 export const MAX_AUTONOMOUS_DURATION = 300_000;
@@ -54,7 +56,7 @@ export function generateAutonomousTask(
 
 /** Build a progress snapshot without a tracker (for backward compatibility). */
 function buildFallbackProgress(state: MinecraftObservation): ProgressSnapshot {
-  const items = state.inventory;
+  const items = heldItems(state);
   const count = (names: string[]) =>
     items.filter((i) => names.some((n) => i.name === n)).reduce((s, i) => s + i.count, 0);
   const has = (names: string[]) => items.some((i) => names.some((n) => i.name === n));

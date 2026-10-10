@@ -23,6 +23,7 @@ interface Recorded {
 
 interface Viewer {
   readonly draw: (world: unknown, options?: unknown) => void;
+  readonly setSuspended: (value: boolean) => void;
   readonly dataset: Record<string, string>;
   readonly recorded: Recorded;
 }
@@ -124,7 +125,7 @@ async function loadViewer(options: { webgl?: boolean; width?: number; height?: n
   moduleCounter += 1;
   // A data: URL is cached by its text, so a per-load marker is what gives each test a fresh module.
   const url = `data:text/javascript;base64,${Buffer.from(`${source}\n// instance ${moduleCounter}\n`).toString("base64")}`;
-  let mod: { drawWorldView: (world: unknown, options?: unknown) => void };
+  let mod: { drawWorldView: (world: unknown, options?: unknown) => void; setWorldViewSuspended: (value: boolean) => void };
   try {
     mod = await import(url);
   } finally {
@@ -134,6 +135,16 @@ async function loadViewer(options: { webgl?: boolean; width?: number; height?: n
   const viewer: Viewer = {
     dataset,
     recorded,
+    setSuspended: (value) => {
+      (globalThis as Record<string, unknown>).document = { getElementById: (id: string) => (id === "minimap" ? canvas : null) };
+      (globalThis as Record<string, unknown>).window = { devicePixelRatio: 1 };
+      try {
+        mod.setWorldViewSuspended(value);
+      } finally {
+        (globalThis as Record<string, unknown>).document = previous.document;
+        (globalThis as Record<string, unknown>).window = previous.window;
+      }
+    },
     draw: (world, viewerOptions) => {
       (globalThis as Record<string, unknown>).document = { getElementById: (id: string) => (id === "minimap" ? canvas : null) };
       (globalThis as Record<string, unknown>).window = { devicePixelRatio: 1 };
@@ -264,4 +275,22 @@ test("WebGL is asked for once, not on every frame, when it is unavailable", asyn
   );
   assert.equal(viewer.dataset.renderer, "fallback", "the panel records that the 2D view is in use");
   assert.ok(viewer.recorded.contextCalls.includes("2d"), "the fallback still paints the observed blocks");
+});
+
+test("headless training suspends every draw path: a suspended view submits nothing, and the last frame returns on resume", async () => {
+  const viewer = await loadViewer();
+  viewer.draw(WORLD, { stale: false, provenance: "live-observation" });
+  const drawnBefore = viewer.recorded.drawArrays.length;
+  const matricesBefore = viewer.recorded.matrices.length;
+  assert.ok(drawnBefore > 0, "the view draws normally before suspension");
+
+  viewer.setSuspended(true);
+  // Every caller goes through drawWorldView: the snapshot path, the camera handlers and a resize.
+  for (let i = 0; i < 5; i += 1) viewer.draw(WORLD, { stale: false, provenance: "live-observation" });
+  viewer.draw(WORLD, { stale: true, provenance: "world-memory" });
+  assert.equal(viewer.recorded.drawArrays.length, drawnBefore, "no geometry is submitted while suspended");
+  assert.equal(viewer.recorded.matrices.length, matricesBefore, "no camera matrix is built while suspended");
+
+  viewer.setSuspended(false);
+  assert.ok(viewer.recorded.drawArrays.length > drawnBefore, "resuming redraws the current view");
 });

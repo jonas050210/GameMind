@@ -1,6 +1,7 @@
 import pino from "pino";
 import { MemoryTraceSink, TraceRecorder } from "../../core/trace.js";
 import { ExperienceLearner } from "../../core/learning/learner.js";
+import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { createMinecraftAgent } from "../../games/minecraft/create-agent.js";
 import { MinecraftTaskDecisionModel } from "../../games/minecraft/decision-model.js";
 import { MinecraftTaskRunner, type MinecraftTaskResult } from "../../games/minecraft/task-runner.js";
@@ -96,6 +97,8 @@ export interface EvaluationRunOptions {
   readonly runId?: string;
   /** Overrides the scenario's own combat opt-in (used by the policy comparison). */
   readonly allowCombat?: boolean;
+  /** Provenance written on each recorded episode. Evaluation is the default; training passes "training". */
+  readonly provenance?: EpisodeProvenance;
 }
 
 export async function runEvaluationOnce(
@@ -115,6 +118,7 @@ export async function runEvaluationOnce(
     ...(options.learner ? { learner: options.learner } : {}),
     ...(options.worldKey ? { worldKey: options.worldKey } : {}),
     ...(options.runId ? { runId: options.runId } : {}),
+    provenance: options.provenance ?? "simulator-eval",
     ...(allowCombat ? { allowCombat: true } : {}),
   });
   const task = scenario.task();

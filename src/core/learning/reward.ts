@@ -25,6 +25,12 @@ export interface RewardBreakdown {
   readonly safety: number;
   /** Information value: first encounter with a context or resource. */
   readonly exploration: number;
+  /**
+   * Penalties for effort that bought nothing: repeated failures on one target, prolonged inactivity without
+   * progress, wandering that does not close the distance to the goal, and consumed resources that produced
+   * nothing. A recovery after earlier failures earns a small bonus here, so the term is not only negative.
+   */
+  readonly waste: number;
   /** Total of the above. */
   readonly total: number;
 }
@@ -52,6 +58,11 @@ export interface RewardInput {
   readonly taskTargetItem?: string | null;
   readonly taskTargetCount?: number | undefined;
   readonly taskItemsCollected?: number | undefined;
+
+  /** Attempts already spent on this target in the run (for repeated-failure penalties). */
+  readonly attemptsOnTarget?: number;
+  /** Distance to the target before the action; with distanceAfter it shows whether the agent got closer. */
+  readonly distanceBefore?: number | null;
 }
 
 export interface RewardConfig {
@@ -62,6 +73,7 @@ export interface RewardConfig {
     readonly efficiency: number;
     readonly safety: number;
     readonly exploration: number;
+    readonly waste: number;
   };
   /** Duration below this (ms) gets the full efficiency bonus; above gets zero. */
   readonly fastDurationMs: number;
@@ -84,6 +96,7 @@ export const DEFAULT_REWARD_CONFIG: RewardConfig = {
     efficiency: 0.5,
     safety: 1.0,
     exploration: 0.2,
+    waste: 1.0,
   },
   fastDurationMs: 500,
   slowDurationMs: 5_000,
@@ -187,6 +200,30 @@ function computeSafety(input: RewardInput, config: RewardConfig): number {
   return clamp(value, -config.componentCap, config.componentCap);
 }
 
+/** Effort that produced nothing. Every term is named so a trace can say which penalty applied. */
+function computeWaste(input: RewardInput, config: RewardConfig): number {
+  const progressed = input.progress || (input.status === "succeeded" && input.itemsGained > 0);
+  let value = 0;
+  if (!progressed) {
+    // Trying the same target again and again without progress: each extra attempt costs more.
+    const attempts = input.attemptsOnTarget ?? 0;
+    if (attempts >= 2) value -= Math.min(1.0, 0.3 * (attempts - 1));
+    // A long action that changed nothing is inactivity, not work.
+    if (input.durationMs >= config.slowDurationMs) value -= 0.5;
+    // Movement that did not close the distance to the goal is wandering.
+    const movementGoal = input.goalClass === "explore" || input.goalClass === "approach" || input.goalClass === "recheck";
+    if (movementGoal && input.distanceBefore != null && input.distanceAfter != null && input.distanceAfter >= input.distanceBefore - 0.5) {
+      value -= 0.3;
+    }
+    // Items consumed by a failed action are resource waste.
+    if (input.itemsConsumed > 0) value -= 0.1 * Math.min(5, input.itemsConsumed);
+  } else if ((input.attemptsOnTarget ?? 0) >= 1) {
+    // Recovered: the target was reached after earlier failures.
+    value += 0.3;
+  }
+  return clamp(value, -config.componentCap, config.componentCap);
+}
+
 function computeExploration(input: RewardInput, config: RewardConfig): number {
   // Exploration is rewarded only for explore/approach goals that succeeded
   if (input.goalClass !== "explore" && input.goalClass !== "approach") return 0;
@@ -205,13 +242,15 @@ export function computeReward(
   const efficiency = computeEfficiency(input, config);
   const safety = computeSafety(input, config);
   const exploration = computeExploration(input, config);
+  const waste = computeWaste(input, config);
 
   const total =
     config.weights.survival * survival +
     config.weights.progress * progress +
     config.weights.efficiency * efficiency +
     config.weights.safety * safety +
-    config.weights.exploration * exploration;
+    config.weights.exploration * exploration +
+    config.weights.waste * waste;
 
   const round4 = (v: number) => Math.round(v * 10_000) / 10_000;
   return {
@@ -220,6 +259,7 @@ export function computeReward(
     efficiency: round4(efficiency),
     safety: round4(safety),
     exploration: round4(exploration),
+    waste: round4(waste),
     total: round4(total),
   };
 }

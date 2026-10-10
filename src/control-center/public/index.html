@@ -94,7 +94,7 @@
             <span class="hint" id="run-hint"></span>
           </header>
           <div class="metrics" id="run-metrics"></div>
-          <div class="progress" role="progressbar" aria-label="Task action budget" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
+          <div class="progress" role="progressbar" aria-label="Task progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="run-progress"></span></div>
           <div class="controls">
             <button data-command="pause" data-payload="paused from the Control Center" class="btn">⏸ Pause</button>
             <button data-command="resume" class="btn primary">▶ Resume</button>
@@ -107,11 +107,6 @@
               <input type="checkbox" id="combat-toggle" data-command="enableCombat" />
               <span class="track" aria-hidden="true"></span><span class="switch-label">⚔ Combat armed</span>
             </label>
-            <form class="budget" id="budget-form">
-              <label for="budget-input">Action cap</label>
-              <input id="budget-input" type="number" min="1" max="100" step="1" inputmode="numeric" />
-              <button class="btn small" type="submit">Set</button>
-            </form>
           </div>
         </article>
 
@@ -121,6 +116,58 @@
             <span class="hint" id="blocker-note"></span>
           </header>
           <div class="blocker" id="blocker" data-kind="none"></div>
+        </article>
+
+        <article class="card objective-card">
+          <header class="card-head">
+            <div><span class="section-index">02b / OBJECTIVE</span><h2>Objective &amp; subgoal</h2></div>
+            <span class="hint" id="objective-hint"></span>
+          </header>
+          <div id="objective-panel" class="objective"></div>
+        </article>
+
+        <article class="card training-card" id="training-card">
+          <header class="card-head">
+            <div><span class="section-index">13 / TRAINING</span><h2>Training</h2></div>
+            <span class="hint" id="training-hint"></span>
+          </header>
+          <p class="note" id="training-note"></p>
+          <div class="training-error" id="training-error" role="alert" hidden></div>
+          <div class="metrics" id="training-metrics"></div>
+          <div class="training-reward" id="training-reward" aria-label="Reward per episode, oldest to newest"></div>
+          <div class="progress" role="progressbar" aria-label="Current stage success rate" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="training-progress"></span></div>
+          <form class="training-form" id="training-form">
+            <label for="training-episodes">Episodes per stage</label>
+            <input id="training-episodes" type="number" min="1" max="200" step="1" value="8" inputmode="numeric" />
+            <label for="training-max-episodes">Episode budget <span class="hint">optional</span></label>
+            <input id="training-max-episodes" type="number" min="1" max="5000" step="1" placeholder="from stages" inputmode="numeric" />
+            <label for="training-minutes">Time budget, minutes <span class="hint">optional</span></label>
+            <input id="training-minutes" type="number" min="1" max="1440" step="1" placeholder="no limit" inputmode="numeric" />
+            <label class="switch">
+              <input type="checkbox" id="training-headless" checked />
+              <span class="track" aria-hidden="true"></span><span class="switch-label">Headless</span>
+            </label>
+            <p class="note training-mode-note" id="training-mode-note">Headless: offline simulator in a separate process. No Minecraft window and no browser 3D rendering while it runs.</p>
+            <label class="switch">
+              <input type="checkbox" id="training-fresh" />
+              <span class="track" aria-hidden="true"></span><span class="switch-label">Start over</span>
+            </label>
+            <button class="btn primary" type="submit" id="training-start">▶ Start / resume</button>
+          </form>
+          <div class="controls">
+            <button data-command="pauseTraining" class="btn">⏸ Pause</button>
+            <button data-command="resumeTraining" class="btn">▶ Resume</button>
+            <button data-command="stopTraining" class="btn warn">⏹ Stop</button>
+            <button data-command="evaluateTraining" class="btn">📊 Evaluate latest checkpoint</button>
+          </div>
+          <div class="table-wrap">
+            <table id="training-episodes-table">
+              <thead><tr><th>#</th><th>Stage</th><th>Scenario</th><th>Result</th><th>Actions</th><th>Reward</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="training-checkpoints" class="list"></div>
+          <div id="training-evaluation" class="list"></div>
         </article>
 
         <article class="card task-card">
@@ -161,6 +208,20 @@
 
       <!-- CENTER COLUMN: World View + Decision + Threats -->
       <section class="column column-world">
+        <p class="note render-notice" id="render-notice" hidden>3D view paused: headless training is running, so the browser is not drawing the world. Untick Headless in Training to draw it again.</p>
+        <article class="card seed-card">
+          <header class="card-head">
+            <div><span class="section-index">06 / WORLD SEED</span><h2>World seed</h2></div>
+            <span class="hint" id="seed-hint"></span>
+          </header>
+          <form id="seed-form" class="budget">
+            <label for="seed-input">Seed</label>
+            <input id="seed-input" type="text" maxlength="64" autocomplete="off" placeholder="blank clears" />
+            <button class="btn small" type="submit">Save</button>
+          </form>
+          <p class="note" id="seed-note"></p>
+        </article>
+
         <article class="card threats-card">
           <header class="card-head">
             <div><span class="section-index">05 / THREATS</span><h2>Nearby threats</h2></div>
@@ -335,9 +396,58 @@
             <span class="hint" id="performance-hint"></span>
           </header>
           <div class="metrics performance-metrics" id="performance-metrics"></div>
+          <div class="table-wrap">
+            <table id="loop-targets">
+              <thead><tr><th>Target</th><th>Goal</th><th>Measured</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </article>
       </section>
     </main>
+
+    <section class="roadmap-band" aria-labelledby="roadmap-title">
+      <article class="card roadmap-card" id="roadmap-card">
+        <header class="card-head">
+          <div><span class="section-index">14 / ROADMAP</span><h2 id="roadmap-title">Improvement roadmap</h2></div>
+          <span class="hint" id="roadmap-hint"></span>
+          <button class="btn" type="button" id="roadmap-refresh">↻ Refresh from evidence</button>
+        </header>
+        <div class="roadmap-next" id="roadmap-next" aria-live="polite"></div>
+        <p class="note" id="roadmap-note"></p>
+        <div class="roadmap-filters" role="group" aria-label="Filter roadmap items">
+          <label>Category
+            <select id="roadmap-category">
+              <option value="">All categories</option>
+              <option value="autonomy">Autonomy</option>
+              <option value="performance">Performance</option>
+              <option value="observation">Observation</option>
+              <option value="training">Training</option>
+              <option value="navigation">Navigation</option>
+              <option value="survival">Survival</option>
+              <option value="world-knowledge">World knowledge</option>
+              <option value="reliability">Reliability</option>
+              <option value="interface">Interface usability</option>
+            </select>
+          </label>
+          <label>Kind
+            <select id="roadmap-kind">
+              <option value="">All kinds</option>
+              <option value="defect">Defect (measured)</option>
+              <option value="hypothesis">Hypothesis (cause open)</option>
+              <option value="known-limitation">Known limitation</option>
+              <option value="idea">Idea (optional)</option>
+            </select>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="roadmap-show-closed" />
+            <span class="track" aria-hidden="true"></span><span class="switch-label">Show dismissed and verified</span>
+          </label>
+        </div>
+        <div class="roadmap-sources" id="roadmap-sources"></div>
+        <div class="roadmap-items" id="roadmap-items" aria-live="polite"></div>
+      </article>
+    </section>
 
     <footer class="ops-footer" id="footer">
       <span class="status-led" aria-hidden="true"></span><span id="toast" aria-live="polite" aria-atomic="true">Ready.</span><span class="spacer"></span>

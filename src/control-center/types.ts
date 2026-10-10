@@ -23,6 +23,10 @@ export interface ControlCenterConnection {
   readonly worldAvailable: boolean;
 }
 
+import type { AgentLoopPerformance } from "../games/minecraft/runtime-metrics.js";
+import type { AutonomySnapshot } from "../games/minecraft/autonomy-controller.js";
+import type { RoadmapSnapshot } from "../roadmap/service.js";
+
 export interface ControlCenterAgent {
   readonly state: "idle" | "running" | "paused" | "tripped" | "stopping" | "stopped" | "autonomous";
   readonly taskId: string | null;
@@ -30,7 +34,6 @@ export interface ControlCenterAgent {
   readonly decisionModel: string | null;
   readonly startedAt: string | null;
   readonly actionsUsed: number;
-  readonly maxActions: number | null;
   readonly elapsedMs: number | null;
   readonly status: string | null;
   readonly failure: { readonly code: string; readonly message: string } | null;
@@ -247,8 +250,6 @@ export interface ControlCenterSafety {
   readonly actionsDenied: number;
   readonly deniedByCode: Readonly<Record<string, number>>;
   readonly optedInCapabilities: readonly string[];
-  /** Hard per-run action ceiling enforced by the broker, independent of the task's own budget. */
-  readonly maxActionsPerRun: number;
   readonly world: {
     readonly health: number | null;
     readonly food: number | null;
@@ -447,8 +448,103 @@ export interface ControlCenterProgression {
   };
 }
 
+/**
+ * The world seed as the operator entered it. It is never auto-detected (the live session does not expose it
+ * reliably), and nothing derived from it is shown as observed: `verified` stays false until a real check.
+ */
+export interface ControlCenterWorldSeed {
+  readonly value: string | null;
+  readonly source: "manual" | "unset";
+  readonly verified: false;
+  readonly note: string;
+}
+
+export interface ControlCenterTrainingDeltas {
+  readonly successRate: number;
+  readonly medianActions: number;
+  readonly meanWastedActions: number;
+  readonly unsafeActions: number;
+  readonly deaths: number;
+}
+
+/** Training as reported from its state file and its child process. Nothing here is estimated. */
+export interface ControlCenterTraining {
+  /** `interrupted` means the state says a run was active but its process is gone; it can be resumed. */
+  readonly status: "idle" | "running" | "paused" | "stopped" | "completed" | "failed" | "interrupted" | "evaluating";
+  readonly processAlive: boolean;
+  readonly pid: number | null;
+  readonly root: string;
+  readonly episodesTotal: number;
+  readonly episodeBudget: number;
+  readonly episodesPerStage: number | null;
+  readonly stage: {
+    readonly index: number;
+    readonly total: number;
+    readonly id: string;
+    readonly label: string;
+    readonly episodes: number;
+    readonly successRate: number | null;
+    readonly passRate: number;
+  } | null;
+  readonly recentSuccessRate: number | null;
+  readonly recentMeanReward: number | null;
+  readonly recentEpisodes: readonly {
+    readonly index: number;
+    readonly stageId: string;
+    readonly scenarioId: string;
+    readonly seed: number;
+    readonly success: boolean;
+    readonly status: string;
+    readonly failureCode: string | null;
+    readonly actions: number;
+    readonly wastedActions: number;
+    readonly simulatedSeconds: number;
+    readonly reward: number | null;
+    readonly at: string;
+  }[];
+  readonly checkpoints: readonly {
+    readonly id: string;
+    readonly stageId: string;
+    readonly createdAt: string;
+    readonly episodes: number;
+    readonly weightedContexts: number;
+  }[];
+  readonly lastEvaluation: {
+    readonly checkpointId: string;
+    readonly generatedAt: string;
+    readonly verdict: "promotable" | "not-promotable";
+    readonly successRate: { readonly baseline: number; readonly candidate: number };
+    readonly deltas: ControlCenterTrainingDeltas | null;
+    readonly reasons: readonly string[];
+  } | null;
+  readonly lastError: string | null;
+  readonly updatedAt: string | null;
+  readonly note: string;
+  /** Where training runs. Always the offline simulator: no Minecraft client, no browser rendering. */
+  readonly execution: "offline-simulator";
+  readonly render: "none";
+  /** Time budget for the run, in minutes; null when only the episode budget applies. */
+  readonly maxMinutes: number | null;
+  /** Active episode time across all invocations, in seconds. Pauses are not counted. */
+  readonly activeSeconds: number;
+  /** Lifetime throughput: episodes divided by active minutes. Null before any active time. */
+  readonly episodesPerMinute: number | null;
+  /** Per-episode reward for the saved recent episodes, oldest first. Null entries had no learner reward. */
+  readonly rewardTrend: readonly (number | null)[];
+  /** Why the run last stopped (operator, time budget, episode budget, curriculum complete). */
+  readonly stopReason: string | null;
+}
+
 export interface ControlCenterSnapshot {
   readonly generatedAt: string;
+  /** Measured timing of the fast observation loop: frequency, observation age, decision/action/reaction latency. */
+  readonly agentLoop?: AgentLoopPerformance | null;
+  /** Subgoal choice, cooldowns, and recent outcomes from the autonomy controller. */
+  readonly objective?: AutonomySnapshot | null;
+  readonly worldSeed?: ControlCenterWorldSeed | null;
+  readonly training?: ControlCenterTraining | null;
+  /** Improvement roadmap built from recorded evidence and the live loop. Null when the host has none. */
+  readonly roadmap?: RoadmapSnapshot | null;
   /** Lightweight process/host sampling; no inspector, profiler, or Minecraft tick hook is enabled. */
   readonly performance: ControlCenterRuntimePerformance;
   readonly connection: ControlCenterConnection;
@@ -528,7 +624,14 @@ export interface ControlCenterCommands {
   trip?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
   resetTrip?(): ControlCommandResult | Promise<ControlCommandResult>;
   enableCombat?(enabled: boolean): ControlCommandResult | Promise<ControlCommandResult>;
-  setActionBudget?(maxActions: number): ControlCommandResult | Promise<ControlCommandResult>;
+  setWorldSeed?(seed: string | null): ControlCommandResult | Promise<ControlCommandResult>;
+  startTraining?(options: { readonly episodesPerStage?: number; readonly maxEpisodes?: number; readonly maxMinutes?: number; readonly fresh?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
+  refreshRoadmap?(): ControlCommandResult | Promise<ControlCommandResult>;
+  roadmapAction?(payload: { readonly fingerprint: string; readonly action: string; readonly value?: number; readonly note?: string }): ControlCommandResult | Promise<ControlCommandResult>;
+  pauseTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
+  resumeTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
+  stopTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
+  evaluateTraining?(checkpointId?: string): ControlCommandResult | Promise<ControlCommandResult>;
   startTask?(task: { readonly kind: string; readonly resource?: string; readonly count?: number }): ControlCommandResult | Promise<ControlCommandResult>;
   stopTask?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
   promotePolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
