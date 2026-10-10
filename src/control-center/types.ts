@@ -415,6 +415,16 @@ export interface ControlCenterCompanion {
   readonly history: readonly { readonly at: string; readonly direction: "in" | "out"; readonly source: string; readonly speaker: string | null; readonly text: string; readonly ok: boolean | null }[];
 }
 
+/** Persistent landmark for the Control Center. */
+export interface ControlCenterLandmark {
+  readonly id: string;
+  readonly type: string;
+  readonly label: string;
+  readonly position: { readonly x: number; readonly y: number; readonly z: number };
+  readonly createdAt: string;
+  readonly lastConfirmedSequence: number;
+}
+
 /** Long-term autonomous progression state: current milestone, completed milestones, and inventory summary. */
 export interface ControlCenterProgression {
   readonly currentMilestone: string;
@@ -457,6 +467,8 @@ export interface ControlCenterSnapshot {
   readonly skillMetrics: readonly ControlCenterSkillMetric[];
   /** Long-term progression milestones for the autonomous agent; null when no tracker is available. */
   readonly progression?: ControlCenterProgression | null;
+  /** Persistent landmarks discovered by the agent; null when no landmark memory is available. */
+  readonly landmarks?: readonly ControlCenterLandmark[] | null;
   /** Whether the adapter currently accepts attacks; null when the adapter has no such switch. */
   readonly combatAllowed?: boolean | null;
   /** Which layer is controlling the combat state. */

@@ -19,6 +19,13 @@ export interface ExplorationRequest {
   readonly destinationUnsafe?: (x: number, z: number) => boolean;
   /** Current direct-corridor risk used only for ranking; pathfinder remains the route authority. */
   readonly routeRisk?: (x: number, z: number) => number;
+  /**
+   * Known landmarks from persistent memory. When provided, exploration biases toward
+   * resource-vein landmarks and away from danger-zone landmarks.
+   */
+  readonly knownResourceLocations?: readonly { readonly position: { readonly x: number; readonly z: number }; readonly resourceName?: string }[];
+  /** Danger zones from persistent memory; waypoints near these get a heavy penalty. */
+  readonly knownDangerZones?: readonly { readonly position: { readonly x: number; readonly z: number } }[];
 }
 
 export interface ExplorationWaypoint {
@@ -52,6 +59,8 @@ function scoreWaypoints(memory: WorldMemory, request: ExplorationRequest, minLeg
       if (distance < minLeg || distance > request.maxLeg) continue;
       if (Math.hypot(center.x - request.origin.x, center.z - request.origin.z) > request.maxRadius) continue;
       if (request.destinationUnsafe?.(center.x, center.z)) continue;
+      // Hard reject waypoints inside known danger zones
+      if (request.knownDangerZones?.some((dz) => Math.hypot(center.x - dz.position.x, center.z - dz.position.z) <= 8)) continue;
       const nearHostile = hostiles.some(
         (hostile) => Math.hypot(center.x - hostile.position.x, center.z - hostile.position.z) <= request.hostileAvoidRadius,
       );
@@ -67,7 +76,21 @@ function scoreWaypoints(memory: WorldMemory, request: ExplorationRequest, minLeg
       // Novelty dominates; current observed hazards/obstacles then distance break ties. Unknown terrain
       // remains eligible because exploration would be impossible if unknown were treated as blocked.
       const routeRisk = request.routeRisk?.(center.x, center.z) ?? 0;
-      const score = novelty * 2 - distance / 8 - routeRisk;
+      // Landmark bonuses: prefer waypoints near known resources, penalize danger zones.
+      let landmarkBonus = 0;
+      if (request.knownResourceLocations) {
+        for (const res of request.knownResourceLocations) {
+          const d = Math.hypot(center.x - res.position.x, center.z - res.position.z);
+          if (d <= 48) landmarkBonus += (48 - d) / 16; // up to +3 for being near a known resource
+        }
+      }
+      if (request.knownDangerZones) {
+        for (const dz of request.knownDangerZones) {
+          const d = Math.hypot(center.x - dz.position.x, center.z - dz.position.z);
+          if (d <= 32) landmarkBonus -= (32 - d) / 4; // up to -8 for being near a danger zone
+        }
+      }
+      const score = novelty * 2 - distance / 8 - routeRisk + landmarkBonus;
       const candidate: ExplorationWaypoint = {
         key,
         x: Math.round(center.x),

@@ -465,51 +465,78 @@ function renderProgression(snapshot) {
   if (!host) return;
   clear(host);
   const progression = snapshot.progression;
-  if (!progression) {
+  const landmarks = snapshot.landmarks;
+  if (!progression && !landmarks?.length) {
     host.hidden = true;
     return;
   }
   host.hidden = false;
 
-  // Current milestone header
-  const header = node("div", "progression-header");
-  header.append(
-    node("span", "progression-label", "Active milestone"),
-    node("span", "progression-name", progression.currentMilestoneName || progression.currentMilestone),
-  );
-  host.append(header);
-
-  // Milestone progress list
-  const list = node("div", "progression-list");
-  for (const milestone of progression.milestones) {
-    const item = node("div", "progression-item");
-    if (milestone.completed) item.classList.add("completed");
-    if (milestone.id === progression.currentMilestone) item.classList.add("current");
-    item.append(
-      node("span", "progression-status", milestone.completed ? "✓" : "○"),
-      node("span", "progression-title", milestone.name),
-      node("span", "progression-desc", milestone.description),
+  if (progression) {
+    // Current milestone header
+    const header = node("div", "progression-header");
+    header.append(
+      node("span", "progression-label", "Active milestone"),
+      node("span", "progression-name", progression.currentMilestoneName || progression.currentMilestone),
     );
-    list.append(item);
-  }
-  host.append(list);
+    host.append(header);
 
-  // Inventory summary
-  const inv = progression.inventorySummary;
-  if (inv) {
-    const summary = node("div", "progression-inventory");
-    const items = [
-      `Logs: ${inv.logs}`,
-      `Planks: ${inv.planks}`,
-      `Cobble: ${inv.cobblestone}`,
-      `Food: ${inv.food}`,
-      inv.hasWoodenPickaxe ? "🪓 Wooden" : "",
-      inv.hasStonePickaxe ? "⛏ Stone" : "",
-      inv.hasIronPickaxe ? "💎 Iron" : "",
-    ].filter(Boolean);
-    summary.append(node("span", "progression-inv-label", "Inventory: "));
-    summary.append(node("span", "progression-inv-items", items.join(" · ")));
-    host.append(summary);
+    // Milestone progress list
+    const list = node("div", "progression-list");
+    for (const milestone of progression.milestones) {
+      const item = node("div", "progression-item");
+      if (milestone.completed) item.classList.add("completed");
+      if (milestone.id === progression.currentMilestone) item.classList.add("current");
+      item.append(
+        node("span", "progression-status", milestone.completed ? "✓" : "○"),
+        node("span", "progression-title", milestone.name),
+        node("span", "progression-desc", milestone.description),
+      );
+      list.append(item);
+    }
+    host.append(list);
+
+    // Inventory summary
+    const inv = progression.inventorySummary;
+    if (inv) {
+      const summary = node("div", "progression-inventory");
+      const items = [
+        `Logs: ${inv.logs}`,
+        `Planks: ${inv.planks}`,
+        `Cobble: ${inv.cobblestone}`,
+        `Food: ${inv.food}`,
+        inv.hasWoodenPickaxe ? "🪓 Wooden" : "",
+        inv.hasStonePickaxe ? "⛏ Stone" : "",
+        inv.hasIronPickaxe ? "💎 Iron" : "",
+      ].filter(Boolean);
+      summary.append(node("span", "progression-inv-label", "Inventory: "));
+      summary.append(node("span", "progression-inv-items", items.join(" · ")));
+      host.append(summary);
+    }
+  }
+
+  // Landmarks section
+  if (landmarks && landmarks.length > 0) {
+    const lmHeader = node("div", "progression-header");
+    lmHeader.append(
+      node("span", "progression-label", `Landmarks (${landmarks.length})`),
+    );
+    host.append(lmHeader);
+    const lmList = node("div", "progression-list");
+    for (const lm of landmarks.slice(0, 10)) {
+      const item = node("div", "progression-item");
+      const icon = lm.type === "danger-zone" ? "⚠" : lm.type === "resource-vein" ? "💎" : lm.type === "shelter" ? "🏠" : lm.type === "village" ? "🏘" : "📍";
+      item.append(
+        node("span", "progression-status", icon),
+        node("span", "progression-title", lm.label),
+        node("span", "progression-desc", `(${lm.position.x}, ${lm.position.y}, ${lm.position.z}) · ${lm.type}`),
+      );
+      lmList.append(item);
+    }
+    if (landmarks.length > 10) {
+      lmList.append(node("div", "progression-desc", `... and ${landmarks.length - 10} more`));
+    }
+    host.append(lmList);
   }
 }
 

@@ -1217,6 +1217,17 @@ function explorationCandidate(
   if (threats.visibleHostiles.some((hostile) => distance(hostile.position, player) <= task.dangerRadius * 2)) return null;
   const origin = context.origin ?? { x: player.x, z: player.z };
   const terrain = buildLocalTerrainModel(state);
+  // Build known resource and danger data from current observation + memory
+  const knownResources = [
+    ...(state.resourceSightings ?? []).map((s) => ({ position: { x: s.position.x, z: s.position.z }, resourceName: s.name })),
+    ...(state.minableSightings ?? []).map((s) => ({ position: { x: s.position.x, z: s.position.z }, resourceName: s.name })),
+  ];
+  const knownDangers = [
+    ...memory.hostileSightings().map((h) => ({ position: { x: h.position.x, z: h.position.z } })),
+    ...state.nearbyBlocks
+      .filter((b) => b.name === "lava" || b.name === "magma_block" || b.name === "campfire")
+      .map((b) => ({ position: { x: b.position.x, z: b.position.z } })),
+  ];
   const waypoint = chooseExplorationWaypoint(memory, {
     from: { x: player.x, z: player.z },
     origin,
@@ -1231,6 +1242,8 @@ function explorationCandidate(
       // Unknown is the point of exploration; only currently observed hazards/obstacles penalise a leg.
       return route.risk - route.unknownColumns * 0.35;
     },
+    ...(knownResources.length > 0 ? { knownResourceLocations: knownResources } : {}),
+    ...(knownDangers.length > 0 ? { knownDangerZones: knownDangers } : {}),
   });
   if (!waypoint) return null;
   const legsLeft = task.maxExplorationLegs - legsUsed;

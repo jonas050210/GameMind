@@ -88,6 +88,8 @@ export interface ControlCenterSource {
   decorate?(base: ControlCenterSnapshot): ControlCenterSnapshot;
   /** Optional progress tracker for multi-task autonomous progression. */
   readonly progressTracker?: import("./progress-tracker.js").ProgressTracker | null;
+  /** Optional landmark memory for persistent world knowledge. */
+  readonly landmarkMemory?: import("./landmark-memory.js").LandmarkMemory | null;
 }
 
 const BAND_LABELS = ["safety", "survival", "progress"] as const;
@@ -849,6 +851,16 @@ export function createControlCenterSource(source: ControlCenterSource): {
               },
             };
           })()
+        : null,
+      landmarks: source.landmarkMemory
+        ? source.landmarkMemory.all.map((lm) => ({
+            id: lm.id,
+            type: lm.type,
+            label: lm.label,
+            position: { x: lm.position.x, y: lm.position.y, z: lm.position.z },
+            createdAt: lm.createdAt,
+            lastConfirmedSequence: lm.lastConfirmedSequence,
+          }))
         : null,
       combatAllowed: adapter.combatAllowed ?? null,
       combatAllowedSource: typeof adapter.setCombatAllowed === "function"

@@ -29,6 +29,7 @@ import { minecraftMineableBlockNames } from "./mining.js";
 import type { MinecraftTaskResult, MinecraftTaskRunnerOptions } from "./task-runner.js";
 import { createControlCenterSource, type RunControl } from "./run-control.js";
 import { ProgressTracker } from "./progress-tracker.js";
+import { LandmarkMemory } from "./landmark-memory.js";
 import { CompanionMemory } from "./companion-memory.js";
 import { CompanionController } from "./companion-controller.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
@@ -167,6 +168,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   };
   const memory = options.memory ?? new WorldMemory();
   const progressTracker = new ProgressTracker();
+  const landmarkMemory = new LandmarkMemory();
   const evaluationReportPath = options.evaluationReportPath ?? resolve("data/eval/offline-report.json");
   const evaluationScenarioIds = options.evaluationScenarioIds ?? [];
   // The dashboard polls the snapshot, so the host has nothing to push when state changes; `worldSource`
@@ -203,6 +205,57 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     : null;
   companion?.start();
 
+  /**
+   * Record landmarks from the current observation. Called each autonomous tick so the
+   * agent builds a persistent map of known resources, dangers, and shelter locations.
+   */
+  function recordLandmarksFromObservation(state: import("./observation.js").MinecraftObservation, sequence: number): void {
+    // Record resource-vein landmarks from minable sightings
+    for (const sighting of state.minableSightings ?? []) {
+      landmarkMemory.record({
+        type: "resource-vein",
+        position: sighting.position,
+        label: `${sighting.name} deposit`,
+        sequence,
+        metadata: { resourceName: sighting.name },
+      });
+    }
+    // Record resource-vein landmarks from resource sightings (logs, etc.)
+    for (const sighting of state.resourceSightings) {
+      landmarkMemory.record({
+        type: "resource-vein",
+        position: sighting.position,
+        label: `${sighting.name} source`,
+        sequence,
+        metadata: { resourceName: sighting.name },
+      });
+    }
+    // Record danger-zone landmarks from observed hazards
+    for (const block of state.nearbyBlocks) {
+      if (block.name === "lava" || block.name === "magma_block" || block.name === "campfire") {
+        landmarkMemory.record({
+          type: "danger-zone",
+          position: block.position,
+          label: `${block.name} hazard`,
+          sequence,
+          metadata: { hazardType: block.name },
+        });
+      }
+    }
+    // Record danger-zone landmarks from hostile entities
+    for (const entity of state.entities) {
+      if (entity.type === "hostile") {
+        landmarkMemory.record({
+          type: "danger-zone",
+          position: { x: Math.round(entity.position.x), y: Math.round(entity.position.y), z: Math.round(entity.position.z) },
+          label: `${entity.name} threat`,
+          sequence,
+          metadata: { hazardType: entity.name },
+        });
+      }
+    }
+  }
+
   // Autonomous survival loop: runs when no task is active and the agent is connected.
   // Generates implicit survival tasks based on the agent's current needs.
   let autonomousTimer: NodeJS.Timeout | null = null;
@@ -217,6 +270,10 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       if (!world?.state) return;
       autonomousRunning = true;
       try {
+        // Record landmarks from current observation before generating the next task
+        const seq = world.observedAt ? Date.parse(world.observedAt) : Date.now();
+        recordLandmarksFromObservation(world.state, seq);
+
         const autoTask = generateAutonomousTask(world.state, progressTracker);
         if (autoTask) {
           control.autonomous = true;
@@ -262,6 +319,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     companion,
     taskFor: taskFromControlCenterRequest,
     progressTracker,
+    landmarkMemory,
     ...(options.decorate ? { decorate: options.decorate } : {}),
     onStart: async (task) => {
       if (!control.task) {
