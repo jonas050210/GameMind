@@ -749,6 +749,11 @@ export interface ControlCenterCommands {
   libraryExecute?(payload: { readonly id: string; readonly params?: Readonly<Record<string, unknown>> }): ControlCommandResult | Promise<ControlCommandResult>;
   /** Emergency stop: simultaneously trips, stops the task, and disarms combat. */
   panic?(): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Starts the offline Docker test server in the background; poll the `testServer` query for its state. */
+  startTestServer?(): ControlCommandResult | Promise<ControlCommandResult>;
+  stopTestServer?(): ControlCommandResult | Promise<ControlCommandResult>;
+  /** A plain TCP check that host:port accepts connections. Read-only; it does not connect the bot. */
+  probeServer?(payload: { readonly host?: string; readonly port?: number }): ControlCommandResult | Promise<ControlCommandResult>;
 }
 
 /** A read-only query served as `GET /api/<name>`; it receives the URL's query parameters. */

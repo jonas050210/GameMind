@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Docker Compose for live Minecraft testing.
 # Spins up a vanilla Minecraft 1.20.4 server that GameMind can connect to.
 #
@@ -8,6 +6,7 @@ version: "3.8"
 #   docker compose up -d
 #   npm run test:live
 #   docker compose down
+# The Control Center (Bots tab) runs the same commands for you.
 
 services:
   minecraft:
@@ -40,7 +39,6 @@ services:
       - "25565:25565"
     volumes:
       - mc-data:/data
-      - ./config/server.properties:/data/server.properties:ro
     healthcheck:
       test: ["CMD", "mc-monitor", "status", "--host", "localhost", "--port", "25565"]
       interval: 10s

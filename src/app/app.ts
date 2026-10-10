@@ -28,6 +28,7 @@ import { defaultRedactionContext, displayPath, redactStrings, type RedactionCont
 import { DEFAULT_RECONNECT_POLICY, MinecraftSession, SessionStartError, type ReconnectPolicy } from "./session.js";
 import { DEFAULT_SIMULATED_SCENARIO, SessionRequestError, createSessionFactory, type SessionFactory, type SessionFactoryDeps } from "./session-factory.js";
 import { TrainingDirectoryNameError, TrainingHub } from "./training-hub.js";
+import { TestServerController, describeProbe, probePort } from "./test-server.js";
 import { NO_SESSION_VIEW, type ConnectRequest, type SessionMode, type SessionView } from "./types.js";
 
 /**
@@ -128,6 +129,7 @@ export class GameMindApp {
   private readonly sessionDefaults: { mode: SessionMode; autonomy: boolean; reconnect: ReconnectPolicy };
   private readonly lockFile: string | null;
   private handleValue: ControlCenterHandle | null = null;
+  private readonly testServer = new TestServerController();
   private sessionValue: MinecraftSession | null = null;
   private sessionCounter = 0;
   private connecting = false;
@@ -525,6 +527,15 @@ export class GameMindApp {
         }));
       },
       runLiveVerification: (payload: unknown) => this.commandLive(payload),
+      startTestServer: () => this.testServer.start(),
+      stopTestServer: () => this.testServer.stop(),
+      probeServer: async (payload: unknown) => {
+        const raw = typeof payload === "object" && payload !== null ? (payload as { host?: unknown; port?: unknown }) : {};
+        const host = typeof raw.host === "string" && raw.host.trim().length > 0 ? raw.host.trim() : "127.0.0.1";
+        const port = typeof raw.port === "number" ? raw.port : Number(raw.port ?? 25565);
+        const result = await probePort(host, port);
+        return { ok: result === "open", message: describeProbe(host, port, result), data: { host, port, result } };
+      },
       cancelJob: async (payload: unknown) => {
         const id = typeof payload === "string" ? payload : typeof payload === "object" && payload !== null ? String((payload as { id?: unknown }).id ?? "") : "";
         const cancelled = await this.jobs.cancel(id.length > 0 ? id : undefined);
@@ -601,6 +612,7 @@ export class GameMindApp {
   private queries(): NonNullable<ControlCenterHost["queries"]> {
     const evaluationReportPath = path.join(this.dataDirectory, "eval", "offline-report.json");
     const raw: NonNullable<ControlCenterHost["queries"]> = {
+      testServer: async () => this.testServer.refresh(),
       events: (params) => {
         const category = params.get("category");
         const level = params.get("level");
