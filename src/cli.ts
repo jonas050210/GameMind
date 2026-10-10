@@ -14,11 +14,6 @@ import {
   type ControlCenterTaskKind,
   type MinecraftRunHost,
 } from "./games/minecraft/attach-control-center.js";
-import {
-  DEFAULT_MINECRAFT_CONFIG,
-  MinecraftAdapter,
-  minecraftAdapterConfigFromEnv,
-} from "./games/minecraft/minecraft-adapter.js";
 import { MinecraftTaskDecisionModel } from "./games/minecraft/decision-model.js";
 import { secureFoodTaskSchema, type MinecraftTask } from "./games/minecraft/task.js";
 import {
@@ -28,12 +23,9 @@ import {
 } from "./games/minecraft/task-runner.js";
 import { readEvaluationSummary } from "./games/minecraft/run-control.js";
 import { policyPromotionRefusalReasons } from "./games/minecraft/policy-promotion.js";
-import { PersistentWorldMemory } from "./games/minecraft/persistent-world-memory.js";
 import type { WorldMemory } from "./games/minecraft/world-memory.js";
-import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./games/minecraft/capabilities.js";
 import { createFakeMinecraftFixture, FakeMinecraftAdapter } from "./testing/fake-minecraft-adapter.js";
 import { evaluationScenarios } from "./testing/eval/scenarios.js";
-import { SimulatedMinecraftAdapter } from "./testing/simulated-minecraft/adapter.js";
 import { loadScenario } from "./testing/scenario.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
 import { classifyFailure } from "./core/failure-taxonomy.js";
@@ -59,13 +51,6 @@ function failureClassification(result: MinecraftTaskResult): Record<string, unkn
       ...(classified.hint ? { hint: classified.hint } : {}),
     },
   };
-}
-
-/** One line for the process error: what stopped, in whose component, with the source's own words kept. */
-function failureLine(result: MinecraftTaskResult, taskDescription: string): string {
-  const classified = classifyFailure(result.failure?.code ?? null, result.failure?.message ?? null);
-  const head = `${classified.label} · ${classified.code ?? "no code"} · ${classified.owner}`;
-  return `Minecraft ${taskDescription} task ended with status '${result.status}' (${head}): ${result.failure?.message ?? "the task reported no reason"}`;
 }
 
 type PolicyChoice = "status" | "promote" | "reject";

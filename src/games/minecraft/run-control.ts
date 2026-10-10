@@ -1,7 +1,5 @@
 import type { Logger } from "pino";
 import { readFile } from "node:fs/promises";
-import * as os from "node:os";
-import { performance } from "node:perf_hooks";
 import type { SafetyBroker } from "../../core/safety-broker.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
 import type { TraceEvent } from "../../core/trace.js";
@@ -14,7 +12,6 @@ import type { WorldMemory } from "./world-memory.js";
 import type {
   ControlCenterActionView,
   ControlCenterCommands,
-  ControlCenterRuntimePerformance,
   ControlCenterFailureView,
   ControlCenterSkillMetric,
   ControlCenterSnapshot,
