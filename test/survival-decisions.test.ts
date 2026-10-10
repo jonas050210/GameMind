@@ -60,13 +60,13 @@ test("hostile avoidance outranks eating, food sourcing, and gathering", () => {
 
 test("food is eaten only when hunger is at or below the survival threshold", () => {
   const hungry = observationAt(origin, {
-    player: { ...observationAt(origin).player, food: 10 },
+    player: { ...observationAt(origin).player, food: 14 },
     inventory: [item("bread", 1)],
   });
   assert.equal(model.decide(hungry, gather, context()).selected?.goalId, "restore-hunger");
 
   const satisfied = observationAt(origin, {
-    player: { ...observationAt(origin).player, food: 11 },
+    player: { ...observationAt(origin).player, food: 15 },
     inventory: [item("bread", 1)],
     nearbyBlocks: [block("oak_log", 1, 64, 0)],
   });
@@ -106,7 +106,7 @@ test("with no food source and low hunger the agent explores for food; at moderat
   assert.equal(lowDecision.selected?.goalId, "explore:food");
   assert.equal(lowDecision.selected?.priorityBand, 1);
 
-  const moderate = observationAt(origin, { player: { ...observationAt(origin).player, food: 8 } });
+  const moderate = observationAt(origin, { player: { ...observationAt(origin).player, food: 9 } });
   const moderateDecision = model.decide(moderate, gather, context());
   assert.equal(moderateDecision.selected?.priorityBand, 2, "exploring for food waits until hunger is low");
   assert.notEqual(moderateDecision.selected?.goalId, "explore:food");
@@ -192,7 +192,7 @@ test("critical health without a rest option names the missing healing skill", ()
 });
 
 test("critical health with low food explains that regeneration is impossible", () => {
-  const state = observationAt(origin, { player: { ...observationAt(origin).player, health: 5, food: 8 } });
+  const state = observationAt(origin, { player: { ...observationAt(origin).player, health: 5, food: 10 } });
   const decision = model.decide(state, gather, context());
   assert.equal(decision.terminalStatus, "blocked");
   assert.match(decision.summary, /natural regeneration needs food/);

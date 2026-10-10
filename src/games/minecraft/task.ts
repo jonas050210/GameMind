@@ -4,17 +4,17 @@ import { minecraftMineableBlockNames } from "./mining.js";
 
 const taskLimits = {
   schemaVersion: z.literal(1).default(1),
-  maxActions: z.number().int().min(1).max(100).default(12),
-  maxDurationMs: z.number().int().min(1_000).max(600_000).default(120_000),
+  maxActions: z.number().int().min(1).max(500).default(12),
+  maxDurationMs: z.number().int().min(1_000).max(1_800_000).default(120_000),
   dangerRadius: z.number().finite().min(2).max(16).default(6),
-  maxTargetDistance: z.number().finite().min(2).max(48).default(24),
+  maxTargetDistance: z.number().finite().min(2).max(96).default(24),
   maxConsecutiveFailures: z.number().int().min(1).max(5).default(2),
   /** Exploration legs (navigation to unexplored waypoints) allowed per task. Zero disables exploration. */
-  maxExplorationLegs: z.number().int().min(0).max(30).default(8),
+  maxExplorationLegs: z.number().int().min(0).max(60).default(8),
   /** Exploration never leaves this radius around the task's starting point. */
-  explorationRadius: z.number().finite().min(8).max(96).default(48),
+  explorationRadius: z.number().finite().min(8).max(192).default(48),
   /** Total virtual time that resting may consume during one task. */
-  maxRestMs: z.number().int().min(0).max(300_000).default(60_000),
+  maxRestMs: z.number().int().min(0).max(600_000).default(60_000),
 };
 
 export const gatherResourceTaskSchema = z.object({

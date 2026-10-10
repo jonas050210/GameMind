@@ -42,6 +42,8 @@ export interface CombatGateAdapter {
 export interface RunControl {
   /** Set when an operator asks the run to stop; checked between actions. */
   stopRequested: string | null;
+  /** When the stop was requested, so the UI can show "stopping..." with elapsed time. */
+  stoppingRequestedAt: string | null;
   task: MinecraftTask | null;
   result: MinecraftTaskResult | null;
   /** Kind of the last task that finished, so the UI still describes the run after it ends. */
@@ -50,6 +52,8 @@ export interface RunControl {
   /** The budget the last started task carried, kept after it ends so the UI can still show the ratio. */
   startedMaxActions: number | null;
   startedAt: string | null;
+  /** True when the agent is running in autonomous survival mode (no explicit task). */
+  autonomous: boolean;
 }
 
 export interface ControlCenterSource {
@@ -82,6 +86,8 @@ export interface ControlCenterSource {
   onStart?(task: MinecraftTask): Promise<void>;
   /** Optional extra fields merged into the snapshot (used by the simulated demo host). */
   decorate?(base: ControlCenterSnapshot): ControlCenterSnapshot;
+  /** Optional progress tracker for multi-task autonomous progression. */
+  readonly progressTracker?: import("./progress-tracker.js").ProgressTracker | null;
 }
 
 const BAND_LABELS = ["safety", "survival", "progress"] as const;
@@ -403,7 +409,28 @@ export function createControlCenterSource(source: ControlCenterSource): {
     stopTask(reason) {
       if (!control.task) return { ok: false, message: "No task is running." };
       control.stopRequested = typeof reason === "string" && reason.length > 0 ? reason : "stopped by the operator";
+      control.stoppingRequestedAt = new Date().toISOString();
       return { ok: true, message: `Stop requested; the run ends after the current action (${control.stopRequested}).` };
+    },
+    panic() {
+      // Emergency stop: simultaneously trip safety, stop task, and disarm combat.
+      const messages: string[] = [];
+      if (safety) {
+        safety.trip("emergency panic from the Control Center");
+        messages.push("safety tripped");
+      }
+      if (control.task) {
+        control.stopRequested = "emergency stop";
+        control.stoppingRequestedAt = new Date().toISOString();
+        messages.push("task stop requested");
+      }
+      const adapter = runtime.adapter as unknown as CombatGateAdapter;
+      if (typeof adapter.setCombatAllowed === "function") {
+        adapter.setCombatAllowed(false);
+        safety?.configure({ optedInCapabilities: [] });
+        messages.push("combat disarmed");
+      }
+      return { ok: true, message: `Emergency stop activated: ${messages.join(", ")}. Reset trip and resume when safe.` };
     },
     startTask(request) {
       if (safety?.snapshot().tripped) {
@@ -635,16 +662,20 @@ export function createControlCenterSource(source: ControlCenterSource): {
         // An operator hold is reported even between tasks: pausing while idle still blocks the next run,
         // and the UI must not make that look like an ordinary idle agent.
         state: control.task
-          ? broker?.paused
-            ? "paused"
-            : "running"
-          : broker?.tripped
-            ? "tripped"
+          ? control.stopRequested
+            ? "stopping"
             : broker?.paused
               ? "paused"
-              : control.result
-                ? "stopped"
-                : "idle",
+              : "running"
+          : control.autonomous
+            ? "autonomous"
+            : broker?.tripped
+              ? "tripped"
+              : broker?.paused
+                ? "paused"
+                : control.result
+                  ? "stopped"
+                  : "idle",
         taskId: control.task?.id ?? control.result?.taskId ?? null,
         taskKind: control.task?.kind ?? control.lastTaskKind,
         decisionModel: str((decision?.data as Record<string, unknown> | undefined)?.modelId, "minecraft-task-decision-model"),
@@ -655,6 +686,8 @@ export function createControlCenterSource(source: ControlCenterSource): {
         status: control.result?.status ?? null,
         failure: control.result?.failure ?? null,
         blocker,
+        stoppingRequestedAt: control.stoppingRequestedAt ?? null,
+        autonomous: control.autonomous ?? false,
       },
       goal: decision ? goalFromDecision(decision, control.task, state) : null,
       world: {
@@ -772,6 +805,11 @@ export function createControlCenterSource(source: ControlCenterSource): {
             }
           : null,
         evaluation: await readEvaluationSummary(source.evaluationReportPath ?? null),
+        reward: learning?.reward ?? null,
+        classPatterns: learning?.classPatterns ?? [],
+        checkpoints: learning?.checkpoints ?? null,
+        experiments: learning?.experiments ?? [],
+        rlReadiness: learning?.rlReadiness ?? null,
       },
       capabilities: runtime.adapter.capabilities.map((capability) => ({
         name: capability.name,
@@ -787,7 +825,35 @@ export function createControlCenterSource(source: ControlCenterSource): {
         .reverse()
         .map(traceView),
       skillMetrics: folded.skillMetrics,
+      progression: source.progressTracker && state
+        ? (() => {
+            const progress = source.progressTracker!.getProgress(state);
+            return {
+              currentMilestone: progress.currentMilestone,
+              currentMilestoneName: progress.currentMilestoneName,
+              completedMilestones: progress.completedMilestones,
+              milestones: progress.milestones.map((m) => ({
+                id: m.id,
+                name: m.name,
+                description: m.description,
+                completed: m.completed,
+              })),
+              inventorySummary: {
+                logs: progress.inventory.logs,
+                planks: progress.inventory.planks,
+                cobblestone: progress.inventory.cobblestone,
+                food: progress.inventory.food,
+                hasWoodenPickaxe: progress.inventory.hasWoodenPickaxe,
+                hasStonePickaxe: progress.inventory.hasStonePickaxe,
+                hasIronPickaxe: progress.inventory.hasIronPickaxe,
+              },
+            };
+          })()
+        : null,
       combatAllowed: adapter.combatAllowed ?? null,
+      combatAllowedSource: typeof adapter.setCombatAllowed === "function"
+        ? (adapter.combatAllowed ? "adapter" : "safety-policy")
+        : null,
       offlineNote: source.offlineNote ?? null,
     };
     return source.decorate ? source.decorate(base) : base;
@@ -856,11 +922,11 @@ function describeBlocker(input: BlockerInput): ControlCenterSnapshot["agent"]["b
     label: input.running ? "running" : "idle",
     headline: input.running
       ? "The agent is acting; nothing is blocking it."
-      : "Nothing is blocking the agent.",
+      : "No explicit task is active.",
     detail: input.running
       ? `The agent is between actions; the last observation is #${input.sequenceNote ?? "n/a"}.`
-      : (input.statusReason ?? "no failure reported"),
-    hint: null,
+      : (input.statusReason ?? "The agent is idle. Start a task from the dashboard, use a companion command like #follow or #explore, or let autonomous mode handle survival."),
+    hint: input.running ? null : "Start a task, use a companion command, or wait for autonomous survival to activate.",
     owner: "unknown",
     source: "run control",
     at: input.at,

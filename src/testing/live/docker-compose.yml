@@ -1,0 +1,53 @@
+version: "3.8"
+
+# Docker Compose for live Minecraft testing.
+# Spins up a vanilla Minecraft 1.20.4 server that GameMind can connect to.
+#
+# Usage:
+#   cd src/testing/live
+#   docker compose up -d
+#   npm run test:live
+#   docker compose down
+
+services:
+  minecraft:
+    image: itzg/minecraft-server:latest
+    container_name: gamemind-mc-test
+    environment:
+      EULA: "TRUE"
+      VERSION: "1.20.4"
+      TYPE: "VANILLA"
+      MODE: "survival"
+      DIFFICULTY: "normal"
+      ONLINE_MODE: "FALSE"
+      MEMORY: "2G"
+      MOTD: "GameMind Test Server"
+      ENABLE_COMMAND_BLOCK: "TRUE"
+      ALLOW_FLIGHT: "FALSE"
+      SPAWN_PROTECTION: "0"
+      # Reduce spawn radius for faster world gen
+      VIEW_DISTANCE: "6"
+      # Prevent mob spawning during testing unless we want it
+      SPAWN_MONSTERS: "true"
+      SPAWN_ANIMALS: "true"
+      # PvP off so the agent isn't killed by other players
+      PVP: "false"
+      # World type
+      LEVEL_TYPE: "default"
+      # Server port
+      SERVER_PORT: "25565"
+    ports:
+      - "25565:25565"
+    volumes:
+      - mc-data:/data
+      - ./config/server.properties:/data/server.properties:ro
+    healthcheck:
+      test: ["CMD", "mc-monitor", "status", "--host", "localhost", "--port", "25565"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  mc-data:

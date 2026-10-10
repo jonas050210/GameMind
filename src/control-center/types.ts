@@ -24,7 +24,7 @@ export interface ControlCenterConnection {
 }
 
 export interface ControlCenterAgent {
-  readonly state: "idle" | "running" | "paused" | "tripped" | "stopping" | "stopped";
+  readonly state: "idle" | "running" | "paused" | "tripped" | "stopping" | "stopped" | "autonomous";
   readonly taskId: string | null;
   readonly taskKind: string | null;
   readonly decisionModel: string | null;
@@ -40,6 +40,10 @@ export interface ControlCenterAgent {
    * advertised, a connection problem, missing perception, or the planner finding nothing to do.
    */
   readonly blocker: ControlCenterBlocker;
+  /** When set, the stop button has been pressed but the task has not ended yet. */
+  readonly stoppingRequestedAt: string | null;
+  /** True when the agent is in autonomous survival mode (no explicit task). */
+  readonly autonomous: boolean;
 }
 
 /** Who has to act for the blocker to clear. */
@@ -287,6 +291,40 @@ export interface ControlCenterLearning {
   } | null;
   /** Folded result of the offline evaluation, read from the report file on disk. */
   readonly evaluation: EvaluationSummary | null;
+  /** Reward statistics from the enhanced learning system. */
+  readonly reward?: {
+    readonly meanReward: number;
+    readonly ewmaReward: number;
+    readonly positiveRate: number;
+    readonly totalEpisodes: number;
+  } | null;
+  /** Class-level failure patterns (generalised from per-target failures). */
+  readonly classPatterns?: readonly {
+    readonly patternKey: string;
+    readonly attempts: number;
+    readonly distinctTargets: number;
+    readonly blocked: boolean;
+  }[];
+  /** Policy checkpoint history. */
+  readonly checkpoints?: {
+    readonly total: number;
+    readonly activeId: string | null;
+    readonly recent: readonly { readonly id: string; readonly reason: string; readonly createdAt: string }[];
+  } | null;
+  /** Recent experiment records. */
+  readonly experiments?: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly status: string;
+    readonly promoted: boolean;
+  }[];
+  /** RL readiness assessment score. */
+  readonly rlReadiness?: {
+    readonly score: number;
+    readonly maxScore: number;
+    readonly ready: readonly string[];
+    readonly blockers: readonly string[];
+  } | null;
 }
 
 /** Executed skill call, as measured: which skill, for which goal, with what verification outcome. */
@@ -377,6 +415,28 @@ export interface ControlCenterCompanion {
   readonly history: readonly { readonly at: string; readonly direction: "in" | "out"; readonly source: string; readonly speaker: string | null; readonly text: string; readonly ok: boolean | null }[];
 }
 
+/** Long-term autonomous progression state: current milestone, completed milestones, and inventory summary. */
+export interface ControlCenterProgression {
+  readonly currentMilestone: string;
+  readonly currentMilestoneName: string;
+  readonly completedMilestones: readonly string[];
+  readonly milestones: readonly {
+    readonly id: string;
+    readonly name: string;
+    readonly description: string;
+    readonly completed: boolean;
+  }[];
+  readonly inventorySummary: {
+    readonly logs: number;
+    readonly planks: number;
+    readonly cobblestone: number;
+    readonly food: number;
+    readonly hasWoodenPickaxe: boolean;
+    readonly hasStonePickaxe: boolean;
+    readonly hasIronPickaxe: boolean;
+  };
+}
+
 export interface ControlCenterSnapshot {
   readonly generatedAt: string;
   /** Lightweight process/host sampling; no inspector, profiler, or Minecraft tick hook is enabled. */
@@ -395,8 +455,12 @@ export interface ControlCenterSnapshot {
   /** Recent complete decision records, including the alternatives that lost. */
   readonly recentDecisions: readonly ControlCenterTraceEvent[];
   readonly skillMetrics: readonly ControlCenterSkillMetric[];
+  /** Long-term progression milestones for the autonomous agent; null when no tracker is available. */
+  readonly progression?: ControlCenterProgression | null;
   /** Whether the adapter currently accepts attacks; null when the adapter has no such switch. */
   readonly combatAllowed?: boolean | null;
+  /** Which layer is controlling the combat state. */
+  readonly combatAllowedSource?: "adapter" | "safety-policy" | "task-runner" | "unknown" | null;
   /** Present only when the data comes from a simulated run rather than a live server. */
   readonly offlineNote?: string | null;
 }
@@ -458,6 +522,8 @@ export interface ControlCenterCommands {
   promotePolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   rejectPolicy?(): ControlCommandResult | Promise<ControlCommandResult>;
   chat?(message: string): ControlCommandResult | Promise<ControlCommandResult>;
+  /** Emergency stop: simultaneously trips, stops the task, and disarms combat. */
+  panic?(): ControlCommandResult | Promise<ControlCommandResult>;
 }
 
 export interface ControlCenterHost {

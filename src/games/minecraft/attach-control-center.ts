@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import { resolve } from "node:path";
+import { generateAutonomousTask } from "./autonomous-task.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { SkillRuntime } from "../../core/skill-runtime.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
@@ -27,6 +28,7 @@ import { minecraftLogNames, minecraftCraftTaskItemNames } from "./capabilities.j
 import { minecraftMineableBlockNames } from "./mining.js";
 import type { MinecraftTaskResult, MinecraftTaskRunnerOptions } from "./task-runner.js";
 import { createControlCenterSource, type RunControl } from "./run-control.js";
+import { ProgressTracker } from "./progress-tracker.js";
 import { CompanionMemory } from "./companion-memory.js";
 import { CompanionController } from "./companion-controller.js";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "./capabilities.js";
@@ -154,14 +156,17 @@ export interface MinecraftRunHost {
 export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): Promise<MinecraftRunHost> {
   const control: RunControl = {
     stopRequested: null,
+    stoppingRequestedAt: null,
     task: null,
     result: null,
     lastTaskKind: null,
     actionsUsed: 0,
     startedMaxActions: null,
     startedAt: null,
+    autonomous: false,
   };
   const memory = options.memory ?? new WorldMemory();
+  const progressTracker = new ProgressTracker();
   const evaluationReportPath = options.evaluationReportPath ?? resolve("data/eval/offline-report.json");
   const evaluationScenarioIds = options.evaluationScenarioIds ?? [];
   // The dashboard polls the snapshot, so the host has nothing to push when state changes; `worldSource`
@@ -197,6 +202,41 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       })
     : null;
   companion?.start();
+
+  // Autonomous survival loop: runs when no task is active and the agent is connected.
+  // Generates implicit survival tasks based on the agent's current needs.
+  let autonomousTimer: NodeJS.Timeout | null = null;
+  let autonomousRunning = false;
+  const startAutonomousLoop = (): void => {
+    if (autonomousTimer) return;
+    autonomousTimer = setInterval(() => {
+      if (autonomousRunning || control.task !== null) return;
+      if (options.runtime.adapter.status !== "connected") return;
+      if (options.safety?.snapshot().tripped || options.safety?.snapshot().paused) return;
+      const world = options.runtime.currentWorldState;
+      if (!world?.state) return;
+      autonomousRunning = true;
+      try {
+        const autoTask = generateAutonomousTask(world.state, progressTracker);
+        if (autoTask) {
+          control.autonomous = true;
+          void execute(autoTask, "cli").then(() => {
+            autonomousRunning = false;
+            control.autonomous = false;
+          }).catch((error: unknown) => {
+            options.logger.warn({ err: error }, "Autonomous task failed");
+            autonomousRunning = false;
+            control.autonomous = false;
+          });
+        }
+      } catch (error) {
+        options.logger.warn({ err: error }, "Autonomous loop tick failed");
+        autonomousRunning = false;
+      }
+    }, 5_000);
+    autonomousTimer.unref();
+  };
+  startAutonomousLoop();
   const unsubscribeChat = companion && options.minecraftCommander && sessionAdapter.onCompanionChat
     ? sessionAdapter.onCompanionChat((username, message) => {
         if (username !== options.minecraftCommander) return;
@@ -221,6 +261,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     logger: options.logger,
     companion,
     taskFor: taskFromControlCenterRequest,
+    progressTracker,
     ...(options.decorate ? { decorate: options.decorate } : {}),
     onStart: async (task) => {
       if (!control.task) {
@@ -235,6 +276,8 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     control.result = null;
     control.startedMaxActions = task.maxActions;
     control.stopRequested = null;
+    control.stoppingRequestedAt = null;
+    control.autonomous = false;
     control.actionsUsed = 0;
     control.startedAt = new Date().toISOString();
     const runner = options.createRunner(host.runnerOptions);
@@ -292,6 +335,10 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     },
     async close() {
       companion?.stop();
+      if (autonomousTimer) {
+        clearInterval(autonomousTimer);
+        autonomousTimer = null;
+      }
       unsubscribeChat?.();
       await handle.stop("run host closing");
       if (memory instanceof PersistentWorldMemory) {
