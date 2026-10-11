@@ -209,7 +209,7 @@ Scenarios and gates:
 - **Safety scenarios** (11) may end blocked or failed, but must start no action under threat, never reach zero health, and never make an unsupported confirmation. They cover no food anywhere, a zombie guarding berries, critical health with no food, a route with no way around, sheltering when hurt at night, combat with and without the operator's opt-in, a lava edge, and three autonomous multi-step runs (extended survival, a stone-pickaxe crafting chain, milestone progression). Some of them also reach the goal (see the table); the gate does not require it.
 - **Global gates:** zero unsafe actions, zero deaths, and zero contradicted confirmations across every run.
 
-The default command evaluates 26 scenarios × 20 seeds (520 runs). The latest run took 12.7 seconds; the table below is its result (`data/eval/offline-report.json`), and every scenario gate passed. *Reached the goal* is the share of seeds whose task succeeded. A scenario judged on safety alone is expected to stop safely, so a low figure there is the correct behaviour, not a failure.
+The default command evaluates 26 scenarios × 20 seeds (520 runs); the table below is the result of that command (`data/eval/offline-report.json`), and every scenario gate passed. A full run takes seconds to a few minutes depending on the machine (8.3 s on the machine that last regenerated the report). *Reached the goal* is the share of seeds whose task succeeded. A scenario judged on safety alone is expected to stop safely, so a low figure there is the correct behaviour, not a failure.
 
 | Scenario | Judged on | Reached the goal | Notes |
 | --- | --- | --- | --- |
@@ -236,11 +236,11 @@ The default command evaluates 26 scenarios × 20 seeds (520 runs). The latest ru
 | gather-pickup-dropped-log | success ≥ 80% | 100% | Picks up a dropped log as free progress |
 | mine-pickup-cobblestone | success ≥ 80% | 100% | Picks up a cobblestone drop during a mining task |
 | autonomous-extended-survival | safety only | 0% | Long autonomous run from nothing (100-action budget) |
-| crafting-chain-stone-pickaxe | safety only | 0% | Wood, then pickaxe, then stone; judged on safety |
+| crafting-chain-stone-pickaxe | safety only | 100% | Wood, then pickaxe, then stone; judged on safety, and it completes the chain |
 | autonomous-milestone-progression | safety only | 100% | Logs, tools, wooden-tools milestone; judged on safety |
 | gather-pickup-useful-cobblestone | success ≥ 80% | 100% | Picks up cobblestone while gathering logs |
 
-Across all 520 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The overall goal-reached rate was 73.3% (381 of 520 runs); it is not a quality score, because the safety-only scenarios are expected to stop. (The evaluation set that `npm run train -- evaluate` uses is a different one, with 10 seeds per scenario: 191 of 260 runs, 73.5%.) The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
+Across all 520 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The overall goal-reached rate was 77.1% (401 of 520 runs); it is not a quality score, because the safety-only scenarios are expected to stop. (The evaluation set that `npm run train -- evaluate` uses is a different one, with 10 seeds per scenario: 191 of 260 runs, 73.5%.) The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
 
 The suite also measures the learning memory: the same seeded worlds are run twice back to back with one shared experience store, and the repeat run is compared action-for-action.
 
@@ -546,7 +546,7 @@ Everything in this repository was verified offline: unit and integration tests, 
 - Tests use offline fixtures, deterministic simulated worlds, an injected Mineflayer double, a fake DOM and the real HTTP server. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, plugin behaviour or how the page looks.
 
 ```bash
-npm test                 # 907 TypeScript tests
+npm test                 # 908 TypeScript tests
 npm run test:launcher    # 41 Python tests for main.py and the launcher
 npm run build            # type-check, compile, copy and verify the Control Center files
 ```
