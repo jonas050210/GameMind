@@ -202,13 +202,22 @@ function legend() {
 
 export function renderOverview(ctx) {
   const { snapshot, now } = ctx;
+  
+  // Group components into 4 main panels as requested
   return {
+    // === PANEL 1: BOT STATUS ===
     "ov-session": session(snapshot, now),
-    "ov-controls": controls(snapshot),
     "ov-vitals": vitals(snapshot, now),
+    "ov-controls": controls(snapshot),
+    
+    // === PANEL 2: AKTIONEN ===
     "ov-task": currentTask(snapshot, now),
     "ov-activity": activity(snapshot),
+    
+    // === PANEL 3: TRAINING ===
     "ov-training": trainingSummary(snapshot),
+    
+    // === PANEL 4: BENCHMARK & EVALUATION ===
     "ov-evaluation": evaluationSummary(snapshot),
     "ov-legend": legend(),
   };

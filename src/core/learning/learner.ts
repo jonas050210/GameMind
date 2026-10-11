@@ -1004,6 +1004,15 @@ export class ExperienceLearner {
       contexts: 0,
     };
   }
+
+  /**
+   * Clean up resources and ensure all buffered data is written to disk.
+   */
+  async close(): Promise<void> {
+    if ("flush" in this.store) {
+      await (this.store as { flush: () => Promise<void> }).flush();
+    }
+  }
 }
 
 function sameFilter(left: readonly string[] | null, right: readonly string[] | null): boolean {
@@ -1065,4 +1074,5 @@ function parseLearningState(value: unknown): LearningState | null {
           .slice(0, HISTORY_LIMIT)
       : [],
   };
+
 }

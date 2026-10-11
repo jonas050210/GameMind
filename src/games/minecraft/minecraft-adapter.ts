@@ -86,9 +86,7 @@ import type {
   GameObservation,
   GameSession,
 } from "../../core/types.js";
-import { NAVIGATION_RANGE_SLACK, reachedNavigationGoal } from "./reach.js";
-
-const require = createRequire(import.meta.url);
+import { checkActionAvailability, getUnavailableReason } from "./action-availability.js";
 const unsafePlacementSupportNames = new Set([
   "lava",
   "water",
@@ -199,8 +197,11 @@ function reuseScan(result: ScanResult, position: BotPosition): ScanResult {
     ...(result.loadedChunks !== undefined ? { loadedChunks: result.loadedChunks } : {}),
   };
 }
-const pathfinderApi = require("mineflayer-pathfinder") as typeof import("mineflayer-pathfinder");
-const toolApi = require("mineflayer-tool") as typeof import("mineflayer-tool");
+import mineflayerPathfinder from "mineflayer-pathfinder";
+import mineflayerTool from "mineflayer-tool";
+
+const pathfinderApi = mineflayerPathfinder;
+const toolApi = mineflayerTool;
 
 export interface MinecraftAdapterConfig {
   readonly host: string;
@@ -1290,6 +1291,30 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     }
     if (this.activeActionId && this.activeActionId !== action.actionId) {
       throw new MinecraftAdapterError("Minecraft adapter already has an active action.", "ACTION_BUSY");
+    }
+
+    // Check if action is available before attempting execution
+    const currentObservation = this.lastObservation;
+    if (currentObservation) {
+      const availability = checkActionAvailability(
+        { capability: action.capability, input: action.input },
+        currentObservation
+      );
+      if (!availability.available) {
+        const reason = getUnavailableReason(availability.reason ?? "UNKNOWN");
+        this.logger.debug(
+          { actionId: action.actionId, capability: action.capability, reason: availability.reason },
+          "Action rejected by availability check"
+        );
+        return {
+          confirmed: false,
+          confirmation: "availability_check_failed",
+          failure: {
+            code: `ACTION_UNAVAILABLE_${availability.reason}`,
+            message: reason,
+          },
+        };
+      }
     }
 
     this.activeActionId = action.actionId;

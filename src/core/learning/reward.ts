@@ -97,8 +97,8 @@ export const DEFAULT_REWARD_CONFIG: RewardConfig = {
     progress: 1.5,
     efficiency: 0.5,
     safety: 1.0,
-    exploration: 0.2,
-    waste: 1.0,
+    exploration: 0.5,  // Increased from 0.2 to encourage exploration
+    waste: 0.3,      // Reduced from 1.0 to allow more exploration
   },
   fastDurationMs: 500,
   slowDurationMs: 5_000,

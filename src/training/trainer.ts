@@ -1,9 +1,11 @@
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { cpus } from "node:os";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import type { Logger } from "pino";
-import { ExperienceLearner } from "../core/learning/learner.js";
 import type { PolicyWeights } from "../core/learning/policy-weights.js";
+import { ExperienceLearner } from "../core/learning/learner.js";
 import { runEvaluationOnce, type EvaluationRun, type EvaluationRunOptions } from "../testing/eval/harness.js";
 import type { EvaluationScenario } from "../testing/eval/scenarios.js";
+
 import {
   TRAINING_SEED_BASE,
   TRAINING_STAGES,
@@ -16,6 +18,11 @@ import { acquireTrainingLock, type LockEnvironment } from "./lock.js";
 import { createProcessEpisodePool, type EpisodePool } from "./episode-pool.js";
 import { replayCapture, type EpisodeJob, type WorkerTelemetry } from "./episode-job.js";
 import { TRAINING_SCHEMA_VERSION, readControlCommand, readTrainingState, trainingPaths, writeControlCommand, writeJsonAtomic, type TrainingCheckpointRecord, type TrainingEpisodeRecord, type TrainingPaths, type TrainingState, archiveTrainingArtifacts, canonicalDigest } from "./state.js";
+
+// Configuration constants
+const DEFAULT_WORKERS = Math.min(8, cpus().length);
+const MAX_WORKERS = 8;
+const EXPERIENCE_BUFFER_SIZE = 100;
 
 /** Runs one scenario episode. Injectable so tests can drive the state machine without the simulator. */
 export type EpisodeRunner = (
@@ -59,6 +66,8 @@ export interface TrainingRunOptions {
   readonly episodePool?: EpisodePool;
   /** Called once per finished episode, in order. Used for experiment logs and throughput measurement. */
   readonly onEpisode?: (event: TrainingEpisodeEvent) => void;
+  /** When true, suppresses most logging to improve performance. Useful for benchmark runs. */
+  readonly quiet?: boolean;
 }
 
 export interface TrainingEpisodeEvent {
@@ -159,13 +168,19 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   const now = options.now ?? (() => new Date());
   const episodeRunner: EpisodeRunner = options.episodeRunner ?? runEvaluationOnce;
   const pollMs = options.pollMs ?? 1_000;
+  const quiet = options.quiet ?? false;
+  
+  // Quiet mode helper - suppresses info logs for performance
+  const log = quiet ? () => {} : (level: "info" | "warn" | "error", obj: unknown, msg: string) => {
+    logger?.[level](obj, msg);
+  };
 
   if (options.fresh) {
     // A fresh start archives the previous run rather than deleting it: its checkpoints, experience and evaluations
     // are learning data, and removing them silently would make a regression impossible to diagnose or undo.
     const archive = await archiveTrainingArtifacts(paths, now(), "fresh training start");
     if (archive.archiveDir) {
-      logger?.info({ archiveDir: archive.archiveDir, moved: archive.moved }, "Archived the previous training run before a fresh start");
+      log("info", { archiveDir: archive.archiveDir, moved: archive.moved }, "Archived the previous training run before a fresh start");
     }
   }
   await mkdir(paths.root, { recursive: true });
@@ -214,11 +229,12 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   state.explorationRate = options.explorationRate ?? 0;
   if (options.evaluationSeedCount !== undefined) assertSeedSplit(options.evaluationSeedCount, maxEpisodes, state.seedBase);
   await writeControlCommand(paths, "run");
-  await persist(paths, state, now);
+  await persist(paths, state, now, true); // Force write at start
 
   const learner = ExperienceLearner.forDirectory(paths.experience);
   await learner.load();
-  logger?.info({ episodes: state.totalEpisodes, stage: stages[state.stageIndex]?.id }, "Training started");
+  
+  log("info", { episodes: state.totalEpisodes, stage: stages[state.stageIndex]?.id }, "Training started");
 
   const pool = await choosePool(options, learner, paths.experience, stages, logger);
   // A resumed run that now runs in one process must not keep the throughput of an earlier parallel run.
@@ -270,10 +286,10 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
       if (passed || capped) {
         const checkpoint = await saveCheckpoint(paths, learner.candidateWeights, stage.id, state.totalEpisodes, now);
         state.checkpoints = [...state.checkpoints, checkpoint];
-        logger?.info(
-          { stage: stage.id, successRate, episodes: state.stageEpisodes, capped, checkpoint: checkpoint.id },
-          passed ? "Stage passed; checkpoint written" : "Stage episode cap reached; checkpoint written",
-        );
+      log("info",
+        { stage: stage.id, successRate, episodes: state.stageEpisodes, capped, checkpoint: checkpoint.id },
+        passed ? "Stage passed; checkpoint written" : "Stage episode cap reached; checkpoint written",
+      );
         state.stageIndex += 1;
         state.stageEpisodes = 0;
         state.stageSuccesses = 0;
@@ -295,11 +311,6 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   try {
     while (state.stageIndex < stages.length && state.totalEpisodes < state.maxEpisodes) {
       const command = await readControlCommand(paths);
-      if (command === "stop") {
-        final = "stopped";
-        stopReason = "Stopped by the operator after the current episode.";
-        break;
-      }
       if (state.maxMinutes !== null && state.activeMs >= state.maxMinutes * 60_000) {
         stopReason = `Time budget of ${state.maxMinutes} min reached.`;
         break;
@@ -307,15 +318,24 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
       if (command === "pause") {
         if (state.status !== "paused") {
           state.status = "paused";
-          await persist(paths, state, now);
-          logger?.info({ episodes: state.totalEpisodes }, "Training paused");
+          state.control = "pause";
+          await persist(paths, state, now, true); // Force write on pause
+          log("info", { episodes: state.totalEpisodes }, "Training paused");
         }
         await sleep(pollMs);
         continue;
       }
-      if (state.status !== "running") {
+      if (command === "run" && state.status === "paused") {
         state.status = "running";
-        logger?.info({ episodes: state.totalEpisodes }, "Training resumed");
+        state.control = "run";
+        await persist(paths, state, now, true);
+        log("info", { episodes: state.totalEpisodes }, "Training resumed");
+        continue;
+      }
+      if (command === "stop") {
+        final = "stopped";
+        stopReason = "Stopped by the operator after the current episode.";
+        break;
       }
 
       // A batch is the next few episodes of the current stage, one per worker. Seeds and scenarios depend only on the
@@ -376,7 +396,7 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
         const after = learner.rewardTotals;
         await settle(job, run, after.episodes > before.episodes ? after.sum - before.sum : null, null);
       }
-      await persist(paths, state, now);
+      await persist(paths, state, now); // Periodic write (every 5s)
     }
     if (final !== "stopped" && stopReason === null) {
       if (state.stageIndex >= stages.length) stopReason = "Curriculum complete.";
@@ -385,7 +405,7 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   } catch (error) {
     final = "failed";
     state.lastError = error instanceof Error ? error.message : String(error);
-    logger?.error({ err: error }, "Training failed; state is kept so the run can be resumed");
+    log("error", { err: error }, "Training failed; state is kept so the run can be resumed");
   } finally {
     await pool?.close();
   }
@@ -402,8 +422,9 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   state.pid = null;
   state.control = final === "stopped" ? "stop" : "run";
   state.updatedAt = now().toISOString();
-  await persist(paths, state, now);
-  logger?.info({ status: final, episodes: state.totalEpisodes }, "Training finished");
+  await persist(paths, state, now, true); // Force write at end
+  await learner.close(); // Flush buffered experience data
+  log("info", { status: final, episodes: state.totalEpisodes }, "Training finished");
   return state;
 }
 
@@ -420,22 +441,33 @@ async function choosePool(
   logger: Pick<Logger, "info" | "warn"> | undefined,
 ): Promise<EpisodePool | null> {
   if (options.episodePool) return options.episodePool;
-  const requested = options.workers ?? 1;
-  if (!Number.isInteger(requested) || requested < 1 || requested > 8) {
-    throw new Error("Workers must be a whole number from 1 through 8.");
+  // Use all available CPU cores by default (max MAX_WORKERS for safety)
+  const requested = options.workers ?? DEFAULT_WORKERS;
+  if (!Number.isInteger(requested) || requested < 1 || requested > MAX_WORKERS) {
+    throw new Error(`Workers must be a whole number from 1 through ${MAX_WORKERS}.`);
   }
   if (requested === 1) return null;
   if (options.episodeRunner) {
     throw new Error("Parallel workers run the simulator in their own processes; a custom episode runner can only run with one worker.");
   }
   if (learner.activeWeights !== null) {
-    logger?.warn({ workers: requested }, "A promoted policy is in force; parallel workers cannot reproduce it, so this run uses one worker.");
+    log("warn", { workers: requested }, "A promoted policy is in force; parallel workers cannot reproduce it, so this run uses one worker.");
     return null;
   }
+  log("info", { workers: requested }, "Using parallel worker pool for faster training");
   return createProcessEpisodePool({ workers: requested, stages, experienceDirectory });
 }
 
-async function persist(paths: TrainingPaths, state: TrainingState, now: () => Date): Promise<void> {
+const PERSIST_INTERVAL_MS = 5000; // Write state every 5 seconds or after significant changes
+let lastPersistMs = 0;
+
+async function persist(paths: TrainingPaths, state: TrainingState, now: () => Date, force = false): Promise<void> {
+  const nowMs = now().getTime();
+  // Skip frequent writes during batch processing to reduce I/O overhead
+  if (!force && nowMs - lastPersistMs < PERSIST_INTERVAL_MS) {
+    return;
+  }
+  lastPersistMs = nowMs;
   state.updatedAt = now().toISOString();
   await writeJsonAtomic(paths.state, state);
 }
