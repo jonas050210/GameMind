@@ -198,8 +198,11 @@ export interface LearningRunReport {
   readonly episodes: number;
   readonly totalEpisodes: number;
   readonly runs: number;
+  /** Successes and failures of this run, counted over the episodes that are evidence for this learner. */
   readonly successes: number;
   readonly failures: number;
+  /** Episodes of this run that were logged but excluded by the provenance filter; not part of `successes`/`failures`. */
+  readonly discardedByProvenance?: number;
   readonly blockedTargets: number;
   readonly advisorId: string;
   readonly activePolicyId: string | null;
@@ -576,13 +579,19 @@ export class ExperienceLearner {
     let successes = 0;
     let failures = 0;
     let excludedCount = 0;
+    // Episodes outside the trusted provenances are logged (above) but are not evidence for this learner; they used
+    // to be counted in the run report and in the checkpoint metadata anyway, so a demo episode could raise the
+    // "successes" a promotion check reads.
+    let discardedByProvenance = 0;
     for (const episode of episodes) {
       const verdict = classifyOutcome(episode.outcome).verdict;
+      if (!admitsProvenance(episode, this.evidenceProvenance ?? undefined)) {
+        discardedByProvenance += 1;
+        continue;
+      }
       if (verdict === "success") successes += 1;
       else if (verdict === "failure") failures += 1;
       else excludedCount += 1;
-      // Episodes outside the trusted provenances are logged (above) but are not evidence for this learner.
-      if (!admitsProvenance(episode, this.evidenceProvenance ?? undefined)) continue;
       const key = episodeContextKey(episode.features);
       stats[key] = applyEpisode(stats[key] ?? emptySkillStat(), episode);
       // Failure memory: only world-anchored targets are remembered, only for outcomes that say something about the
@@ -635,7 +644,7 @@ export class ExperienceLearner {
           promoted: report.promoted ?? false,
           note:
             report.note ??
-            `${successes} verified successful / ${failures} failed actions${excludedCount > 0 ? `, ${excludedCount} excluded (not evidence about the choice)` : ""}${pruned > 0 ? `, ${pruned} stale failure memories pruned` : ""}`,
+            `${successes} verified successful / ${failures} failed actions${excludedCount > 0 ? `, ${excludedCount} excluded (not evidence about the choice)` : ""}${discardedByProvenance > 0 ? `, ${discardedByProvenance} outside this learner's provenance (logged, not counted)` : ""}${pruned > 0 ? `, ${pruned} stale failure memories pruned` : ""}`,
         },
         ...state.history,
       ].slice(0, HISTORY_LIMIT),
@@ -682,6 +691,7 @@ export class ExperienceLearner {
       activePolicyId: this.state.activeWeights?.id ?? null,
       candidatePolicyId: candidateWeights.id,
       contexts: Object.keys(stats).length,
+      ...(discardedByProvenance > 0 ? { discardedByProvenance } : {}),
     };
   }
 
@@ -900,7 +910,9 @@ export class ExperienceLearner {
       if (verdict.verdict === "success") run.successes += 1;
       else if (verdict.verdict === "failure") run.failures += 1;
       else run.excluded += 1;
-      if (verdict.verdict !== "success") run.lastFailureCode = verdict.reason ?? episode.outcome.failureCode;
+      // Only a verdict that is evidence sets the run's failure code: an excluded outcome (safety refusal, lost
+      // session, wrong game mode) is not a failure of the run, and its code used to be shown as "Last failure".
+      if (verdict.verdict === "failure") run.lastFailureCode = verdict.reason ?? episode.outcome.failureCode;
       runs.set(episode.runId, run);
     }
     for (const run of runs.values()) {

@@ -80,6 +80,14 @@ Each row has regression tests; none of it has been run against a live server.
 | A font or image served by the Control Center was corrupted | The static handler built every response by decoding the file as UTF-8 and used the decoded string's length | Only the HTML page is treated as text; every other asset is sent as the bytes on disk (`content-length` included) |
 | `python3 main.py` looked like it would connect to a server while it only starts the Control Center | README and the launcher's own examples still described the old default | Both now state what a plain start does (Control Center only, host pre-filled on the Bots tab) and that any explicit host/port/task/`--simulated`/`MINECRAFT_HOST` connects at once |
 | `npm run test:record` failed on Windows with `ENOENT` | `spawnSync("npm")`: Windows has no `npm` executable, only `npm.cmd`, and this spawn did not use a shell | `npm.cmd` on Windows, spawned through the shell |
+| Two processes could both end up holding a training directory | Judging a stale lock and deleting it were two separate steps: another process could replace the lock in between, and the delete removed the live one | Only the exact entry that was judged stale is removed (`removeIfUnchanged`), so a lock that changed is left alone and the attempt simply retries |
+| A lock file that could not be read was treated as "nothing is running" | The instance-lock reader swallowed every error, including a torn or unreadable file, and overwrote it — the moment two agents would share one account and one data directory | A missing lock still means free; a file that cannot be read or parsed stops the start with a message naming the file and the fix, and the lock is now written temp-then-rename |
+| A trace event was written after the trace had been closed; one failing sink could keep the others open | `TraceRecorder` had no closed state, and the fan-out closed its sinks one after another without catching | `close()` is idempotent and later events are dropped with a warning; every sink is closed on its own so a failure cannot skip the rest |
+| A shutdown that timed out one of its steps still read as a clean stop | The timeout was logged, then forgotten: the view and the session end said "shut down" while a step was still running | The steps that did not finish are carried on the view (`shutdownIncomplete`), in the session end and in the shutdown event (`APP_SHUTDOWN_INCOMPLETE`) |
+| A Control Center on the LAN served its whole snapshot to anyone who could reach the port | Only writes needed the control token; reads were open, and `--control-host 0.0.0.0` is exactly the case where the network can reach them | When the bind is not loopback, reads need the same token (the page sends it); on loopback they stay open for local tooling |
+| A simulated run's episodes raised the successes a promotion check saw | The run report and the checkpoint metadata counted every recorded draft, including the ones the provenance filter excludes from the statistics | Only episodes that are evidence for that learner are counted, and the report names how many were logged but not counted |
+| An environment verdict showed up as a run's "Last failure" | Every non-success set the run's failure code, including exclusions such as a wrong game mode or a lost session | Only a verdict that is evidence sets it; exclusions stay counted in their own column |
+| The README claimed every data file is written atomically | Several files are written directly by design (append-only logs, one-per-run reports) | The claim now names what goes through `src/core/atomic-file.ts` and what deliberately does not |
 
 ## Current implementation
 
@@ -118,7 +126,7 @@ Existing users should review these. Each is deliberate and covered by offline te
 8. **"Wasted actions" has a new definition** (`verified-world-progress.v2`): an action is wasted only if the next observation shows no item or food gained, no new ground explored, no measurable approach to its target, no healing from a rest and no retreat from a hostile. Reports and evaluation sets record the definition, so figures measured under the old one are never compared with new ones. The figure is a measurement: it does not change any decision.
 9. **The snapshot publishes the player's whole-block position.** `test/control-center.test.ts` used to require `world.position` to be absent; that assertion was changed deliberately because the Control Center now shows the position. Block coordinates, terrain and entity coordinates are still not published.
 10. **The Control Center page was rewritten** as seven tabs over one polling store (see [Control Center](#control-center)). The old WebGL block view is gone (it had already been removed from the code; its documentation is cleaned up).
-11. **Atomic file writes are serialised.** Every data file written by the app uses `src/core/atomic-file.ts` (unique temp names, ordered writes per file).
+11. **Atomic file writes are serialised.** Every file the app rewrites while another reader may see it — the learning state and checkpoints, the experience log, world/companion memory, training state, job records and the lock files — goes through `src/core/atomic-file.ts` (unique temp names per write, ordered writes per file, temp-then-rename). What does *not* go through it is deliberate: append-only JSONL logs, and files that are written once per run (evaluation/benchmark reports, `data/evidence/tests.json`).
 12. **The build verifies the packaged UI.** `npm run build` fails if any file of the page did not reach `dist/`.
 13. **The console is quieter by default.** The per-tick `observation.received` trace event is still written to the trace, but it is printed on the console only at `LOG_LEVEL=debug`. A persistent session that idles would otherwise print two JSON lines a second (at the default 500 ms observation interval) for as long as it runs, burying the decisions, actions, lifecycle lines and errors you are there to read; those still print at the default level.
 
@@ -519,8 +527,8 @@ Everything in this repository was verified offline: unit and integration tests, 
 - Tests use offline fixtures, deterministic simulated worlds, an injected Mineflayer double, a fake DOM and the real HTTP server. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, plugin behaviour or how the page looks.
 
 ```bash
-npm test                 # 795 TypeScript tests
-npm run test:launcher    # 33 Python tests for main.py and the launcher
+npm test                 # 886 TypeScript tests
+npm run test:launcher    # 41 Python tests for main.py and the launcher
 npm run build            # type-check, compile, copy and verify the Control Center files
 ```
 
@@ -540,5 +548,7 @@ Existing tests were edited in three places, each because behaviour changed on pu
 1. `test/control-center.test.ts` now requires `world.position` (whole blocks) where it used to require its absence. Blocks, terrain and entity coordinates are still asserted absent.
 2. `test/learning-system.test.ts` expects a safety-denied approach to count as a denial and an excluded outcome (`attempts` 0, `excluded` 1) rather than one attempt; `test/learning-evidence.test.ts` pins the rule.
 3. The page checks in `test/control-center.test.ts` read the whole module bundle of the rewritten page instead of one script, and name the elements of the new layout (`task-hint`, `ov-vitals`) in place of two that belonged to the old one (`blocker`, `world-freshness`). They also gained a check that no stylesheet or script pulls a remote font or image.
+4. `test/ui-components.test.ts` expected the page's reads to carry no token; they do now (an exposed Control Center serves its snapshot only to a caller with the token).
+5. `test/lifecycle.test.ts` asserts that a stop with a hung step says so (`shutdownIncomplete`) instead of reading as a clean shutdown.
 
 `npm audit --audit-level=low` found 0 vulnerabilities when run on 2026-10-10; no dependency was added in this release. Run it again, because advisories change.

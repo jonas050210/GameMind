@@ -4,6 +4,7 @@
  * that says what it actually established instead of presenting "no change" as a measurement.
  */
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -350,5 +351,38 @@ test("the manager validates exploration and stage input and refuses a start whil
     assert.equal(blocked.ok, false);
     assert.match(blocked.message, /Another process \(\d+\) is using this training directory/);
     self.release();
+  });
+});
+
+test("removing a stale lock never deletes the lock a live process created in the meantime", async () => {
+  // Between reading a dead holder and deleting its file, another process can remove it and create its own. The
+  // removal used to be unconditional, so it deleted that live lock and both processes ended up holding the
+  // directory. Only the exact stale entry (same bytes) is removed now.
+  await withRoot(async (root) => {
+    const lockPath = join(root, TRAINING_LOCK_FILE);
+    await writeFile(lockPath, `${JSON.stringify({ pid: 5_001, kind: "train", startedAt: "2026-01-01T00:00:00.000Z" })}\n`);
+    const liveBody = `${JSON.stringify({ pid: 5_003, kind: "evaluate", startedAt: "2026-01-01T00:00:01.000Z" })}\n`;
+    let replaced = false;
+    assert.throws(
+      () =>
+        acquireTrainingLock(root, "train", {
+          pid: 5_002,
+          isAlive: (pid) => {
+            if (pid === 5_001 && !replaced) {
+              // The stale holder is observed dead; in that same instant a live process takes the directory.
+              replaced = true;
+              writeFileSync(lockPath, liveBody);
+              return false;
+            }
+            return true; // 5_003 is alive
+          },
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof TrainingLockError);
+        assert.equal(error.holder.pid, 5_003, "the live holder is named, not overwritten");
+        return true;
+      },
+    );
+    assert.equal(JSON.parse(await readFile(lockPath, "utf8")).pid, 5_003, "the live lock is still there");
   });
 });

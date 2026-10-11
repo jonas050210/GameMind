@@ -184,6 +184,17 @@ export class ControlCenter {
     return `The Control Center is bound to ${this.bindHost} and only answers requests addressed to it (localhost or 127.0.0.1), not to '${request.headers.host ?? "(no host)"}'. Open ${this.url} instead.`;
   }
 
+  /**
+   * A server the operator deliberately bound to a LAN address or a wildcard (`--control-host 0.0.0.0`) is readable
+   * by anyone who can reach the port. Writes always need the token; reads did not, so a snapshot with the whole
+   * agent state was open to the network while the page looked protected. When the bind is not loopback, reads need
+   * the same token; on loopback the reads stay open (a local process could read the data regardless).
+   */
+  private readAllowed(request: import("node:http").IncomingMessage): boolean {
+    if (isLoopbackBind(this.bindHost)) return true;
+    return request.headers["x-gamemind-token"] === this.token;
+  }
+
   private async currentSnapshot(force = false): Promise<ControlCenterSnapshot> {
     const now = Date.now();
     if (!force && this.snapshotCache && now - this.snapshotCache.at < 250) return this.snapshotCache.value;
@@ -215,6 +226,14 @@ export class ControlCenter {
       return;
     }
     if (request.method === "GET" && route === "/api/snapshot") {
+      if (!this.readAllowed(request)) {
+        json(response, 403, {
+          ok: false,
+          code: "READ_TOKEN_REQUIRED",
+          message: `This Control Center is bound to ${this.bindHost}, so its data is only served to a caller with the control token. Open ${this.url} (the page sends it), or bind the server to 127.0.0.1 with --control-host.`,
+        });
+        return;
+      }
       json(response, 200, await this.currentSnapshot(url.searchParams.has("fresh")));
       return;
     }
@@ -237,6 +256,14 @@ export class ControlCenter {
     if (request.method === "GET" && route.startsWith("/api/")) {
       const name = route.slice("/api/".length);
       const queries = this.host.queries;
+      if (!this.readAllowed(request)) {
+        json(response, 403, {
+          ok: false,
+          code: "READ_TOKEN_REQUIRED",
+          message: `This Control Center is bound to ${this.bindHost}, so its data is only served to a caller with the control token. Open ${this.url} (the page sends it), or bind the server to 127.0.0.1 with --control-host.`,
+        });
+        return;
+      }
       if (queries && QUERY_NAME.test(name) && !RESERVED_ROUTES.has(name) && Object.prototype.hasOwnProperty.call(queries, name)) {
         const query = queries[name];
         if (typeof query === "function") {

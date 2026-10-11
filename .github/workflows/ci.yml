@@ -17,6 +17,7 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npx tsc --noEmit
+      - run: npm run build
       - run: npm test
 
   launcher-linux:

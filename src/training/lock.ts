@@ -84,6 +84,30 @@ export function readTrainingLock(root: string, environment: LockEnvironment = {}
 }
 
 /**
+ * Removes the lock file only while it still holds exactly the bytes that were judged stale.
+ *
+ * Judging a lock stale and then deleting it is a check-then-act race: two processes (or the same process twice) can
+ * both read the same dead holder, one of them deletes it and creates its own lock, and the other then deletes *that*
+ * live lock, after which both hold the directory. Re-reading the file and comparing it with what was judged narrows
+ * the window to the two syscalls and never deletes an entry that changed in between.
+ */
+function removeIfUnchanged(lockPath: string, staleBody: string): boolean {
+  let current: string;
+  try {
+    current = readFileSync(lockPath, "utf8");
+  } catch {
+    return false; // already gone (another process removed it) or unreadable
+  }
+  if (current !== staleBody) return false;
+  try {
+    rmSync(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Takes the lock or throws `TrainingLockError` naming the holder. A stale lock (its process is gone) is removed and the
  * attempt is retried once; if another process wins that retry, it is the holder and the error says so.
  */
@@ -115,13 +139,21 @@ export function acquireTrainingLock(root: string, kind: TrainingLockKind, enviro
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let staleBody: string | null = null;
+      try {
+        staleBody = readFileSync(lockPath, "utf8");
+      } catch {
+        continue; // the holder released it between the failed create and this read
+      }
       const holder = readTrainingLock(root, environment);
       if (holder && holder.alive && holder.pid !== pid) throw new TrainingLockError(holder, lockPath);
       if (holder && holder.alive && holder.pid === pid) {
         // The same process asking twice is a programming error, not a stale file.
         throw new TrainingLockError(holder, lockPath);
       }
-      rmSync(lockPath, { force: true });
+      // Delete only the exact entry that was judged stale (see `removeIfUnchanged`); if it changed in the
+      // meantime, another process got there first and this attempt simply retries.
+      removeIfUnchanged(lockPath, staleBody);
     }
   }
   const holder = readTrainingLock(root, environment) ?? { pid: -1, kind, startedAt: "an unknown time", alive: true };

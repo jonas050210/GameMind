@@ -11,7 +11,7 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test \"test/**/*.test.ts\"",
     "scenario:demo": "tsx src/cli.ts --demo",
     "scenario:minecraft": "tsx src/cli.ts --minecraft --look-yaw 1.5707963267948966 --look-pitch 0",
     "task:demo": "tsx src/cli.ts --demo-task",

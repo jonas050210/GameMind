@@ -303,3 +303,41 @@ test("binary assets are served byte for byte, not decoded through UTF-8", async 
     await rm(assetPath, { force: true });
   }
 });
+
+test("a Control Center bound beyond loopback serves its data only to a caller with the token", async () => {
+  // The bind is the operator's explicit choice ("--control-host 0.0.0.0"), but reads were open to everyone who
+  // could reach the port while writes needed the token: the snapshot with the whole agent state was readable by
+  // the network. On loopback the reads stay open (a local process could read the data anyway).
+  const host = {
+    ...stubHost,
+    snapshot: async () => ({ ok: true, secret: "operator state" }) as never,
+    queries: { "diagnostics-copy": async () => ({ ok: true, nodes: ["local"] }) },
+  } as unknown as ControlCenterHost;
+  const exposed = new ControlCenter(host, { port: 0, host: "0.0.0.0" });
+  const handle = await exposed.start();
+  try {
+    const anonymous = await fetch(`${handle.url}api/snapshot`);
+    assert.equal(anonymous.status, 403, "an anonymous reader gets no snapshot from an exposed server");
+    const body = (await anonymous.json()) as { code?: string; message?: string };
+    assert.equal(body.code, "READ_TOKEN_REQUIRED");
+    assert.match(body.message ?? "", /--control-host/, "the refusal names the fix");
+
+    const withToken = await fetch(`${handle.url}api/snapshot`, { headers: { "x-gamemind-token": handle.token } });
+    assert.equal(withToken.status, 200, "the page's own token opens the read");
+    assert.deepEqual(await withToken.json(), { ok: true, secret: "operator state" });
+
+    const queryAnonymous = await fetch(`${handle.url}api/diagnostics-copy`);
+    assert.equal(queryAnonymous.status, 403, "host queries are protected the same way");
+    assert.equal((await fetch(`${handle.url}api/health`)).status, 200, "liveness stays readable");
+  } finally {
+    await handle.stop("test complete");
+  }
+
+  const local = new ControlCenter(host, { port: 0, host: "127.0.0.1" });
+  const localHandle = await local.start();
+  try {
+    assert.equal((await fetch(`${localHandle.url}api/snapshot`)).status, 200, "a loopback-bound server stays open to local tooling");
+  } finally {
+    await localHandle.stop("test complete");
+  }
+});
