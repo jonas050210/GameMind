@@ -488,3 +488,43 @@ test("the policy gate promotes only provable improvements and never a safety reg
   }), { allowSafetyIncidents: true });
   assert.equal(tolerant.blocking.length, 0, "an explicit threshold change can downgrade the incident to a note");
 });
+
+test("reward statistics survive a restart and are rebuilt from the episode log", async () => {
+  // The aggregate used to live only in memory: the Learning panel started at zero after every restart, even
+  // though the episodes it was computed from were on disk. It is part of the state now, and the log stays the
+  // source of truth.
+  const directory = await mkdtemp(path.join(tmpdir(), "gamemind-reward-state-"));
+  const learner = ExperienceLearner.forDirectory(directory);
+  await learner.load();
+  learner.beginRun({ runId: "run-reward", taskId: "task", worldKey: "world-a" });
+  assert.ok(learner.recordEpisode(episode({ runId: "run-reward" })));
+  assert.ok(
+    learner.recordEpisode(
+      episode({
+        runId: "run-reward",
+        sequence: 2,
+        outcome: { ...episode().outcome, status: "failed", confirmed: false, verified: false, progress: false, failureCode: "PATH_NOT_FOUND" },
+      }),
+    ),
+  );
+  await learner.finishRun({ note: "reward persistence" });
+  const live = learner.snapshot().reward;
+  assert.equal(live.totalEpisodes, 2);
+  assert.ok(live.meanReward !== 0, "the two episodes carry different rewards");
+
+  const persisted = JSON.parse(await readFile(path.join(directory, "state.json"), "utf8"));
+  assert.equal(persisted.reward.aggregate.count, 2);
+  assert.ok(Number.isFinite(persisted.reward.aggregate.min), "no Infinity reaches the file");
+  assert.ok(Number.isFinite(persisted.reward.aggregate.max), "no Infinity reaches the file");
+  assert.ok(Number.isFinite(persisted.reward.sum));
+
+  const reopened = ExperienceLearner.forDirectory(directory);
+  await reopened.load();
+  assert.deepEqual(reopened.snapshot().reward, live, "a fresh process shows the persisted numbers");
+
+  // A lost state file rebuilds the same numbers from the append-only log.
+  await writeFile(path.join(directory, "state.json"), "{ this is not json", "utf8");
+  const rebuilt = ExperienceLearner.forDirectory(directory);
+  await rebuilt.load();
+  assert.deepEqual(rebuilt.snapshot().reward, live, "the log reproduces the same aggregate");
+});

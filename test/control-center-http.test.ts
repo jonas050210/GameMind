@@ -3,7 +3,9 @@
  * static-file containment. The agent is not involved; the host is a stub so only the server is exercised.
  */
 import assert from "node:assert/strict";
+import { writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
+import path from "node:path";
 import test from "node:test";
 import { ControlCenter, startControlCenter } from "../src/control-center/server.js";
 import type { ControlCenterHost } from "../src/control-center/types.js";
@@ -278,4 +280,64 @@ test("stop() resolves promptly even when a browser keeps a connection open", asy
   await handle.stop("test complete");
   assert.ok(Date.now() - started < 3_000, `shutdown took ${Date.now() - started} ms with a keep-alive client connected`);
   agent.destroy();
+});
+
+test("binary assets are served byte for byte, not decoded through UTF-8", async () => {
+  // The static handler used to build every response with `content.toString("utf8")` and a `Buffer.byteLength` of
+  // that string: a font or image with bytes that are invalid UTF-8 came back silently rewritten, with a
+  // content-length that did not match the body. Only the HTML page needs text handling.
+  const bytes = Buffer.from([0x77, 0x4f, 0x46, 0x32, 0x00, 0x01, 0x80, 0xff, 0xfe, 0xc3, 0x28, 0xa0, 0x0a, 0xff]);
+  const assetPath = path.join(process.cwd(), "src", "control-center", "public", "test-binary-asset.woff2");
+  await writeFile(assetPath, bytes);
+  const center = new ControlCenter(stubHost, { port: 0, host: "127.0.0.1" });
+  const handle = await center.start();
+  try {
+    const response = await fetch(`${handle.url}test-binary-asset.woff2`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "font/woff2");
+    assert.equal(Number(response.headers.get("content-length")), bytes.byteLength);
+    const received = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(received, bytes, "the bytes reach the browser unchanged");
+  } finally {
+    await handle.stop("test complete");
+    await rm(assetPath, { force: true });
+  }
+});
+
+test("a Control Center bound beyond loopback serves its data only to a caller with the token", async () => {
+  // The bind is the operator's explicit choice ("--control-host 0.0.0.0"), but reads were open to everyone who
+  // could reach the port while writes needed the token: the snapshot with the whole agent state was readable by
+  // the network. On loopback the reads stay open (a local process could read the data anyway).
+  const host = {
+    ...stubHost,
+    snapshot: async () => ({ ok: true, secret: "operator state" }) as never,
+    queries: { "diagnostics-copy": async () => ({ ok: true, nodes: ["local"] }) },
+  } as unknown as ControlCenterHost;
+  const exposed = new ControlCenter(host, { port: 0, host: "0.0.0.0" });
+  const handle = await exposed.start();
+  try {
+    const anonymous = await fetch(`${handle.url}api/snapshot`);
+    assert.equal(anonymous.status, 403, "an anonymous reader gets no snapshot from an exposed server");
+    const body = (await anonymous.json()) as { code?: string; message?: string };
+    assert.equal(body.code, "READ_TOKEN_REQUIRED");
+    assert.match(body.message ?? "", /--control-host/, "the refusal names the fix");
+
+    const withToken = await fetch(`${handle.url}api/snapshot`, { headers: { "x-gamemind-token": handle.token } });
+    assert.equal(withToken.status, 200, "the page's own token opens the read");
+    assert.deepEqual(await withToken.json(), { ok: true, secret: "operator state" });
+
+    const queryAnonymous = await fetch(`${handle.url}api/diagnostics-copy`);
+    assert.equal(queryAnonymous.status, 403, "host queries are protected the same way");
+    assert.equal((await fetch(`${handle.url}api/health`)).status, 200, "liveness stays readable");
+  } finally {
+    await handle.stop("test complete");
+  }
+
+  const local = new ControlCenter(host, { port: 0, host: "127.0.0.1" });
+  const localHandle = await local.start();
+  try {
+    assert.equal((await fetch(`${localHandle.url}api/snapshot`)).status, 200, "a loopback-bound server stays open to local tooling");
+  } finally {
+    await localHandle.stop("test complete");
+  }
 });

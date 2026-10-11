@@ -17,7 +17,7 @@ DEFAULT_CONTROL_PORT = 8787
 
 EPILOG = """\
 Examples:
-  python3 main.py                               persistent session on the Minecraft server (MINECRAFT_HOST or 127.0.0.1:25565)
+  python3 main.py                               Control Center only; connect from the Bots tab (the field is pre-filled)
   python3 main.py --host 192.168.1.20 --port 25565
   python3 main.py --task gather-logs            run a task first, then stay connected
   python3 main.py --simulated                   offline simulator instead of a real server (labelled simulated everywhere)
@@ -173,8 +173,21 @@ def main(
 
     mount_warning = checks.check_windows_mount(root, plat.wsl)
     optional_tools = checks.check_optional_tools(system)
-    data_dir = root / "data"
+    data_dir = checks.data_directory(root, args.passthrough)
     running = checks.existing_instance(data_dir)
+    # One project folder shared between WSL and Windows (a OneDrive desktop, for instance) can hold a lock the
+    # other side wrote. Its pid belongs to the other process table, so it is reported instead of judged: the one
+    # outcome nobody wants is a second bot on the same account.
+    foreign_lock = running.get("foreignPlatform") if running else None
+    if foreign_lock:
+        problems.append(
+            checks.Problem(
+                "INSTANCE_LOCK_FOREIGN",
+                f"data/run/gamemind.lock.json was written on '{foreign_lock}', not on '{sys.platform}'; its pid cannot be checked here.",
+                "Make sure no GameMind is running on the other side of WSL/Windows, then delete that file and start again.",
+            )
+        )
+        running = None
 
     explicit_port = args.control_port is not None
     control_port, port_problem = (None, None)

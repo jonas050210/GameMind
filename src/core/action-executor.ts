@@ -115,6 +115,24 @@ export class ActionExecutor<TState = unknown> {
     return this.safety;
   }
 
+  /** True while a previous action did not quiesce after cancellation; every action is refused until a new session. */
+  get isQuarantined(): boolean {
+    return this.quarantined;
+  }
+
+  /**
+   * Lifts the quarantine. A quarantine exists because one adapter instance could not prove that a cancelled
+   * action had stopped: the adapter was disconnected and nothing may be dispatched through it again. Once a
+   * *new* session has been established through that adapter, the unresponsive operation belongs to the
+   * previous session, so the executor accepts actions again. The host calls this after a successful connect;
+   * a session that never changes keeps its quarantine for its whole life.
+   */
+  resetAfterReconnect(): void {
+    if (!this.quarantined) return;
+    this.quarantined = false;
+    this.logger.warn("Action executor quarantine lifted; a new session was established through the adapter");
+  }
+
   async execute(
     request: ActionRequest,
     preflightFailure: (ActionFailure & { readonly status?: ActionStatus }) | null = null,
@@ -142,7 +160,7 @@ export class ActionExecutor<TState = unknown> {
       if (this.quarantined) {
         return this.reject(request, actionId, requestedAt, startedClock, {
           code: "ADAPTER_QUARANTINED",
-          message: "A previous action did not settle after cancellation; reconnect before acting.",
+          message: "A previous action did not settle after cancellation; the session has to be re-established before acting.",
           status: "disconnected",
         });
       }

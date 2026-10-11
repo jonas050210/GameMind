@@ -20,7 +20,17 @@ import { admitsProvenance, applyEpisode, conservativeSuccessRate, emptySkillStat
 import { classifyOutcome } from "./outcome.js";
 import { episodeProvenanceOf } from "./episode.js";
 import { ExperiencePolicyAdvisor, type PolicyAdvisor } from "./policy-advisor.js";
-import { computeReward, DEFAULT_REWARD_CONFIG, type RewardBreakdown, type RewardConfig, type RewardInput } from "./reward.js";
+import {
+  computeReward,
+  DEFAULT_REWARD_CONFIG,
+  emptyRewardAggregate,
+  parseRewardAggregate,
+  updateRewardAggregate,
+  type RewardAggregate,
+  type RewardBreakdown,
+  type RewardConfig,
+  type RewardInput,
+} from "./reward.js";
 import { ClassFailureMemory, deriveClassPatternKey, type ClassFailureMemoryConfig } from "./class-failure-memory.js";
 import { PolicyCheckpointStore, ExperimentStore, type ExperimentRecord } from "./checkpoint.js";
 import { assessRLReadiness } from "./rl-readiness.js";
@@ -60,6 +70,28 @@ export interface EpisodeDraft {
   readonly outcome: EpisodeOutcome;
 }
 
+/**
+ * Running reward statistics over the episodes this learner trusts. They are persisted (and recomputed from the
+ * episode log when a state file has none) so the numbers the Learning panel shows do not restart at zero after
+ * every process restart, while the episode and run counters come from the log.
+ */
+export interface LearningRewardState {
+  readonly aggregate: RewardAggregate;
+  /** Unrounded sum, so a caller can take the reward of one task as the difference between two readings. */
+  readonly sum: number;
+}
+
+/**
+ * Running reward statistics over the episodes the learner trusts. They are persisted (and recomputed from the
+ * episode log when a state file has none) so the numbers the Learning panel shows do not restart at zero after
+ * every process restart, while the episode and run counters always come from the log.
+ */
+export interface LearningRewardState {
+  readonly aggregate: RewardAggregate;
+  /** Unrounded total, so a caller can take the reward of one task as the difference between two readings. */
+  readonly sum: number;
+}
+
 export interface LearningState {
   readonly schemaVersion: typeof LEARNING_STATE_SCHEMA_VERSION;
   readonly runs: number;
@@ -71,6 +103,11 @@ export interface LearningState {
   readonly activeWeights: PolicyWeights | null;
   /** Provenances the statistics were folded from; null means every episode. A mismatch with the learner's rebuilds them. */
   readonly evidenceProvenance: readonly EpisodeProvenance[] | null;
+  /**
+   * Null in a state written before reward statistics were persisted, or when the file was unreadable: the
+   * episode log is the source of truth, so a null triggers a rebuild rather than showing zeroed numbers.
+   */
+  readonly reward: LearningRewardState | null;
   readonly history: readonly {
     readonly runId: string;
     readonly at: string;
@@ -161,13 +198,64 @@ export interface LearningRunReport {
   readonly episodes: number;
   readonly totalEpisodes: number;
   readonly runs: number;
+  /** Successes and failures of this run, counted over the episodes that are evidence for this learner. */
   readonly successes: number;
   readonly failures: number;
+  /** Episodes of this run that were logged but excluded by the provenance filter; not part of `successes`/`failures`. */
+  readonly discardedByProvenance?: number;
   readonly blockedTargets: number;
   readonly advisorId: string;
   readonly activePolicyId: string | null;
   readonly candidatePolicyId: string;
   readonly contexts: number;
+}
+
+/**
+ * The reward input of one recorded episode. It is derived only from what the episode itself carries, so folding
+ * the append-only log reproduces exactly the numbers the live run computed. Returns null for a draft the reward
+ * function cannot describe (undefined numbers), which is then not counted at all.
+ */
+function rewardInputOf(episode: Episode): RewardInput | null {
+  try {
+    const input: RewardInput = {
+      status: episode.outcome.status,
+      confirmed: episode.outcome.confirmed,
+      attemptsOnTarget: episode.features.attemptsOnTarget,
+      distanceBefore: episode.features.distance,
+      progress: episode.outcome.progress,
+      safetyDenied: episode.outcome.safetyDenied,
+      itemsGained: episode.outcome.itemsGained,
+      itemsConsumed: episode.outcome.itemsConsumed,
+      healthDelta: episode.outcome.healthDelta,
+      foodDelta: episode.outcome.foodDelta,
+      durationMs: episode.outcome.durationMs,
+      distanceAfter: episode.outcome.distanceAfter,
+      health: episode.features.health,
+      hunger: episode.features.hunger,
+      goalClass: episode.features.goalClass,
+      skillId: episode.features.skillId,
+    };
+    return input;
+  } catch {
+    return null;
+  }
+}
+
+/** Folds the reward of every episode of a log, in the order the episodes were recorded. */
+export function foldReward(
+  episodes: readonly Episode[],
+  rewardConfig: RewardConfig = DEFAULT_REWARD_CONFIG,
+): LearningRewardState {
+  let aggregate = emptyRewardAggregate();
+  let sum = 0;
+  for (const episode of episodes) {
+    const input = rewardInputOf(episode);
+    if (!input) continue;
+    const reward = computeReward(input, rewardConfig).total;
+    aggregate = updateRewardAggregate(aggregate, reward);
+    sum += reward;
+  }
+  return { aggregate, sum: Math.round(sum * 10_000) / 10_000 };
 }
 
 export function emptyLearningState(): LearningState {
@@ -181,6 +269,7 @@ export function emptyLearningState(): LearningState {
     candidateWeights: BASELINE_POLICY_WEIGHTS,
     activeWeights: null,
     evidenceProvenance: null,
+    reward: { aggregate: emptyRewardAggregate(), sum: 0 },
     history: [],
   };
 }
@@ -205,12 +294,9 @@ export class ExperienceLearner {
   private runEpisodes: Episode[] = [];
   private loaded = false;
 
-  // Running reward statistics (computed from every recorded episode)
-  private rewardEpisodeCount = 0;
-  private rewardMean = 0;
+  // Running reward statistics over the episodes this learner trusts; persisted and rebuilt from the episode log.
+  private rewardAggregate: RewardAggregate = emptyRewardAggregate();
   private rewardSum = 0;
-  private rewardEwma = 0;
-  private rewardPositiveCount = 0;
 
   constructor(options: ExperienceLearnerOptions = {}) {
     this.store = options.store ?? new InMemoryExperienceStore();
@@ -287,15 +373,20 @@ export class ExperienceLearner {
       parsed = null;
     }
     const restored = parseLearningState(parsed);
-    if (restored && sameFilter(restored.evidenceProvenance, this.evidenceProvenance)) {
+    // A usable state carries its own reward statistics, so the numbers survive a restart without reading the log.
+    const rewardCarried = restored !== null && restored.reward !== null;
+    if (restored && rewardCarried && sameFilter(restored.evidenceProvenance, this.evidenceProvenance)) {
       this.state = restored;
       this.failureMemory.restore(restored.failureMemory);
+      this.rewardAggregate = restored.reward!.aggregate;
+      this.rewardSum = restored.reward!.sum;
       return this.state;
     }
-    // Either there is no usable state, it was written under the old evidence rule (version 1), or it was folded
-    // from a different set of provenances than this learner trusts. All three are recomputed from the episode log,
-    // which is the source of truth and is never rewritten. What the old state held that is not derived from
-    // episodes (the promoted policy and the run history) is carried over, and the old file is kept as a backup.
+    // Either there is no usable state, it was written under the old evidence rule (version 1), it predates the
+    // persisted reward statistics, or it was folded from a different set of provenances than this learner trusts.
+    // All of them are recomputed from the episode log, which is the source of truth and is never rewritten. What
+    // the old state held that is not derived from episodes (the promoted policy and the run history) is carried
+    // over, and the old file is kept as a backup.
     const legacy = parsed && typeof parsed === "object" ? legacyCarryOver(parsed as Record<string, unknown>) : null;
     const base: LearningState = {
       ...emptyLearningState(),
@@ -303,7 +394,11 @@ export class ExperienceLearner {
       ...(restored ? { activeWeights: restored.activeWeights, history: restored.history } : {}),
       ...(legacy ? { activeWeights: legacy.activeWeights, history: legacy.history } : {}),
     };
-    if (parsed && this.stateFile) await this.backupState(parsed, restored ? "evidence-filter" : `v${String((parsed as { schemaVersion?: unknown }).schemaVersion ?? "unknown")}`);
+    if (parsed && this.stateFile) {
+      const version = String((parsed as { schemaVersion?: unknown }).schemaVersion ?? "unknown");
+      const reason = !restored ? `v${version}` : rewardCarried ? "evidence-filter" : "reward-stats";
+      await this.backupState(parsed, reason);
+    }
     this.state = await this.rebuildFromStore(base);
     if (parsed) await this.persist();
     return this.state;
@@ -330,7 +425,10 @@ export class ExperienceLearner {
   private async rebuildFromStore(base: LearningState): Promise<LearningState> {
     const { episodes: all } = await this.store.load();
     const episodes = all.filter((episode) => admitsProvenance(episode, this.evidenceProvenance ?? undefined));
-    if (all.length === 0) return base;
+    const reward = foldReward(episodes, this.rewardConfig);
+    this.rewardAggregate = reward.aggregate;
+    this.rewardSum = reward.sum;
+    if (all.length === 0) return { ...base, reward };
     const stats = foldEpisodes(episodes);
     const memory = new FailureMemory(this.failureMemory.config);
     const runIds = [...new Set(episodes.map((episode) => episode.runId))];
@@ -367,6 +465,7 @@ export class ExperienceLearner {
       failureMemory: memory.snapshot(runIds.length),
       candidateWeights: weights,
       evidenceProvenance: this.evidenceProvenance,
+      reward,
     };
   }
 
@@ -382,7 +481,7 @@ export class ExperienceLearner {
    * difference between two readings around it, which is exact (the snapshot values are rounded for display).
    */
   get rewardTotals(): { readonly episodes: number; readonly sum: number } {
-    return { episodes: this.rewardEpisodeCount, sum: this.rewardSum };
+    return { episodes: this.rewardAggregate.count, sum: this.rewardSum };
   }
 
   recordEpisode(draft: EpisodeDraft): Episode | null {
@@ -405,36 +504,15 @@ export class ExperienceLearner {
       });
       this.runEpisodes.push(episode);
 
-      // Compute reward signal for this episode
+      // Compute the reward signal for this episode. It is derived from the *validated* episode with the same
+      // helper the log rebuild uses, so the live numbers and the numbers after a restart cannot diverge.
       try {
-        const rewardInput: RewardInput = {
-          status: draft.outcome.status,
-          confirmed: draft.outcome.confirmed,
-          attemptsOnTarget: draft.features.attemptsOnTarget,
-          distanceBefore: draft.features.distance,
-          progress: draft.outcome.progress,
-          safetyDenied: draft.outcome.safetyDenied,
-          itemsGained: draft.outcome.itemsGained,
-          itemsConsumed: draft.outcome.itemsConsumed,
-          healthDelta: draft.outcome.healthDelta,
-          foodDelta: draft.outcome.foodDelta,
-          durationMs: draft.outcome.durationMs,
-          distanceAfter: draft.outcome.distanceAfter,
-          health: draft.features.health,
-          hunger: draft.features.hunger,
-          goalClass: draft.features.goalClass,
-          skillId: draft.features.skillId,
-        };
-        const reward = computeReward(rewardInput, this.rewardConfig);
-
-        // Update running reward statistics
-        this.rewardEpisodeCount++;
-        this.rewardSum += reward.total;
-        this.rewardMean += (reward.total - this.rewardMean) / this.rewardEpisodeCount;
-        this.rewardEwma = this.rewardEpisodeCount === 1
-          ? reward.total
-          : 0.3 * reward.total + 0.7 * this.rewardEwma;
-        if (reward.total > 0) this.rewardPositiveCount++;
+        const rewardInput = rewardInputOf(episode);
+        if (rewardInput) {
+          const reward = computeReward(rewardInput, this.rewardConfig);
+          this.rewardAggregate = updateRewardAggregate(this.rewardAggregate, reward.total);
+          this.rewardSum += reward.total;
+        }
       } catch {
         // Reward computation must never break episode recording
       }
@@ -501,13 +579,19 @@ export class ExperienceLearner {
     let successes = 0;
     let failures = 0;
     let excludedCount = 0;
+    // Episodes outside the trusted provenances are logged (above) but are not evidence for this learner; they used
+    // to be counted in the run report and in the checkpoint metadata anyway, so a demo episode could raise the
+    // "successes" a promotion check reads.
+    let discardedByProvenance = 0;
     for (const episode of episodes) {
       const verdict = classifyOutcome(episode.outcome).verdict;
+      if (!admitsProvenance(episode, this.evidenceProvenance ?? undefined)) {
+        discardedByProvenance += 1;
+        continue;
+      }
       if (verdict === "success") successes += 1;
       else if (verdict === "failure") failures += 1;
       else excludedCount += 1;
-      // Episodes outside the trusted provenances are logged (above) but are not evidence for this learner.
-      if (!admitsProvenance(episode, this.evidenceProvenance ?? undefined)) continue;
       const key = episodeContextKey(episode.features);
       stats[key] = applyEpisode(stats[key] ?? emptySkillStat(), episode);
       // Failure memory: only world-anchored targets are remembered, only for outcomes that say something about the
@@ -551,6 +635,7 @@ export class ExperienceLearner {
       candidateWeights,
       activeWeights: state.activeWeights,
       evidenceProvenance: this.evidenceProvenance,
+      reward: { aggregate: this.rewardAggregate, sum: Math.round(this.rewardSum * 10_000) / 10_000 },
       history: [
         {
           runId,
@@ -559,7 +644,7 @@ export class ExperienceLearner {
           promoted: report.promoted ?? false,
           note:
             report.note ??
-            `${successes} verified successful / ${failures} failed actions${excludedCount > 0 ? `, ${excludedCount} excluded (not evidence about the choice)` : ""}${pruned > 0 ? `, ${pruned} stale failure memories pruned` : ""}`,
+            `${successes} verified successful / ${failures} failed actions${excludedCount > 0 ? `, ${excludedCount} excluded (not evidence about the choice)` : ""}${discardedByProvenance > 0 ? `, ${discardedByProvenance} outside this learner's provenance (logged, not counted)` : ""}${pruned > 0 ? `, ${pruned} stale failure memories pruned` : ""}`,
         },
         ...state.history,
       ].slice(0, HISTORY_LIMIT),
@@ -578,10 +663,11 @@ export class ExperienceLearner {
             successes,
             failures,
             rewardStats: {
-              meanReward: this.rewardMean,
-              ewmaReward: this.rewardEwma,
-              positiveRate: this.rewardEpisodeCount > 0
-                ? this.rewardPositiveCount / this.rewardEpisodeCount : 0,
+              meanReward: this.rewardAggregate.mean,
+              ewmaReward: this.rewardAggregate.ewma,
+              positiveRate: this.rewardAggregate.positiveRate,
+              minReward: this.rewardAggregate.min,
+              maxReward: this.rewardAggregate.max,
             },
           },
           report.note ?? `run ${runId}`,
@@ -605,6 +691,7 @@ export class ExperienceLearner {
       activePolicyId: this.state.activeWeights?.id ?? null,
       candidatePolicyId: candidateWeights.id,
       contexts: Object.keys(stats).length,
+      ...(discardedByProvenance > 0 ? { discardedByProvenance } : {}),
     };
   }
 
@@ -761,12 +848,10 @@ export class ExperienceLearner {
       history: this.state.history,
       runEpisodes: this.runEpisodes.length,
       reward: {
-        meanReward: Math.round(this.rewardMean * 10_000) / 10_000,
-        ewmaReward: Math.round(this.rewardEwma * 10_000) / 10_000,
-        positiveRate: this.rewardEpisodeCount > 0
-          ? Math.round((this.rewardPositiveCount / this.rewardEpisodeCount) * 1_000) / 1_000
-          : 0,
-        totalEpisodes: this.rewardEpisodeCount,
+        meanReward: this.rewardAggregate.mean,
+        ewmaReward: this.rewardAggregate.ewma,
+        positiveRate: this.rewardAggregate.positiveRate,
+        totalEpisodes: this.rewardAggregate.count,
       },
       classPatterns: activePatterns.slice(0, 12).map((p) => ({
         patternKey: p.patternKey,
@@ -825,7 +910,9 @@ export class ExperienceLearner {
       if (verdict.verdict === "success") run.successes += 1;
       else if (verdict.verdict === "failure") run.failures += 1;
       else run.excluded += 1;
-      if (verdict.verdict !== "success") run.lastFailureCode = verdict.reason ?? episode.outcome.failureCode;
+      // Only a verdict that is evidence sets the run's failure code: an excluded outcome (safety refusal, lost
+      // session, wrong game mode) is not a failure of the run, and its code used to be shown as "Last failure".
+      if (verdict.verdict === "failure") run.lastFailureCode = verdict.reason ?? episode.outcome.failureCode;
       runs.set(episode.runId, run);
     }
     for (const run of runs.values()) {
@@ -933,6 +1020,19 @@ function legacyCarryOver(raw: Record<string, unknown>): { activeWeights: PolicyW
   return { activeWeights: activeWeights && Object.keys(activeWeights.entries).length > 0 ? activeWeights : null, history };
 }
 
+/**
+ * Reads the persisted reward statistics. A state written before they existed has none, and the caller then
+ * recomputes them from the episode log (which is the source of truth) instead of showing a zeroed panel.
+ */
+function parseLearningRewardState(value: unknown): LearningRewardState | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as { aggregate?: unknown; sum?: unknown };
+  if (typeof raw.aggregate !== "object" || raw.aggregate === null) return null;
+  const aggregate = parseRewardAggregate(raw.aggregate);
+  if (aggregate.count === 0) return null;
+  return { aggregate, sum: typeof raw.sum === "number" && Number.isFinite(raw.sum) ? raw.sum : aggregate.mean * aggregate.count };
+}
+
 function parseLearningState(value: unknown): LearningState | null {
   if (typeof value !== "object" || value === null) return null;
   const raw = value as Partial<LearningState>;
@@ -955,6 +1055,7 @@ function parseLearningState(value: unknown): LearningState | null {
     candidateWeights: weights,
     activeWeights: activeWeights && Object.keys(activeWeights.entries).length > 0 ? activeWeights : null,
     evidenceProvenance: Array.isArray(raw.evidenceProvenance) ? ([...raw.evidenceProvenance].sort() as EpisodeProvenance[]) : null,
+    reward: parseLearningRewardState(raw.reward),
     history: Array.isArray(raw.history)
       ? raw.history
           .filter(

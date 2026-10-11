@@ -44,6 +44,13 @@ export interface RunAppRequest {
   readonly out?: (line: string) => void;
   /** Installs and removes the signal handlers; injectable so tests can drive shutdown without real signals. */
   readonly signals?: SignalHub;
+  /**
+   * Ends the process after an unhandled error, once the clean shutdown has finished. Injectable so a test
+   * can observe the exit instead of killing its own runner; the default is `process.exit`.
+   */
+  readonly exit?: (code: number) => void;
+  /** Where the unhandled-error handlers are installed; injectable for the same reason. Default: `process`. */
+  readonly fatalEvents?: FatalEventTarget;
   readonly appOptions?: Partial<AppOptions>;
 }
 
@@ -58,6 +65,12 @@ export interface SignalHub {
  * window the agent would force-exit (code 130) in the middle of its clean shutdown.
  */
 export const DUPLICATE_SIGNAL_WINDOW_MS = 1500;
+
+/** The two process events that mean "something threw where nothing catches it". */
+export interface FatalEventTarget {
+  on(name: "uncaughtException" | "unhandledRejection", listener: (error: unknown) => void): unknown;
+  off(name: "uncaughtException" | "unhandledRejection", listener: (error: unknown) => void): unknown;
+}
 
 export interface SignalTarget {
   on(name: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): unknown;
@@ -170,12 +183,16 @@ export async function runCommandLine(request: RunAppRequest): Promise<number> {
     void app.shutdown(reason);
   });
   const onFatal = (error: unknown): void => {
-    request.logger.error({ err: error }, "Unexpected error; shutting down cleanly");
+    request.logger.error({ err: error }, "Unexpected error; shutting down cleanly, then exiting with code 1");
     exitCode = 1;
-    void app.shutdown("unexpected error");
+    // A process that installs an `uncaughtException` handler has to end itself; without this the run kept
+    // going with an unknown state and could exit with code 0 after an error. Shut down first, then exit.
+    const exit = request.exit ?? ((code: number) => process.exit(code));
+    void app.shutdown("unexpected error").finally(() => exit(1));
   };
-  process.on("uncaughtException", onFatal);
-  process.on("unhandledRejection", onFatal);
+  const fatalEvents = request.fatalEvents ?? process;
+  fatalEvents.on("uncaughtException", onFatal);
+  fatalEvents.on("unhandledRejection", onFatal);
   try {
     let browser: ReadyInfo["browser"] = { requested: request.openBrowser, opened: false, method: null, reason: null };
     if (request.openBrowser) {
@@ -236,8 +253,8 @@ export async function runCommandLine(request: RunAppRequest): Promise<number> {
     return exitCode;
   } finally {
     unregister();
-    process.off("uncaughtException", onFatal);
-    process.off("unhandledRejection", onFatal);
+    fatalEvents.off("uncaughtException", onFatal);
+    fatalEvents.off("unhandledRejection", onFatal);
     await app.shutdown("process ending");
   }
 }

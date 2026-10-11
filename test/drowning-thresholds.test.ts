@@ -65,6 +65,29 @@ test("the thresholds are one ordered set: surfacing above action-blocking, both 
   assert.ok(DROWNING_SURFACE_AIR_TICKS < DROWNING_FULL_AIR_TICKS);
 });
 
+test("drowning stays refused while the player is on fire", () => {
+  const broker = new SafetyBroker({ drowningBlockedCapabilities: ["minecraft.rest"] });
+  broker.beginRun("run-burning");
+  broker.updateWorld({
+    sessionId: "session-1",
+    sequence: 1,
+    observedAtMs: 1_000,
+    health: 20,
+    food: 20,
+    gameMode: "survival",
+    visibleHostiles: 0,
+    nearestHostileDistance: null,
+    isNight: false,
+    oxygenTicks: 40,
+    isBurning: true,
+  });
+  assert.equal(
+    broker.evaluate({ capability: "minecraft.rest", risk: "low", nowMs: 1_000 }).code,
+    "DROWNING_RISK",
+    "burning is no reason to stop watching the air supply",
+  );
+});
+
 test("on land, the drowning reflex and the broker's refusal agree at every air value, including the boundary", () => {
   for (let air = 0; air <= DROWNING_FULL_AIR_TICKS; air += 1) {
     const reflex = hasDrowning(observation({ oxygenLevel: air }));

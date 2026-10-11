@@ -90,6 +90,11 @@ export interface SessionView {
   /** True when a new session can be started now (none exists, or the last one is shut down). */
   readonly canConnect: boolean;
   readonly canStop: boolean;
+  /**
+   * True when a shutdown step exceeded its timeout (or failed) and the supervisor moved on: something may still
+   * be running, and the stop was reported rather than silently completed.
+   */
+  readonly shutdownIncomplete?: boolean;
 }
 
 export function diagnosisToErrorView(diagnosis: ConnectionDiagnosis): SessionErrorView {
@@ -114,4 +119,5 @@ export const NO_SESSION_VIEW: SessionView = {
   autonomy: null,
   canConnect: true,
   canStop: false,
+  shutdownIncomplete: false,
 };

@@ -374,11 +374,26 @@ export function formatFailure(failure: ClassifiedFailure): string {
   return failure.message ? `${head}: ${failure.message}` : head;
 }
 
-/** True when the failure means "the world or the session is wrong", not "the code is wrong". */
+/**
+ * Kinds that say something about the world, the session or the plan's preconditions — never about the
+ * choice that was made. The learner uses this set to leave such outcomes out of a skill's statistics, so
+ * it is defined once here; it used to be listed a second time in the learning layer, and the two copies
+ * already disagreed about planner refusals.
+ */
+const EXTERNAL_FAILURE_KINDS: ReadonlySet<FailureKind> = new Set<FailureKind>([
+  "safety",
+  "capability",
+  "connection",
+  "perception",
+  "planner",
+]);
+
+/** True when a failure of this kind means "the world or the session is wrong", not "the code is wrong". */
+export function isExternalFailureKind(kind: FailureKind): boolean {
+  return EXTERNAL_FAILURE_KINDS.has(kind);
+}
+
+/** True when the failure means "the world, the session or the plan is wrong", not "the code is wrong". */
 export function failureIsExternal(failure: ClassifiedFailure): boolean {
-  return failure.kind === "safety"
-    || failure.kind === "connection"
-    || failure.kind === "perception"
-    || failure.kind === "planner"
-    || failure.kind === "capability";
+  return isExternalFailureKind(failure.kind);
 }

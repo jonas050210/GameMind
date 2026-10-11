@@ -8,6 +8,7 @@ import { createApi } from "./lib/api.js";
 import { POLL_HIDDEN_MS, POLL_VISIBLE_MS, createStore } from "./lib/store.js";
 import { SOURCES, queueExplanation, sessionInfo, taskBlocker, worldSource } from "./lib/model.js";
 import { fmtDuration, fmtNumber, humanise } from "./lib/format.js";
+import { DEFAULT_LANGUAGE, LANGUAGES, applyTranslations, isLanguage, setLanguage as applyLanguage, translate } from "./lib/i18n.js";
 import { card, notice } from "./lib/ui.js";
 import { renderOverview } from "./views/overview.js";
 import { renderTraining } from "./views/training.js";
@@ -31,6 +32,7 @@ const VIEWS = {
 
 const NEW_FOLDER = "__new__";
 const THEME_KEY = "gamemind.theme";
+const LANGUAGE_KEY = "gamemind.language";
 const EVENT_LIMIT = 300;
 
 export function tabFromHash(hash) {
@@ -113,6 +115,7 @@ export function boot(env = {}) {
   const real = (text) => (typeof text === "string" && text.length > 0 && !text.startsWith("__") ? text : "");
 
   const api = createApi({ fetch: env.fetch ?? win.fetch?.bind(win), token: real(bootData.token) });
+  /** @type {{ tab: string, trainingMode: string, trainingDirectory: string | null, evalReportIndex: number, roadmapShowClosed: boolean, eventsPaused: boolean, learningStore: string, language: string, eventFilters: { q: string, level: string, scope: string, source: string, categories: string[] } }} */
   const ui = {
     tab: "overview",
     trainingMode: "resume",
@@ -121,6 +124,7 @@ export function boot(env = {}) {
     roadmapShowClosed: false,
     eventsPaused: false,
     learningStore: "live",
+    language: DEFAULT_LANGUAGE,
     eventFilters: { q: "", level: "info", scope: "all", source: "", categories: [] },
   };
   let shutdownRequested = false;
@@ -235,7 +239,7 @@ export function boot(env = {}) {
     }
     setAttr(el("session-pill"), "data-tone", tone);
     setText(el("session-pill-text"), text);
-    document.title = snapshot && !lost ? `${info.label} · GameMind` : "GameMind";
+    document.title = snapshot && !lost ? `${translate(info.label)} · GameMind` : "GameMind";
 
     const source = lost || !snapshot ? "unavailable" : worldSource(snapshot);
     const sourceInfo = SOURCES[source] ?? SOURCES.unavailable;
@@ -280,10 +284,31 @@ export function boot(env = {}) {
       setAttr(tab, "aria-selected", String(selected));
       tab.tabIndex = selected ? 0 : -1;
     }
+    for (const code of LANGUAGES) {
+      const control = document.getElementById(`lang-${code}`);
+      if (control) setAttr(control, "aria-pressed", String(ui.language === code));
+    }
     const currentTab = document.getElementById("tools-current-tab");
     if (currentTab) setText(currentTab, el(`tab-${ui.tab}`).textContent?.trim() ?? "Overview");
     setAttr(el("roadmap-toggle-closed"), "aria-pressed", String(ui.roadmapShowClosed));
     setText(el("roadmap-toggle-closed"), ui.roadmapShowClosed ? "Hide closed items" : "Show closed items");
+  }
+
+  /**
+   * Switches the interface language. The choice is remembered per browser and applied again by `render()`,
+   * which translates the page after every render.
+   */
+  function setLanguage(next) {
+    const code = isLanguage(next) ? next : DEFAULT_LANGUAGE;
+    ui.language = code;
+    applyLanguage(code);
+    document.documentElement.setAttribute("lang", code);
+    try {
+      storage?.setItem(LANGUAGE_KEY, code);
+    } catch {
+      // the choice just is not remembered
+    }
+    render();
   }
 
   function renderPanels(ctx) {
@@ -589,6 +614,8 @@ export function boot(env = {}) {
       renderShell(ctx);
       renderPanels(ctx);
       syncForms(ctx);
+      // Last, so every panel is in the DOM: the switch is a property of the page, not of any one view.
+      applyTranslations(document.body ?? document.documentElement);
     } catch (error) {
       win.console?.error?.(error);
     }
@@ -655,6 +682,9 @@ export function boot(env = {}) {
     switch (name) {
       case "toggle-theme":
         toggleTheme();
+        break;
+      case "set-language":
+        setLanguage(control.getAttribute("data-language") ?? DEFAULT_LANGUAGE);
         break;
       case "goto-tab":
         selectTab(control.getAttribute("data-tab") ?? "", { focus: false });
@@ -804,6 +834,9 @@ export function boot(env = {}) {
     return payload;
   }
 
+  /** @typedef {{ error: string } | { error?: never, environmentCases: number, environmentSecondsPerCase: number, workerLimit: number, stageIds: string[] }} BenchmarkPayload */
+
+  /** @returns {BenchmarkPayload} */
   function benchmarkPayload() {
     const cases = numberOrUndefined("benchmark-environment-cases");
     const seconds = numberOrUndefined("benchmark-environment-seconds");
@@ -817,6 +850,9 @@ export function boot(env = {}) {
     return { environmentCases: cases, environmentSecondsPerCase: seconds, workerLimit, stageIds };
   }
 
+  /** @typedef {{ error: string } | { scope: string, allowDig: boolean, allowCombat: boolean, confirmed: boolean, confirmedWorldChanges: boolean, host?: string, port?: number, username?: string }} LivePayload */
+
+  /** @returns {LivePayload} */
   function livePayload() {
     const port = numberOrUndefined("live-port");
     if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) return { error: "The port must be a whole number from 1 to 65535." };
@@ -881,12 +917,15 @@ export function boot(env = {}) {
       }
       case "live-form": {
         const payload = livePayload();
-        if (!payload.error && (payload.allowDig || payload.allowCombat) && !ask(`This lets a verification bot ${[payload.allowDig ? "dig a block" : null, payload.allowCombat ? "attack a hostile mob" : null].filter(Boolean).join(" and ")} on ${liveTarget()}. This changes the world on that server. Continue?`)) return;
+        // The union is discriminated by the presence of `error`: a payload the form could not fill is sent back
+        // unchanged so the operator sees the reason instead of a half-built command.
+        if ("error" in payload) return send("runLiveVerification", payload);
+        if ((payload.allowDig || payload.allowCombat) && !ask(`This lets a verification bot ${[payload.allowDig ? "dig a block" : null, payload.allowCombat ? "attack a hostile mob" : null].filter(Boolean).join(" and ")} on ${liveTarget()}. This changes the world on that server. Continue?`)) return;
         return send("runLiveVerification", payload);
       }
       case "benchmark-form": {
         const payload = benchmarkPayload();
-        if (payload.error) return send("runBenchmark", { error: payload.error });
+        if ("error" in payload) return send("runBenchmark", { error: payload.error });
         const environmentSeconds = payload.environmentCases * payload.environmentSecondsPerCase;
         const workerSeconds = payload.workerLimit * 20;
         const estimate = fmtDuration((environmentSeconds + workerSeconds) * 1000);
@@ -964,6 +1003,17 @@ export function boot(env = {}) {
   })();
   if (savedTheme === "light" || savedTheme === "dark") document.documentElement.setAttribute("data-theme", savedTheme);
 
+  const savedLanguage = (() => {
+    try {
+      return storage?.getItem(LANGUAGE_KEY) ?? null;
+    } catch {
+      return null;
+    }
+  })();
+  ui.language = isLanguage(savedLanguage) ? savedLanguage : DEFAULT_LANGUAGE;
+  applyLanguage(ui.language);
+  document.documentElement.setAttribute("lang", ui.language);
+
   ui.tab = tabFromHash(win.location?.hash) ?? "overview";
   document.addEventListener("click", onClick);
   document.addEventListener("submit", onSubmit);
@@ -986,6 +1036,7 @@ export function boot(env = {}) {
     store,
     ui,
     render,
+    setLanguage,
     selectTab,
     runCommand,
     toast,

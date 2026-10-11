@@ -100,6 +100,19 @@ export const minecraftDroppableJunkNames = [
   "cobbled_deepslate",
 ] as const;
 
+/**
+ * Drops of the mining allowlist that are worth a detour, derived from the table itself: everything an
+ * ore or fuel block yields, minus the plain terrain that only serves as filler. Adding an ore above
+ * therefore adds its drop here too; the hand-written planner list used to miss one.
+ */
+export const minecraftResourceDropNames: readonly string[] = [
+  ...new Set(
+    Object.values(minecraftMiningRequirements)
+      .map((requirement) => requirement.drop)
+      .filter((drop) => !(minecraftDroppableJunkNames as readonly string[]).includes(drop)),
+  ),
+].sort();
+
 const pickaxeTiers: Readonly<Record<string, 0 | 1 | 2 | 3 | 4>> = {
   wooden_pickaxe: 1,
   stone_pickaxe: 2,

@@ -10,6 +10,7 @@ export class ApiError extends Error {
 }
 
 /** Relative URLs on purpose: the page works at "/" and behind any path prefix or preview proxy. */
+/** @param {{ fetch?: typeof fetch, token?: string }} [options] */
 export function createApi({ fetch: fetchImpl = globalThis.fetch?.bind(globalThis), token = "" } = {}) {
   async function readJson(response) {
     try {
@@ -19,10 +20,17 @@ export function createApi({ fetch: fetchImpl = globalThis.fetch?.bind(globalThis
     }
   }
 
+  /** @param {string} path @param {{ signal?: AbortSignal }} [options] */
   async function getJson(path, { signal } = {}) {
     let response;
     try {
-      response = await fetchImpl(path, { headers: { accept: "application/json" }, cache: "no-store", ...(signal ? { signal } : {}) });
+      // The token is sent on reads as well: a Control Center on a LAN address (`--control-host 0.0.0.0`) serves its
+      // snapshot only to a caller that has it, and this page does.
+      response = await fetchImpl(path, {
+        headers: { accept: "application/json", "x-gamemind-token": token },
+        cache: "no-store",
+        ...(signal ? { signal } : {}),
+      });
     } catch (error) {
       throw new ApiError(`Could not reach GameMind (${error instanceof Error ? error.message : String(error)})`, 0, null);
     }

@@ -256,7 +256,7 @@ test("progress is a fraction only when the task reports a measurable goal", () =
 
 // ---- API client ----------------------------------------------------------------------------------------
 
-test("the API client uses relative URLs, sends the token only on commands and reports refusals as results", async () => {
+test("the API client uses relative URLs, sends the token on reads and commands, and reports refusals as results", async () => {
   const seen: Array<{ url: string; init: Record<string, unknown> | undefined }> = [];
   const respond = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   const api = ui.api.createApi({
@@ -273,7 +273,8 @@ test("the API client uses relative URLs, sends the token only on commands and re
   assert.equal((await api.snapshot({ fresh: true }), seen[1]?.url), "./api/snapshot?fresh=1");
   await api.query("learning", { store: "simulated", empty: "", missing: undefined, gone: null });
   assert.equal(seen[2]?.url, "./api/learning?store=simulated", "empty parameters are not sent");
-  assert.equal((seen[0]?.init?.headers as Record<string, string>)["x-gamemind-token"], undefined, "reads carry no token");
+  // Reads carry it too: a Control Center bound to a LAN address serves its snapshot only to a caller with the token.
+  assert.equal((seen[0]?.init?.headers as Record<string, string>)["x-gamemind-token"], "secret-token");
 
   const refused = await api.command("startTask", { kind: "gather-logs" });
   assert.deepEqual({ ok: refused.ok, status: refused.status, message: refused.message }, { ok: false, status: 409, message: "A task is already running." });

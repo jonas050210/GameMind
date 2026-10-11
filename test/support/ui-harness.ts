@@ -19,6 +19,8 @@ export interface UiModules {
   readonly store: any;
   readonly model: any;
   readonly format: any;
+  readonly i18n: any;
+  readonly german: any;
   readonly ui: any;
   readonly views: Record<"overview" | "training" | "bots" | "tasks" | "evaluation" | "learning" | "memory", any>;
 }
@@ -29,13 +31,15 @@ let loaded: Promise<UiModules> | null = null;
 export function loadUi(): Promise<UiModules> {
   loaded ??= (async () => {
     const load = (relative: string): Promise<any> => import(pathToFileURL(path.join(PUBLIC_DIRECTORY, relative)).href);
-    const [app, h, api, store, model, format, ui, overview, training, bots, tasks, evaluation, learning, memory] = await Promise.all([
+    const [app, h, api, store, model, format, i18n, german, ui, overview, training, bots, tasks, evaluation, learning, memory] = await Promise.all([
       load("app.js"),
       load("lib/h.js"),
       load("lib/api.js"),
       load("lib/store.js"),
       load("lib/model.js"),
       load("lib/format.js"),
+      load("lib/i18n.js"),
+      load("lib/i18n-de.js"),
       load("lib/ui.js"),
       load("views/overview.js"),
       load("views/training.js"),
@@ -45,7 +49,7 @@ export function loadUi(): Promise<UiModules> {
       load("views/learning.js"),
       load("views/memory.js"),
     ]);
-    return { app, h, api, store, model, format, ui, views: { overview, training, bots, tasks, evaluation, learning, memory } };
+    return { app, h, api, store, model, format, i18n, german, ui, views: { overview, training, bots, tasks, evaluation, learning, memory } };
   })();
   return loaded;
 }
@@ -121,11 +125,12 @@ export interface BootedPage {
 }
 
 /** Boots the real page against `fetch`. Timers are fake: nothing polls until the test says so. */
-export async function bootPage(options: { fetch: (input: string, init?: any) => Promise<Response>; token?: string; banner?: string; hash?: string; storedTheme?: string; html?: string; settle?: boolean }): Promise<BootedPage> {
+export async function bootPage(options: { fetch: (input: string, init?: any) => Promise<Response>; token?: string; banner?: string; hash?: string; storedTheme?: string; storedLanguage?: string; html?: string; settle?: boolean }): Promise<BootedPage> {
   const modules = await loadUi(); // before the page is installed: app.js starts itself when it finds a global page
   const page = new Page({ html: options.html ?? (await pageHtml(options.token ?? "test-token", options.banner ?? "")) });
   if (options.hash) page.window.location.hash = options.hash;
   if (options.storedTheme) page.window.localStorage.setItem("gamemind.theme", options.storedTheme);
+  if (options.storedLanguage) page.window.localStorage.setItem("gamemind.language", options.storedLanguage);
   const restore = page.install();
   const clock = new FakeClock();
   const app = modules.app.boot({

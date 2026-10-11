@@ -66,7 +66,7 @@ import {
   SimulatedMinecraftWorld,
   type SimWorldDefinition,
 } from "./world.js";
-import { standingReaches } from "../../games/minecraft/reach.js";
+import { reachedNavigationGoal, standingReaches } from "../../games/minecraft/reach.js";
 
 /** Virtual milliseconds a player-tossed item stays uncollectable (Java uses a short pickup delay). */
 const PLAYER_DROP_PICKUP_DELAY_MS = 1_000;
@@ -438,8 +438,7 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     const to = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
     const horizontalDistance = Math.hypot(to.x - (x + 0.5), to.z - (z + 0.5));
     const verticalDistance = Math.abs(to.y - y);
-    const confirmed =
-      horizontalDistance <= range + 1.25 && standingReaches(to.y, { x, y, z }, horizontalDistance, range + 1.25);
+    const confirmed = reachedNavigationGoal(to, { x, y, z }, range);
     return {
       confirmed,
       confirmation: "simulated_goal_reached_and_position_checked",

@@ -31,8 +31,9 @@ export interface EnhancedRunReport extends LearningRunReport {
   readonly rewardStats: {
     readonly meanReward: number;
     readonly ewmaReward: number;
-    readonly minReward: number;
-    readonly maxReward: number;
+    /** Null while no episode was recorded; a missing measurement is not a reward of zero. */
+    readonly minReward: number | null;
+    readonly maxReward: number | null;
     readonly positiveRate: number;
   };
   readonly classFailurePatterns: number;
@@ -214,6 +215,8 @@ export class EnhancedLearner {
             positiveRate: this.totalRewardEpisodes > 0
               ? this.positiveRewardCount / this.totalRewardEpisodes
               : 0,
+            minReward: this.totalRewardEpisodes > 0 ? this.minReward : null,
+            maxReward: this.totalRewardEpisodes > 0 ? this.maxReward : null,
           },
         },
         report?.note ?? `run ${baseReport.runId}`,
@@ -234,8 +237,9 @@ export class EnhancedLearner {
       rewardStats: {
         meanReward: Math.round(this.meanReward * 10000) / 10000,
         ewmaReward: Math.round(this.ewmaReward * 10000) / 10000,
-        minReward: this.minReward === Infinity ? 0 : Math.round(this.minReward * 10000) / 10000,
-        maxReward: this.maxReward === -Infinity ? 0 : Math.round(this.maxReward * 10000) / 10000,
+        // null (not 0) while no episode was recorded: "no measurement" is not "a reward of zero".
+        minReward: this.minReward === Infinity ? null : Math.round(this.minReward * 10000) / 10000,
+        maxReward: this.maxReward === -Infinity ? null : Math.round(this.maxReward * 10000) / 10000,
         positiveRate: this.totalRewardEpisodes > 0
           ? Math.round((this.positiveRewardCount / this.totalRewardEpisodes) * 1000) / 1000
           : 0,

@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, readdir, rename, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { redactDeep, redactText, type RedactionContext } from "./redact.js";
 
@@ -87,7 +87,13 @@ export interface AppEventLogOptions {
   readonly boot?: string;
   /** Rotates the active file once it exceeds this many bytes. */
   readonly maxFileBytes?: number;
+  /** How many JSONL files the log leaves behind in total, the active one included. Default 4. */
   readonly keepFiles?: number;
+  /**
+   * Reads the size of the active file, in bytes. Called once per log instead of once per event: the
+   * rotation check used to `stat` the file for every recorded line, which is a syscall per log entry.
+   */
+  readonly measureActiveFile?: (file: string) => Promise<number>;
   /** Called when persistence fails; the log keeps working in memory. */
   readonly onPersistError?: (error: Error) => void;
 }
@@ -112,6 +118,8 @@ export class AppEventLog {
   private writes: Promise<void> = Promise.resolve();
   private loaded = 0;
   private persistFailures = 0;
+  /** Bytes in the active file, counted as lines are appended; `null` means "not measured yet". */
+  private activeBytes: number | null = null;
 
   constructor(private readonly options: AppEventLogOptions) {
     this.capacity = Math.max(50, options.capacity ?? 2_000);
@@ -265,6 +273,7 @@ export class AppEventLog {
         await mkdir(directory, { recursive: true });
         await this.rotateIfNeeded(directory);
         await appendFile(path.join(directory, ACTIVE_FILE), line, "utf8");
+        if (this.activeBytes !== null) this.activeBytes += Buffer.byteLength(line, "utf8");
       })
       .catch((error: unknown) => {
         this.persistFailures += 1;
@@ -274,17 +283,39 @@ export class AppEventLog {
 
   private async rotateIfNeeded(directory: string): Promise<void> {
     const limit = this.options.maxFileBytes ?? 2_000_000;
+    // `keepFiles` counts every file the log leaves behind, the active one included; before, it counted
+    // only the rotated files and the log kept one file more than configured (and never removed files a
+    // previous, larger configuration had left in the directory).
     const keep = Math.max(1, this.options.keepFiles ?? 4);
-    let size = 0;
-    try {
-      size = (await stat(path.join(directory, ACTIVE_FILE))).size;
-    } catch {
+    if (this.activeBytes === null) {
+      const measure = this.options.measureActiveFile ?? (async (file: string) => (await stat(file)).size);
+      try {
+        this.activeBytes = await measure(path.join(directory, ACTIVE_FILE));
+      } catch (error) {
+        // A file that is not there yet is empty, so the appends can be counted from zero. Any other
+        // failure leaves the size unknown and the next write measures again.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") this.activeBytes = 0;
+        return;
+      }
+    }
+    if (this.activeBytes < limit) return;
+    for (const name of await readdir(directory)) {
+      const index = rotationIndex(name);
+      if (index >= keep && (index > 0 || name !== ACTIVE_FILE)) {
+        await rm(path.join(directory, name), { force: true }).catch(() => undefined);
+      }
+    }
+    // The active file is renamed into history below, so whatever it held is no longer its size.
+    this.activeBytes = 0;
+    const historySlots = keep - 1;
+    if (historySlots === 0) {
+      // Only the newest file is kept: start the active file over instead of renaming it into history.
+      await rm(path.join(directory, ACTIVE_FILE), { force: true }).catch(() => undefined);
       return;
     }
-    if (size < limit) return;
-    for (let index = keep - 1; index >= 1; index -= 1) {
+    for (let index = historySlots; index >= 2; index -= 1) {
       try {
-        await rename(path.join(directory, `events.${index}.jsonl`), path.join(directory, `events.${index + 1}.jsonl`));
+        await rename(path.join(directory, `events.${index - 1}.jsonl`), path.join(directory, `events.${index}.jsonl`));
       } catch {
         // Missing rotation slots are normal.
       }

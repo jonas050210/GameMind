@@ -14,6 +14,8 @@
  *     what it was.
  */
 
+import { CRITICAL_HEALTH, CRITICAL_HUNGER, FOOD_PRIORITY_HUNGER } from "../survival-thresholds.js";
+
 export interface RewardBreakdown {
   /** Maintaining health and food above critical levels. Death is a large penalty. */
   readonly survival: number;
@@ -100,9 +102,9 @@ export const DEFAULT_REWARD_CONFIG: RewardConfig = {
   },
   fastDurationMs: 500,
   slowDurationMs: 5_000,
-  criticalHealth: 6,
-  criticalHunger: 4,
-  hungerRewardThreshold: 14,
+  criticalHealth: CRITICAL_HEALTH,
+  criticalHunger: CRITICAL_HUNGER,
+  hungerRewardThreshold: FOOD_PRIORITY_HUNGER,
   componentCap: 3.0,
 };
 
@@ -271,24 +273,29 @@ export interface RewardAggregate {
   readonly count: number;
   readonly mean: number;
   readonly ewma: number;
-  readonly min: number;
-  readonly max: number;
+  /** Lowest reward recorded so far, or null while nothing was recorded. `-Infinity`/`Infinity` are not JSON. */
+  readonly min: number | null;
+  readonly max: number | null;
+  /** How many of the counted rewards were positive; carried so the rate never has to be re-derived from a rounded value. */
+  readonly positiveCount: number;
   readonly positiveRate: number;
 }
 
 const REWARD_EWMA_ALPHA = 0.3;
 
 export function emptyRewardAggregate(): RewardAggregate {
-  return { count: 0, mean: 0, ewma: 0, min: Infinity, max: -Infinity, positiveRate: 0 };
+  return { count: 0, mean: 0, ewma: 0, min: null, max: null, positiveCount: 0, positiveRate: 0 };
 }
 
 export function updateRewardAggregate(prev: RewardAggregate, reward: number): RewardAggregate {
   const count = prev.count + 1;
   const mean = prev.mean + (reward - prev.mean) / count;
   const ewma = prev.count === 0 ? reward : REWARD_EWMA_ALPHA * reward + (1 - REWARD_EWMA_ALPHA) * prev.ewma;
-  const min = Math.min(prev.min, reward);
-  const max = Math.max(prev.max, reward);
-  const positives = Math.round(prev.positiveRate * prev.count) + (reward > 0 ? 1 : 0);
+  const min = prev.min === null ? reward : Math.min(prev.min, reward);
+  const max = prev.max === null ? reward : Math.max(prev.max, reward);
+  // Recomputing the rate from the rounded value drifted after a few thousand episodes, so the running count of
+  // positive rewards is carried explicitly instead.
+  const positives = prev.positiveCount + (reward > 0 ? 1 : 0);
   const positiveRate = positives / count;
   return {
     count,
@@ -296,19 +303,30 @@ export function updateRewardAggregate(prev: RewardAggregate, reward: number): Re
     ewma: Math.round(ewma * 10_000) / 10_000,
     min: Math.round(min * 10_000) / 10_000,
     max: Math.round(max * 10_000) / 10_000,
+    positiveCount: positives,
     positiveRate: Math.round(positiveRate * 1_000) / 1_000,
   };
 }
 
+/**
+ * Reads an aggregate back from persisted JSON. A value written by an older version (`min`/`max` as
+ * `null` because `Infinity` had been serialised away) yields `null`, not a fabricated 0.
+ */
 export function parseRewardAggregate(value: unknown): RewardAggregate {
   if (typeof value !== "object" || value === null) return emptyRewardAggregate();
   const raw = value as Record<string, unknown>;
+  const count = typeof raw.count === "number" ? Math.max(0, Math.trunc(raw.count)) : 0;
+  const positiveRate = typeof raw.positiveRate === "number" ? raw.positiveRate : 0;
+  const positiveCount = typeof raw.positiveCount === "number" && Number.isInteger(raw.positiveCount)
+    ? Math.min(count, Math.max(0, raw.positiveCount))
+    : Math.round(positiveRate * count);
   return {
-    count: typeof raw.count === "number" ? Math.max(0, raw.count) : 0,
+    count,
     mean: typeof raw.mean === "number" ? raw.mean : 0,
     ewma: typeof raw.ewma === "number" ? raw.ewma : 0,
-    min: typeof raw.min === "number" ? raw.min : 0,
-    max: typeof raw.max === "number" ? raw.max : 0,
-    positiveRate: typeof raw.positiveRate === "number" ? raw.positiveRate : 0,
+    min: typeof raw.min === "number" ? raw.min : null,
+    max: typeof raw.max === "number" ? raw.max : null,
+    positiveCount,
+    positiveRate,
   };
 }

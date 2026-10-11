@@ -234,6 +234,7 @@ test("a one-shot session ends with its task, and says why", async () => {
     const end = await fixture.session.ended;
     assert.equal(end.reason, "one-shot task finished");
     assert.equal(fixture.session.state, "shutdown");
+    assert.equal(fixture.session.view().shutdownIncomplete, false, "a clean stop says so");
     assert.equal(fixture.session.runtime.status().adapterStatus, "disconnected");
   } finally {
     await fixture.close();
@@ -401,6 +402,11 @@ test("shutdown steps are bounded: a hung step is reported and the remaining step
     const timeouts = fixture.events.list({ q: "SHUTDOWN_STEP_TIMEOUT" });
     assert.equal(timeouts.matched, 1, "the hung step is reported in the event log");
     assert.match(timeouts.events[0]?.message ?? "", /task scheduler and run host/);
+    // The stop is not presented as clean while a step is still running in the background.
+    assert.equal(fixture.session.view().shutdownIncomplete, true);
+    const shutdownEvent = fixture.events.list({ q: "SESSION_SHUTDOWN" }).events.at(-1);
+    // The event log stores scalar data, so the list arrives as its JSON text.
+    assert.match(String((shutdownEvent?.data as { incompleteSteps?: unknown } | undefined)?.incompleteSteps ?? ""), /task scheduler and run host/);
     await realClose();
   } finally {
     await fixture.close();

@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { AppAlreadyRunningError, GameMindApp, taskCatalog } from "../src/app/app.js";
+import { AppAlreadyRunningError, GameMindApp, InstanceLockUnreadableError, taskCatalog } from "../src/app/app.js";
 import { BrowserOpener, type SpawnOpener } from "../src/app/browser.js";
 import { JobRunner } from "../src/app/jobs.js";
 import { AppEventLog } from "../src/app/event-log.js";
@@ -250,6 +250,39 @@ test("a second app in the same project is refused with the first one's address; 
   }
 });
 
+test("a lock written on the other operating system is reported, never judged, and the platform travels with it", async () => {
+  // A project folder shared between WSL and Windows (a OneDrive desktop, for instance) can hold the lock of a
+  // run on the other side. Its pid belongs to a different process table, so "is that pid alive here?" decides
+  // nothing; the answer that cannot end in two bots on one account is to stop and name the file.
+  const directory = await mkdtemp(path.join(tmpdir(), "gamemind-app-lock-foreign-"));
+  const lockFile = path.join(directory, "data", "run", "gamemind.lock.json");
+  await mkdir(path.dirname(lockFile), { recursive: true });
+  try {
+    const other = process.platform === "win32" ? "linux" : "win32";
+    await writeFile(lockFile, JSON.stringify({ pid: 2_147_000_000, url: null, platform: other }));
+    await assert.rejects(
+      startApp({ instanceLock: true, directory }),
+      (error: unknown) => {
+        assert.ok(error instanceof InstanceLockUnreadableError);
+        assert.match(error.message, new RegExp(`written on '${other}'`));
+        assert.match(error.message, /delete that file/);
+        return true;
+      },
+    );
+    assert.ok((await readFile(lockFile, "utf8")).includes(other), "the foreign lock is left alone for the operator");
+
+    // The same lock written by this platform is judged by its pid as before.
+    await writeFile(lockFile, JSON.stringify({ pid: 2_147_000_000, url: null, platform: process.platform }));
+    const app = await startApp({ instanceLock: true, directory });
+    const written = JSON.parse(await readFile(lockFile, "utf8")) as { pid: number; platform: string };
+    assert.equal(written.pid, process.pid);
+    assert.equal(written.platform, process.platform, "the lock says which process table its pid belongs to");
+    await app.app.shutdown("test complete");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a rejected or impossible connection request leaves no session behind and says why", async () => {
   const fixture = await startApp();
   try {
@@ -480,3 +513,42 @@ test("simulated sessions record into their own store and never into the live one
 });
 
 void createSimulatedResources;
+
+test("a lock file that cannot be read stops the start instead of being overwritten", async () => {
+  // It used to be treated as "nothing alive to protect" and silently replaced — in exactly the situation where a
+  // second agent would then share one Minecraft account and one data directory. A missing lock still means free.
+  const directory = await mkdtemp(path.join(tmpdir(), "gamemind-app-lock-unreadable-"));
+  const lockFile = path.join(directory, "data", "run", "gamemind.lock.json");
+  await mkdir(path.dirname(lockFile), { recursive: true });
+  try {
+    await writeFile(lockFile, "{ this is not json");
+    await assert.rejects(
+      startApp({ instanceLock: true, directory }),
+      (error: unknown) => {
+        assert.ok(error instanceof InstanceLockUnreadableError);
+        assert.match(error.message, /could not be read/);
+        assert.match(error.message, /delete that file/);
+        return true;
+      },
+    );
+    const truncated = await readFile(lockFile, "utf8");
+    assert.equal(truncated, "{ this is not json", "the unreadable lock is left alone for the operator");
+
+    // An empty file is equally not a claim that nothing runs.
+    await writeFile(lockFile, "");
+    await assert.rejects(startApp({ instanceLock: true, directory }), InstanceLockUnreadableError);
+
+    // A dead holder's readable lock is still replaced, and a missing one reserves the directory.
+    await writeFile(lockFile, JSON.stringify({ pid: 2_147_000_000, url: null }));
+    const app = await startApp({ instanceLock: true, directory });
+    assert.equal(JSON.parse(await readFile(lockFile, "utf8")).pid, process.pid);
+    await app.app.shutdown("test complete");
+    await rm(lockFile, { force: true });
+
+    const fresh = await startApp({ instanceLock: true, directory });
+    assert.equal(JSON.parse(await readFile(lockFile, "utf8")).pid, process.pid);
+    await fresh.app.shutdown("test complete");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

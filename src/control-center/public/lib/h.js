@@ -9,9 +9,16 @@
 //
 // It touches `document` only inside functions, so it can be loaded and tested in Node with a stand-in DOM.
 
+/**
+ * A vnode: what a view returns and `mount` compares against the page.
+ * @typedef {string | VNode} Node
+ * @typedef {{ tag: string, props: Record<string, any>, children: Node[], key?: any, node?: any }} VNode
+ */
+
 const SVG_NS = "http://www.w3.org/2000/svg";
 const PROPERTY_PROPS = new Set(["value", "checked", "selected", "disabled", "hidden", "open", "readOnly"]);
 
+/** @param {any[]} children @param {Node[]} [out] @returns {Node[]} */
 function flatten(children, out = []) {
   for (const child of children) {
     if (child === null || child === undefined || child === false || child === true) continue;
@@ -21,20 +28,25 @@ function flatten(children, out = []) {
   return out;
 }
 
-/** h("div", { class: "x" }, "text", h("span", null, "more")) */
+/**
+ * h("div", { class: "x" }, "text", h("span", null, "more"))
+ * @param {string} tag @param {Record<string, any> | null} [props] @param {...any} children @returns {VNode}
+ */
 export function h(tag, props, ...children) {
   return { tag, props: props ?? {}, children: flatten(children) };
 }
 
-/** A subtree that is created once for `key` and then left alone (forms). */
+/** A subtree that is created once for `key` and then left alone (forms). @param {string} key @param {any} node @returns {VNode} */
 h.stat = function stat(key, node) {
   return { tag: "#static", key, node, props: {}, children: [] };
 };
 
+/** @param {string} tag @param {boolean} inSvg @returns {boolean} */
 function isSvg(tag, inSvg) {
   return inSvg || tag === "svg";
 }
 
+/** @param {Node} vnode @param {boolean} inSvg @returns {any} */
 function create(vnode, inSvg) {
   if (typeof vnode === "string") return document.createTextNode(vnode);
   if (vnode.tag === "#static") {
@@ -43,6 +55,7 @@ function create(vnode, inSvg) {
     return node;
   }
   const svg = isSvg(vnode.tag, inSvg);
+  /** @type {any} */
   const element = svg ? document.createElementNS(SVG_NS, vnode.tag) : document.createElement(vnode.tag);
   element.__props = {};
   applyProps(element, vnode.props, svg);
@@ -51,6 +64,7 @@ function create(vnode, inSvg) {
   return element;
 }
 
+/** @param {any} element @param {string} name @param {any} value @param {boolean} svg @returns {void} */
 function setProp(element, name, value, svg) {
   if (name === "key" || name === "children") return;
   if (name === "class") {
@@ -81,6 +95,7 @@ function setProp(element, name, value, svg) {
   element.setAttribute(name, value === true ? "" : String(value));
 }
 
+/** @param {any} element @param {Record<string, any>} props @param {boolean} svg @returns {void} */
 function applyProps(element, props, svg) {
   const previous = element.__props ?? {};
   for (const name of Object.keys(previous)) {
@@ -98,6 +113,7 @@ function applyProps(element, props, svg) {
   element.__props = { ...props };
 }
 
+/** @param {any} node @param {Node} vnode @returns {boolean} */
 function sameKind(node, vnode) {
   if (typeof vnode === "string") return node.nodeType === 3;
   if (vnode.tag === "#static") return node.__staticKey === vnode.key;
@@ -107,6 +123,7 @@ function sameKind(node, vnode) {
   return key === undefined ? node.__key === undefined : node.__key === key;
 }
 
+/** @param {any} parent @param {Node[]} vnodes @param {boolean} inSvg @returns {void} */
 function reconcile(parent, vnodes, inSvg) {
   const existing = Array.from(parent.childNodes);
   const byKey = new Map();
@@ -137,6 +154,7 @@ function reconcile(parent, vnodes, inSvg) {
   });
 }
 
+/** @param {any} node @param {Node} vnode @param {boolean} inSvg @returns {void} */
 function patch(node, vnode, inSvg) {
   if (typeof vnode === "string") {
     if (node.data !== vnode) node.data = vnode;
@@ -148,12 +166,12 @@ function patch(node, vnode, inSvg) {
   reconcile(node, vnode.children, svg && vnode.tag !== "foreignObject");
 }
 
-/** Makes the children of `container` match `vnodes` (one vnode or an array). */
+/** Makes the children of `container` match `vnodes` (one vnode or an array). @param {any} container @param {any} vnodes @returns {void} */
 export function mount(container, vnodes) {
   reconcile(container, flatten([vnodes]), false);
 }
 
-/** Serialises a vnode tree to HTML text; used by tests and never by the page. */
+/** Serialises a vnode tree to HTML text; used by tests and never by the page. @param {any} vnode @returns {string} */
 export function toHtml(vnode) {
   if (typeof vnode === "string") return vnode.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
   if (vnode.tag === "#static") return toHtml(vnode.node);
@@ -165,7 +183,7 @@ export function toHtml(vnode) {
   return `<${vnode.tag}${attributes ? ` ${attributes}` : ""}>${inner}</${vnode.tag}>`;
 }
 
-/** Plain text of a vnode tree, for assertions. */
+/** Plain text of a vnode tree, for assertions. @param {any} vnode @returns {string} */
 export function textOf(vnode) {
   if (typeof vnode === "string") return vnode;
   if (vnode.tag === "#static") return textOf(vnode.node);

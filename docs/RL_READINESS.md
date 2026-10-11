@@ -15,6 +15,13 @@ console.log("Blockers:", assessment.blockers);
 
 ## Criteria
 
+Three of the criteria below are probed when the assessment runs, so they fail when the module behind them
+breaks: the continuous feature contract must parse (`extendedFeaturesSchema`), the reward aggregate must
+produce finite numbers (`updateRewardAggregate`), and a fresh `SafetyBroker` must refuse a high-risk
+capability. The rest come from `RLReadinessEvidence` (`simulatorStepsPerSecond`, `learnedAdvisorRegistered`,
+`rewardValidated`, `transferEvidence`, `liveVerificationRuns`); an absent measurement is an unmet criterion.
+The table is the reading with no evidence supplied.
+
 | Criterion | Weight | Status | Rationale |
 |---|---|---|---|
 | Continuous state representation | 15 | ✓ Met | `episode-extended.ts` provides continuous distances, inventory state, equipment tiers |
@@ -22,8 +29,8 @@ console.log("Blockers:", assessment.blockers);
 | Reward function | 15 | ✓ Met | `reward.ts` provides multi-objective reward with anti-exploitation design |
 | Reward validation | 10 | ✗ Unmet | Reward function is untested against real gameplay data |
 | Fast training environment | 20 | ✗ Unmet | Simulator too simple for transfer; Mineflayer too slow (single client) |
-| Sim-to-real transfer evidence | 15 | ✗ Unmet | No live testing infrastructure validated against real Minecraft |
-| Live Minecraft testing | 10 | ✗ Unmet | Docker-based test infrastructure exists but not yet validated |
+| Sim-to-real transfer evidence | 15 | ✗ Unmet | No live run has shown simulator-trained behaviour working in real Minecraft |
+| Live Minecraft testing | 10 | ✗ Unmet | No counted run yet: the 1.20.4 stand-in run in `LIVE_VERIFICATION.md` §16 is not vanilla, and the Docker test server (`src/testing/live/`) has not been used for a verified run. Pass `liveVerificationRuns` once one is done |
 | Safety broker integration | 5 | ✓ Met | Safety broker is external to any policy — learned components cannot bypass it |
 
 **Current Score: 35/100**
@@ -67,7 +74,7 @@ These components exist and are tested:
 4. **Class-level failure memory** (`class-failure-memory.ts`): generalised failure patterns across targets
 5. **Safety broker**: external to any policy — a learned component cannot bypass safety checks
 6. **Evaluation harness**: scenario-based evaluation with held-out seeds, policy comparison
-7. **Live testing infrastructure** (`testing/live/`): Docker-based real Minecraft server, test scenarios
+7. **Live testing infrastructure** (`src/testing/live/`: compose file for a vanilla test server; `docs/LIVE_VERIFICATION.md`: the verifier and its phases, run so far against a non-vanilla stand-in)
 
 ## Path to RL
 

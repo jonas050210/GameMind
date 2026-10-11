@@ -86,7 +86,7 @@ import type {
   GameObservation,
   GameSession,
 } from "../../core/types.js";
-import { standingReaches } from "./reach.js";
+import { NAVIGATION_RANGE_SLACK, reachedNavigationGoal } from "./reach.js";
 
 const require = createRequire(import.meta.url);
 const unsafePlacementSupportNames = new Set([
@@ -791,12 +791,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         resolve(session);
       };
 
+      /**
+       * A client that has been superseded (a stale connection torn down by a reconnect) must not be able to
+       * change the adapter's state: a late `error` or `end` from the previous bot used to null the *new*
+       * session and mark the healthy connection as failed, which made every action fail with
+       * NO_ACTIVE_SESSION until the operator reconnected by hand.
+       */
+      const ownsCurrentState = (): boolean => this.bot === bot || (!settled && this.bot === null);
+
       const onError = (error: Error): void => {
         this.logger.error({ err: error, sessionId }, "Minecraft client emitted an error");
         if (!settled) {
           finishFailure(error);
           void this.quitAfterConnectFailure(bot, error.message);
-        } else if (this.statusValue === "connected") {
+        } else if (this.statusValue === "connected" && ownsCurrentState()) {
           this.sessionValue = null;
           this.transition("failed", error.message, sessionId);
           void this.quitAfterConnectFailure(bot, error.message);
@@ -805,17 +813,29 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
 
       const onKicked = (reason: string): void => {
         const message = `Minecraft server kicked the bot: ${reason}`;
-        if (!settled) finishFailure(new Error(message), "disconnected");
-        else {
-          this.pendingSessionId = null;
-          this.sessionValue = null;
-          this.transition("disconnected", message, sessionId);
+        if (!settled) {
+          // A kick during the handshake closes the connect attempt *and* the socket; the server does not
+          // necessarily close it for us.
+          finishFailure(new Error(message), "disconnected");
+          void this.quitAfterConnectFailure(bot, message);
+          return;
         }
+        if (!ownsCurrentState()) return;
+        this.pendingSessionId = null;
+        this.sessionValue = null;
+        // A kicked client is not necessarily closed by the server; release the socket so a reconnect
+        // never leaves a stray connection behind.
+        void this.quitAfterConnectFailure(bot, message);
+        this.transition("disconnected", message, sessionId);
       };
 
       const onEnd = (reason: string): void => {
         const message = reason || "Minecraft client connection ended.";
-        if (!settled) finishFailure(new Error(message), "disconnected");
+        if (!settled) {
+          finishFailure(new Error(message), "disconnected");
+          return;
+        }
+        if (!ownsCurrentState()) return;
         this.pendingSessionId = null;
         this.sessionValue = null;
         if (this.bot === bot) this.bot = null;
@@ -856,7 +876,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const radius = this.config.observationRadius;
     const verticalRadius = 2;
     const localScanStartedAt = performance.now();
-    const cube: MinecraftObservation["nearbyBlocks"][number][] = [];
+    // The block reference is kept next to its entry: line-of-sight is tested below, after the cap, because
+    // each `canSeeBlock` walks a ray through the world and most of the cube does not survive the cap.
+    const cube: Array<{
+      readonly block: Parameters<typeof observedBlockVisibility>[1];
+      readonly entry: MinecraftObservation["nearbyBlocks"][number];
+    }> = [];
     let sampledCells = 0;
     let unknownCells = 0;
 
@@ -870,18 +895,19 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
             continue;
           }
           if (block.name.endsWith("_air") || block.name === "air") continue;
-          const visible = observedBlockVisibility(bot, block);
           cube.push({
-            position: {
-              x: Math.floor(block.position.x),
-              y: Math.floor(block.position.y),
-              z: Math.floor(block.position.z),
+            block,
+            entry: {
+              position: {
+                x: Math.floor(block.position.x),
+                y: Math.floor(block.position.y),
+                z: Math.floor(block.position.z),
+              },
+              name: block.name,
+              type: block.type,
+              boundingBox: block.boundingBox,
+              distance: block.position.distanceTo(position),
             },
-            name: block.name,
-            type: block.type,
-            boundingBox: block.boundingBox,
-            distance: block.position.distanceTo(position),
-            ...(visible === undefined ? {} : { visible }),
           });
         }
       }
@@ -890,13 +916,16 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     // iteration-order cut used to drop resource blocks on one side of the cube silently.
     const cubeTruncated = cube.length > this.config.maxObservedBlocks;
     const nearbyBlocks = cube
-      .map((block) => ({ block, distance: distanceBetween(block.position, center) }))
+      .map((candidate) => ({ candidate, distance: distanceBetween(candidate.entry.position, center) }))
       .sort((left, right) => {
-        const interest = blockObservationPriority(right.block.name) - blockObservationPriority(left.block.name);
+        const interest = blockObservationPriority(right.candidate.entry.name) - blockObservationPriority(left.candidate.entry.name);
         return interest || left.distance - right.distance;
       })
       .slice(0, this.config.maxObservedBlocks)
-      .map(({ block }) => block);
+      .map(({ candidate }) => {
+        const visible = observedBlockVisibility(bot, candidate.block);
+        return visible === undefined ? candidate.entry : { ...candidate.entry, visible };
+      });
     const localScanMs = performance.now() - localScanStartedAt;
 
     const strategicScanStartedAt = performance.now();
@@ -1456,8 +1485,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const to = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
     const horizontalDistance = Math.hypot(to.x - (x + 0.5), to.z - (z + 0.5));
     const verticalDistance = Math.abs(to.y - y);
-    const confirmed =
-      horizontalDistance <= range + 1.25 && standingReaches(to.y, { x, y, z }, horizontalDistance, range + 1.25);
+    const confirmed = reachedNavigationGoal(to, { x, y, z }, range);
     return {
       confirmed,
       confirmation: confirmed

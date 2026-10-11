@@ -3,7 +3,14 @@ import { observedHazards } from "./block-classes.js";
 import { heldItems } from "./inventory-accounting.js";
 import { isMinecraftFoodName } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
-import { DROWNING_ACTION_BLOCK_AIR_TICKS, DROWNING_SURFACE_AIR_TICKS } from "../../core/survival-thresholds.js";
+import {
+  CRITICAL_HEALTH,
+  CRITICAL_HUNGER,
+  DROWNING_ACTION_BLOCK_AIR_TICKS,
+  DROWNING_SURFACE_AIR_TICKS,
+  LOW_HEALTH,
+  LOW_HUNGER,
+} from "../../core/survival-thresholds.js";
 
 /**
  * Reflexes are the fast, pure layer of the agent. They read one fresh observation (and optionally the one
@@ -15,10 +22,10 @@ import { DROWNING_ACTION_BLOCK_AIR_TICKS, DROWNING_SURFACE_AIR_TICKS } from "../
  */
 
 export const REFLEX_THRESHOLDS = {
-  criticalHealth: 6,
-  lowHealth: 10,
-  starvingHunger: 4,
-  lowHunger: 8,
+  criticalHealth: CRITICAL_HEALTH,
+  lowHealth: LOW_HEALTH,
+  starvingHunger: CRITICAL_HUNGER,
+  lowHunger: LOW_HUNGER,
   hostileCloseDistance: 4,
   hostileNearDistance: 8,
   hazardUrgentDistance: 2,

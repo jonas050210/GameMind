@@ -87,6 +87,10 @@ test("failures that are about the environment or the session are excluded, not c
     [{ status: "failed", confirmed: false, failureCode: "ADAPTER_DISCONNECTED" }, /environment/],
     [{ status: "failed", confirmed: false, failureCode: "STALE_OBSERVATION" }, /environment/],
     [{ status: "failed", confirmed: false, failureCode: "CAPABILITY_NOT_AVAILABLE" }, /environment/],
+    // Planner refusals are about the world and the task, not about the skill that happened to be chosen;
+    // the learner used to charge them to that skill because its own kind list was shorter than the taxonomy's.
+    [{ status: "failed", confirmed: false, failureCode: "NO_FEASIBLE_GOAL" }, /environment/],
+    [{ status: "failed", confirmed: false, failureCode: "TASK_BLOCKED_THREAT" }, /environment/],
     [{ status: "disconnected", confirmed: false, failureCode: "ADAPTER_DISCONNECTED" }, /session was lost/],
     [{ status: "aborted", confirmed: false, failureCode: "OPERATOR_STOP" }, /interrupted/],
     [{ status: "rejected", confirmed: false, safetyDenied: true, failureCode: "SAFETY_HAZARD_NEARBY" }, /safety policy/],
@@ -146,6 +150,21 @@ async function withDirectory(body: (directory: string) => Promise<void>): Promis
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+function draftOf(entry: Episode) {
+  return {
+    runId: entry.runId,
+    taskId: entry.taskId,
+    sessionId: entry.sessionId,
+    sequence: entry.sequence,
+    worldKey: entry.worldKey,
+    policyVersion: null,
+    targetKey: entry.targetKey,
+    features: entry.features,
+    provenance: entry.provenance,
+    outcome: entry.outcome,
+  };
 }
 
 async function recordRun(learner: ExperienceLearner, runId: string, episodes: Episode[]): Promise<void> {
@@ -294,5 +313,44 @@ test("detail() explains every number the Learning panel shows", async () => {
     assert.equal(detail.policy.activeId, null);
     assert.equal(detail.recentRuns[0]?.runId, "run-1");
     assert.equal(detail.recentRuns[0]?.excluded, 4);
+  });
+});
+
+test("a run reports and counts only the episodes that are evidence for its learner", async () => {
+  // The demo episodes were logged but skipped for the statistics; the report and the checkpoint metadata used to
+  // count them anyway, so a promotion check saw successes and failures the live agent never produced.
+  await withDirectory(async (directory) => {
+    const learner = ExperienceLearner.forDirectory(directory, { evidenceProvenance: ["live"] });
+    await learner.load();
+    learner.beginRun({ runId: "mixed-1", taskId: "t", worldKey: "world-a" });
+    learner.recordEpisode({ ...draftOf(episode({ provenance: "simulator-demo" })), runId: "mixed-1" });
+    learner.recordEpisode({
+      ...draftOf(episode({ provenance: "simulator-demo", outcome: { status: "failed", confirmed: false, verified: null, progress: false, failureCode: "NAVIGATION_STUCK" } })),
+      runId: "mixed-1",
+    });
+    learner.recordEpisode({ ...draftOf(episode({ provenance: "live" })), runId: "mixed-1" });
+    const report = await learner.finishRun();
+    assert.equal(report.episodes, 3, "every draft is on the log");
+    assert.equal(report.successes, 1, "only the live success counts");
+    assert.equal(report.failures, 0, "the demo failure is not this run's failure");
+    assert.equal(report.discardedByProvenance, 2);
+    assert.equal(report.totalEpisodes, 3, "the log keeps them");
+    assert.match(learner.snapshot().history[0]?.note ?? "", /outside this learner's provenance/);
+  });
+});
+
+test("an excluded outcome is not shown as a run's last failure", async () => {
+  await withDirectory(async (directory) => {
+    const learner = ExperienceLearner.forDirectory(directory);
+    const mode = { status: "failed" as const, confirmed: false, verified: null, progress: false, failureCode: "GAME_MODE_BLOCKS_MINING" };
+    const stuck = { status: "failed" as const, confirmed: false, verified: null, progress: false, failureCode: "NAVIGATION_STUCK" };
+    await recordRun(learner, "run-fail", [episode({ outcome: stuck })]);
+    await recordRun(learner, "run-mode", [episode({ outcome: mode })]);
+    const detail = await learner.detail();
+    const failed = detail.recentRuns.find((run) => run.runId === "run-fail");
+    const excluded = detail.recentRuns.find((run) => run.runId === "run-mode");
+    assert.equal(failed?.lastFailureCode, "NAVIGATION_STUCK");
+    assert.equal(excluded?.lastFailureCode, null, "an environment verdict is counted as excluded, not as a failure");
+    assert.equal(excluded?.excluded, 1);
   });
 });

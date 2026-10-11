@@ -98,7 +98,15 @@ export class FanOutTraceSink implements TraceSink {
   }
 
   async close(): Promise<void> {
-    for (const sink of this.sinks) await sink.close?.();
+    // One sink that cannot close must not keep the others open: each is closed on its own, and a failure is
+    // reported on the logger this sink already has instead of escaping into the shutdown path.
+    for (const sink of this.sinks) {
+      try {
+        await sink.close?.();
+      } catch (error) {
+        this.logger.warn({ err: error }, "Trace sink could not be closed; continuing with the remaining sinks");
+      }
+    }
   }
 }
 
@@ -145,6 +153,12 @@ const CONSOLE_DEBUG_EVENT_TYPES: ReadonlySet<string> = new Set(["observation.rec
 
 export class TraceRecorder {
   private writeQueue: Promise<void> = Promise.resolve();
+  /**
+   * Set by `close()`. A trace event recorded after the recorder was closed is dropped instead of being handed to
+   * a closed sink: the shutdown path closed the JSONL log, and a late observation must not resurrect it (or throw
+   * out of a shutdown step).
+   */
+  private closed = false;
 
   constructor(
     private readonly sink: TraceSink,
@@ -173,6 +187,14 @@ export class TraceRecorder {
       correlationId: input.correlationId ?? null,
       data: sanitize(input.data ?? {}) as Readonly<Record<string, unknown>>,
     };
+
+    if (this.closed) {
+      this.logger.warn(
+        { eventType: event.eventType, sessionId: event.sessionId },
+        "Trace event recorded after the recorder was closed; dropped",
+      );
+      return event;
+    }
 
     const write = this.writeQueue.then(() => this.sink.write(event));
     this.writeQueue = write.catch(() => undefined);
@@ -208,7 +230,9 @@ export class TraceRecorder {
     return event;
   }
 
+  /** Flushes queued events and closes the sink. Idempotent; later `record` calls are dropped. */
   async close(): Promise<void> {
+    this.closed = true;
     await this.writeQueue;
     await this.sink.close?.();
   }

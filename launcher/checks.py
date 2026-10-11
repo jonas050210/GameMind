@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence
@@ -113,11 +114,19 @@ def check_project(root: Path) -> list[Problem]:
 
 
 def check_windows_mount(root: Path, wsl: bool) -> Optional[str]:
-    """A warning (not an error) for a project on the Windows drive seen from WSL: it works, but slowly and with watchers off."""
+    """A warning (not an error) for a project on the Windows drive seen from WSL: it works, but slowly."""
     text = root.as_posix()  # POSIX form, so a path object built on any OS is judged the same way
-    if wsl and re.match(r"^/mnt/[a-z]/", text):
-        return "The project is on the Windows drive (/mnt/<drive>). It works, but file access from WSL is much slower there; cloning into the Linux home folder is faster."
-    return None
+    if not (wsl and re.match(r"^/mnt/[a-z]/", text)):
+        return None
+    base = "The project is on the Windows drive (/mnt/<drive>). It works, but file access from WSL is much slower there; a checkout in the Linux home folder is faster."
+    if re.search(r"/onedrive[^/]*/", text, re.IGNORECASE):
+        return (
+            base
+            + " It is also inside OneDrive: the sync watches 'node_modules' and the constantly written 'data/' folder,"
+            " a file that is only a cloud placeholder cannot be read at all (mark the folder 'Always keep on this device'),"
+            " and two writers (WSL and the sync) can lose a rename. Keep the checkout out of OneDrive, or pause the sync while GameMind runs."
+        )
+    return base
 
 
 def read_json_file(path: Path) -> Optional[dict]:
@@ -128,7 +137,45 @@ def read_json_file(path: Path) -> Optional[dict]:
     return value if isinstance(value, dict) else None
 
 
-def pid_alive(pid: int, kill: Callable[[int, int], None] = os.kill) -> bool:
+ERROR_ACCESS_DENIED = 5
+SYNCHRONIZE = 0x00100000
+WAIT_TIMEOUT = 0x00000102
+
+
+def windows_process_alive(pid: int) -> bool:
+    """Whether a Windows pid belongs to a running process, without signalling it.
+
+    ``os.kill(pid, 0)`` must never be used for this on Windows: CPython's ``os.kill`` is ``TerminateProcess``
+    for any signal other than the console control events, so asking whether the process named in a stale lock
+    still exists would end whichever process happens to own that pid.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(SYNCHRONIZE, False, int(pid))
+    if not handle:
+        # No such process, or one this process may not look at; the second case keeps the conservative answer.
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def pid_alive(
+    pid: int,
+    kill: Callable[[int, int], None] = os.kill,
+    windows: Optional[bool] = None,
+    windows_check: Optional[Callable[[int], bool]] = None,
+) -> bool:
+    """Whether a pid belongs to a running process. ``windows`` and ``windows_check`` are the test seams."""
+    if windows if windows is not None else os.name == "nt":
+        return (windows_check or windows_process_alive)(pid)
     try:
         kill(pid, 0)
         return True
@@ -138,16 +185,49 @@ def pid_alive(pid: int, kill: Callable[[int, int], None] = os.kill) -> bool:
         return False
 
 
-def existing_instance(data_dir: Path, alive: Optional[Callable[[int], bool]] = None) -> Optional[dict]:
-    """The lock a running GameMind left (``data/run/gamemind.lock.json``), if its process still exists."""
+def data_directory(root: Path, passthrough: Sequence[str]) -> Path:
+    """Where the app keeps its lock. A ``--data-dir`` in the arguments handed to the agent wins over ``<root>/data``.
+
+    Without this the launcher watched one folder while the agent wrote its lock in another, so a run with its own
+    data directory looked like a second copy (and, the other way round, a second copy looked free).
+    """
+    items = [item for item in passthrough if item != "--"]
+    for index, item in enumerate(items):
+        if item == "--data-dir" and index + 1 < len(items):
+            value = items[index + 1]
+        elif item.startswith("--data-dir="):
+            value = item.split("=", 1)[1]
+        else:
+            continue
+        if value:
+            candidate = Path(value)
+            return candidate if candidate.is_absolute() else root / candidate
+    return root / "data"
+
+
+def existing_instance(
+    data_dir: Path,
+    alive: Optional[Callable[[int], bool]] = None,
+    platform: Optional[str] = None,
+) -> Optional[dict]:
+    """The lock a running GameMind left (``data/run/gamemind.lock.json``), if its process still exists.
+
+    A lock written on the other side of the WSL/Windows boundary records a pid of a different process table:
+    it can be neither confirmed nor denied here, so it is returned with ``foreignPlatform`` set and the caller
+    reports it instead of deciding. Starting one copy from Windows and one from WSL in the same project means
+    two bots on one account, so the answer is "cannot tell" rather than "free".
+    """
     alive = alive or pid_alive
     lock = read_json_file(data_dir / "run" / "gamemind.lock.json")
     if not lock:
         return None
     pid = lock.get("pid")
-    if isinstance(pid, int) and pid != os.getpid() and alive(pid):
-        return lock
-    return None
+    if not isinstance(pid, int) or pid == os.getpid():
+        return None
+    recorded = lock.get("platform")
+    if isinstance(recorded, str) and recorded != "" and recorded != (platform if platform is not None else sys.platform):
+        return {**lock, "foreignPlatform": recorded}
+    return lock if alive(pid) else None
 
 
 def is_port_free(host: str, port: int) -> bool:

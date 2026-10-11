@@ -74,6 +74,31 @@ export interface SafetyPolicy {
   readonly hazardBlockedCapabilities: readonly string[];
   /** Denied while the head is underwater and air is running out; movement to safety stays allowed. */
   readonly drowningBlockedCapabilities: readonly string[];
+  /**
+   * Denied while the agent is in the void dimension or below its dimension's world floor (falling out of
+   * the world); actions that move it back to solid ground stay allowed. Empty disables the check for
+   * policies that do not know the game's world floors.
+   */
+  readonly voidBlockedCapabilities: readonly string[];
+}
+
+/**
+ * Lowest reachable block layer per dimension; a position *below* it means the agent has left the world.
+ * Unknown dimensions fall back to the overworld floor, the lowest one in the game.
+ */
+const WORLD_FLOOR_Y: Readonly<Record<string, number>> = {
+  "minecraft:overworld": -64,
+  overworld: -64,
+  "minecraft:the_nether": 0,
+  the_nether: 0,
+  "minecraft:the_end": 0,
+  the_end: 0,
+};
+export const DEFAULT_WORLD_FLOOR_Y = -64;
+
+/** Dimensions that are void all the way through, so any position in them is a fall. */
+function isVoidDimension(dimension: string | null | undefined): boolean {
+  return dimension === "minecraft:the_void" || dimension === "the_void";
 }
 
 /** Air ticks below which stationary actions are refused; a normal player has 300. Shared with the reflex layer. */
@@ -106,6 +131,7 @@ export const DEFAULT_SAFETY_POLICY: SafetyPolicy = {
   hazardMaxDistance: null,
   hazardBlockedCapabilities: [],
   drowningBlockedCapabilities: [],
+  voidBlockedCapabilities: [],
 };
 
 export interface SafetyWorldContext {
@@ -122,12 +148,16 @@ export interface SafetyWorldContext {
   readonly isNight: boolean;
   /** Dimension id when the adapter reports one, e.g. "minecraft:the_void"; null when unreported. */
   readonly dimension?: string | null;
-  /** Feet/eye height in blocks; used only for the void-floor check when the dimension is unknown. */
+  /** Feet height in blocks; the void check compares it with the world floor of the reported dimension. */
   readonly positionY?: number | null;
   /** Distance to the closest observed hazard block (lava, fire, magma), null when nothing was seen. */
   readonly nearestHazardDistance?: number | null;
   readonly nearestHazardName?: string | null;
-  /** True while the player is on fire. */
+  /**
+   * True while the player is on fire, when the adapter can report it (the Minecraft observation does not
+   * carry it yet). It never suppresses another check: drowning and burning are independent dangers, and a
+   * guard that stood the drowning check down while burning would hide a real risk.
+   */
   readonly isBurning?: boolean;
   /** Air supply in ticks when the head is submerged; null when not applicable. */
   readonly oxygenTicks?: number | null;
@@ -494,7 +524,7 @@ export class SafetyBroker {
       }
 
       const air = world.oxygenTicks ?? null;
-      if (air !== null && air <= DROWNING_AIR_TICKS && world.isBurning !== true) {
+      if (air !== null && air <= DROWNING_AIR_TICKS) {
         const blocked = policy.drowningBlockedCapabilities.includes(request.capability);
         check("drowning", !blocked, `${air} air ticks left`);
         if (blocked) {
@@ -505,9 +535,29 @@ export class SafetyBroker {
         }
       }
 
-      if (policy.hazardMaxDistance !== null && (world.dimension === "minecraft:the_void" || world.dimension === "the_void")) {
-        check("void", false, "dimension is the void");
-        return deny("VOID", "The agent is in the void dimension; only escape actions are allowed.");
+      // Void: the dimension itself is void, or the agent fell below its world floor. Only the actions
+      // that keep it in place are refused — moving, looking and eating are how it gets back to safety.
+      if (policy.voidBlockedCapabilities.length > 0) {
+        const inVoidDimension = isVoidDimension(world.dimension);
+        const floorY = inVoidDimension
+          ? null
+          : world.dimension
+            ? (WORLD_FLOOR_Y[world.dimension] ?? DEFAULT_WORLD_FLOOR_Y)
+            : DEFAULT_WORLD_FLOOR_Y;
+        const belowFloor = floorY !== null && world.positionY !== null && world.positionY !== undefined && world.positionY < floorY;
+        if (inVoidDimension || belowFloor) {
+          const blocked = policy.voidBlockedCapabilities.includes(request.capability);
+          const detail = inVoidDimension
+            ? `dimension ${world.dimension} is the void`
+            : `y=${world.positionY} is below the world floor at ${floorY}`;
+          check("void", !blocked, detail);
+          if (blocked) {
+            return deny(
+              "VOID",
+              `The agent is falling out of the world (${detail}); '${request.capability}' would keep it in place. Move back to solid ground first.`,
+            );
+          }
+        }
       }
     }
 

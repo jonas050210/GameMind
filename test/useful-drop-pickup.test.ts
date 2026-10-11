@@ -2,9 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MinecraftTaskDecisionModel } from "../src/games/minecraft/decision-model.js";
 import { minecraftLogNames, minecraftPickupItemInputSchema, minecraftUsefulDropNames } from "../src/games/minecraft/capabilities.js";
-import { minecraftMiningDropNames } from "../src/games/minecraft/mining.js";
+import { minecraftDroppableJunkNames, minecraftMiningDropNames, minecraftMiningRequirements, minecraftResourceDropNames } from "../src/games/minecraft/mining.js";
 import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
 import { gatherResourceTaskSchema, mineResourceTaskSchema, craftItemTaskSchema } from "../src/games/minecraft/task.js";
+
+test("every worthwhile mining drop is on the planner's list, derived from the mining table", () => {
+  const junk = new Set<string>(minecraftDroppableJunkNames);
+  const worthwhile = new Set<string>();
+  for (const requirement of Object.values(minecraftMiningRequirements)) {
+    if (!junk.has(requirement.drop)) worthwhile.add(requirement.drop);
+  }
+  for (const drop of worthwhile) {
+    assert.ok(
+      (minecraftUsefulDropNames as readonly string[]).includes(drop),
+      `${drop} is a mining drop worth a detour, so the planner must pick it up when it sees it`,
+    );
+  }
+  // The copper ore in the allowlist drops raw_copper; the hand-written list used to miss exactly this one.
+  assert.ok((minecraftResourceDropNames as readonly string[]).includes("raw_copper"));
+  assert.equal((minecraftUsefulDropNames as readonly string[]).includes("raw_iron"), true);
+});
 
 test("all planned drops and every mining drop pass pickup validation, while arbitrary items remain rejected", () => {
   const allowed = new Set([...minecraftLogNames, ...minecraftUsefulDropNames, ...minecraftMiningDropNames]);

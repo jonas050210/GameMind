@@ -32,6 +32,7 @@ export const ROADMAP_CATEGORY_ORDER = [
   "training",
   "world-knowledge",
   "interface",
+  "other",
 ];
 
 export const ROADMAP_KIND_LABELS = {
@@ -65,14 +66,18 @@ export function filterRoadmap(items, { category = "", kind = "", showClosed = fa
   });
 }
 
-/** Groups items by category in a fixed order, keeping the score order inside each group. */
+/**
+ * Groups items by category in a fixed order, keeping the score order inside each group. An item whose
+ * `category` is missing or unknown lands in `other` instead of a nameless group.
+ */
 export function groupByCategory(items) {
   const groups = new Map();
   for (const category of ROADMAP_CATEGORY_ORDER) groups.set(category, []);
   for (const item of items) {
-    const list = groups.get(item.category) ?? [];
+    const category = typeof item.category === "string" && ROADMAP_CATEGORY_ORDER.includes(item.category) ? item.category : "other";
+    const list = groups.get(category) ?? [];
     list.push(item);
-    groups.set(item.category, list);
+    groups.set(category, list);
   }
   return [...groups.entries()].filter(([, list]) => list.length > 0);
 }

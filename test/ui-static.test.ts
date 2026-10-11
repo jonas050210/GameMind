@@ -3,9 +3,10 @@
  *
  * The page is plain JavaScript that no compiler builds, so a misspelled name, a stale import or a variable used before its
  * `const` only shows up as a blank page or a ReferenceError in someone's browser (the agent's own `host` crash was exactly a
- * temporal-dead-zone error of that kind). The TypeScript compiler can read the same files with `checkJs`; the diagnostics
- * that mean "this throws or refuses to load" fail the test. Inference noise from untyped JavaScript is deliberately not
- * asserted on.
+ * temporal-dead-zone error of that kind). This check runs the committed `tsconfig.public.json` (the same project
+ * `npm run typecheck:public` and CI run) over the page and requires it to be clean: every parameter, payload and helper
+ * carries JSDoc types, so a drifted contract like a payload that grows an unknown field is a build failure and not a
+ * surprise in the browser.
  *
  * A canary project proves the check can see each kind of defect, so a broken tsconfig cannot make the real check pass by
  * looking at nothing.
@@ -22,6 +23,8 @@ import { promisify } from "node:util";
 const execute = promisify(execFile);
 const TSC = fileURLToPath(new URL("../node_modules/typescript/bin/tsc", import.meta.url));
 const PUBLIC = fileURLToPath(new URL("../src/control-center/public/", import.meta.url)).replace(/[\\/]$/, "");
+/** The project the page is checked with; the same one `npm run typecheck:public` and CI use. */
+const PUBLIC_PROJECT = fileURLToPath(new URL("../tsconfig.public.json", import.meta.url));
 
 /** Diagnostics that mean the browser would throw, refuse to link a module, or carry code nobody calls. */
 const FATAL: ReadonlyMap<number, string> = new Map([
@@ -73,20 +76,8 @@ async function check(directory: string): Promise<Checked> {
     await writeFile(
       configuration,
       JSON.stringify({
-        compilerOptions: {
-          allowJs: true,
-          checkJs: true,
-          noEmit: true,
-          noUnusedLocals: true,
-          strictNullChecks: true,
-          noUncheckedSideEffectImports: true,
-          target: "ES2022",
-          module: "ES2022",
-          moduleResolution: "bundler",
-          lib: ["ES2022", "DOM", "DOM.Iterable"],
-          types: [],
-          skipLibCheck: true,
-        },
+        // The options come from the committed project, so this test and `npm run typecheck:public` cannot drift apart.
+        extends: forward(PUBLIC_PROJECT),
         // Only .js roots: a .d.ts beside a .js (policy.d.ts, for the TypeScript tests) would otherwise replace it, and the browser loads the .js.
         include: [`${root}/**/*.js`],
       }),
@@ -115,13 +106,14 @@ async function check(directory: string): Promise<Checked> {
 let shipped: Promise<Checked> | undefined;
 const shippedCheck = (): Promise<Checked> => (shipped ??= check(PUBLIC));
 
-test("the Control Center page code has no undeclared names, broken imports, duplicate or unused declarations or syntax errors", async () => {
+test("the Control Center page code type-checks without a single diagnostic", async () => {
   const { findings } = await shippedCheck();
-  const fatal = findings.flatMap((finding) => {
+  const reported = findings.map((finding) => {
     const why = reason(finding);
-    return why === null ? [] : [`${finding.file ?? "(checker)"}:${finding.line} TS${finding.code} ${why}: ${finding.message}`];
+    const where = `${finding.file ?? "(checker)"}:${finding.line}`;
+    return why === null ? `${where} TS${finding.code}: ${finding.message}` : `${where} TS${finding.code} ${why}: ${finding.message}`;
   });
-  assert.deepEqual(fatal, [], "these would throw, fail to load, or be dead code in the browser");
+  assert.deepEqual(reported, [], "the browser code is checked with checkJs; every diagnostic is a broken name, a dead import or a drifted contract");
 });
 
 test("the check reads every JavaScript module of the page, including modules added later", async () => {

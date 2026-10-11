@@ -161,3 +161,39 @@ test("reward aggregate: parses invalid input", () => {
   const parsed = parseRewardAggregate(null);
   assert.equal(parsed.count, 0);
 });
+
+test("reward aggregate: an empty aggregate survives JSON, and an unknown min/max stays unknown", () => {
+  // `Infinity`/`-Infinity` are not JSON: `JSON.stringify` turned them into `null`, and reading that back used to
+  // fabricate `min: 0`/`max: 0` — a range the learner had never observed.
+  const empty = emptyRewardAggregate();
+  const roundTripped = parseRewardAggregate(JSON.parse(JSON.stringify(empty)));
+  assert.equal(roundTripped.count, 0);
+  assert.equal(roundTripped.min, null);
+  assert.equal(roundTripped.max, null);
+  assert.equal(roundTripped.positiveCount, 0);
+
+  let agg = emptyRewardAggregate();
+  agg = updateRewardAggregate(agg, 1.5);
+  agg = updateRewardAggregate(agg, -0.25);
+  const parsed = parseRewardAggregate(JSON.parse(JSON.stringify(agg)));
+  assert.deepEqual(parsed, agg);
+
+  // A file written by an older version: null min/max must not become 0.
+  const legacy = parseRewardAggregate({ count: 2, mean: 0.625, ewma: 0.9, min: null, max: null, positiveRate: 0.5 });
+  assert.equal(legacy.min, null);
+  assert.equal(legacy.max, null);
+  assert.equal(legacy.positiveCount, 1, "the positive count is recovered from the rate and the episode count");
+});
+
+test("reward aggregate: the positive rate does not drift while it is rounded for storage", () => {
+  let agg = emptyRewardAggregate();
+  for (let index = 0; index < 500; index += 1) agg = updateRewardAggregate(agg, index % 3 === 0 ? -1 : 1);
+  const positives = agg.positiveCount;
+  assert.equal(positives, 333);
+  assert.ok(Math.abs(agg.positiveRate - positives / 500) < 0.001);
+  // Reading the rounded value back and continuing from it must not change the rate either.
+  const reopened = parseRewardAggregate(JSON.parse(JSON.stringify(agg)));
+  const next = updateRewardAggregate(reopened, 1);
+  assert.equal(next.count, 501);
+  assert.equal(next.positiveCount, 334);
+});

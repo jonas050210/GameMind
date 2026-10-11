@@ -163,6 +163,33 @@ class NodeAndDependencies(unittest.TestCase):
         self.assertIsNone(checks.check_windows_mount(Path("/mnt/c/Users/me/GameMind"), False))
         self.assertIsNone(checks.check_windows_mount(Path("/home/me/GameMind"), True))
 
+    def test_a_checkout_inside_onedrive_is_warned_about_by_name(self) -> None:
+        warning = checks.check_windows_mount(Path("/mnt/c/Users/jonas/OneDrive/Desktop/GameMind"), True) or ""
+        self.assertIn("OneDrive", warning)
+        self.assertIn("node_modules", warning, "the sync watches the two folders that grow")
+        self.assertIn("cloud placeholder", warning.lower())
+        self.assertIn("Linux home folder", warning, "the recommendation is still there")
+        plain = checks.check_windows_mount(Path("/mnt/c/Users/me/GameMind"), True) or ""
+        self.assertNotIn("OneDrive", plain, "without OneDrive in the path the plain warning stays plain")
+
+
+class ProcessLiveness(unittest.TestCase):
+    def test_posix_liveness_uses_signal_zero_and_reads_permission_denied_as_alive(self) -> None:
+        sent: list[tuple[int, int]] = []
+        self.assertTrue(checks.pid_alive(4242, kill=lambda pid, sig: sent.append((pid, sig)), windows=False))
+        self.assertEqual(sent, [(4242, 0)], "asking is signal 0, which changes nothing")
+        self.assertTrue(checks.pid_alive(4242, kill=lambda pid, sig: (_ for _ in ()).throw(PermissionError()), windows=False))
+        self.assertFalse(checks.pid_alive(4242, kill=lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError()), windows=False))
+
+    def test_windows_liveness_never_calls_os_kill(self) -> None:
+        # os.kill on Windows is TerminateProcess for every signal but the console control events, so checking a
+        # stale lock's pid that way would end whichever process owns that pid now.
+        def explode(pid: int, sig: int) -> None:
+            raise AssertionError("os.kill must not be used on Windows")
+
+        self.assertTrue(checks.pid_alive(4242, kill=explode, windows=True, windows_check=lambda pid: True))  # noqa: ARG005
+        self.assertFalse(checks.pid_alive(4242, kill=explode, windows=True, windows_check=lambda pid: False))  # noqa: ARG005
+
 
 class PortsAndInstances(unittest.TestCase):
     def test_a_busy_default_port_moves_on_but_an_explicit_one_is_never_replaced(self) -> None:
@@ -198,6 +225,38 @@ class PortsAndInstances(unittest.TestCase):
             self.assertIsNone(checks.existing_instance(data, alive=lambda pid: True), "our own pid is not another instance")
             (data / "run" / "gamemind.lock.json").write_text("{ torn")
             self.assertIsNone(checks.existing_instance(data, alive=lambda pid: True))
+
+    def test_the_checked_data_directory_follows_a_data_dir_argument(self) -> None:
+        # The launcher watched <root>/data while the agent wrote its lock elsewhere, so a run with its own data
+        # directory looked like a second copy of GameMind.
+        root = Path("/proj")
+        self.assertEqual(checks.data_directory(root, []), Path("/proj/data"))
+        self.assertEqual(checks.data_directory(root, ["--", "--data-dir", "/tmp/x"]), Path("/tmp/x"))
+        self.assertEqual(checks.data_directory(root, ["--data-dir=/tmp/y"]), Path("/tmp/y"))
+        self.assertEqual(checks.data_directory(root, ["--", "--data-dir", "scratch"]), Path("/proj/scratch"))
+        self.assertEqual(checks.data_directory(root, ["--data-dir"]), Path("/proj/data"), "a missing value changes nothing")
+        self.assertEqual(checks.data_directory(root, ["--learning-dir", "/tmp/l"]), Path("/proj/data"))
+
+    def test_a_lock_from_the_other_platform_is_reported_instead_of_judged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            data = Path(raw)
+            (data / "run").mkdir()
+            lock = data / "run" / "gamemind.lock.json"
+            lock.write_text(json.dumps({"pid": 4242, "url": "http://127.0.0.1:8787/", "platform": "win32"}))
+            seen: list[int] = []
+            foreign = checks.existing_instance(data, alive=lambda pid: seen.append(pid) or False, platform="linux")
+            self.assertEqual(foreign.get("foreignPlatform"), "win32")
+            self.assertEqual(seen, [], "a pid from another process table is never probed")
+            self.assertIsNone(
+                checks.existing_instance(data, alive=lambda pid: False, platform="win32"),
+                "the same platform is judged by its pid as before",
+            )
+            lock.write_text(json.dumps({"pid": 4242, "url": "http://127.0.0.1:8787/"}))
+            self.assertEqual(
+                checks.existing_instance(data, alive=lambda pid: True, platform="linux").get("url"),
+                "http://127.0.0.1:8787/",
+                "a lock without a platform (an older run) is still judged by its pid",
+            )
 
 
 class FakeProcess:
@@ -450,6 +509,28 @@ class MainFlow(unittest.TestCase):
         self.assertEqual(spawned, [])
         self.assertIn("already running", "\n".join(lines))
         self.assertIn("http://127.0.0.1:8790/", "\n".join(lines))
+
+    def test_a_lock_from_the_other_side_of_wsl_and_windows_stops_the_start_and_names_the_file(self) -> None:
+        # Two bots on one account is the outcome nobody wants, and this is the setup that produces it: one
+        # project folder (a OneDrive desktop) started from Windows once and from WSL once.
+        other = "win32" if sys.platform != "win32" else "linux"
+        lines: list[str] = []
+        spawned: list = []
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            make_project(root)
+            (root / "data" / "run").mkdir(parents=True)
+            (root / "data" / "run" / "gamemind.lock.json").write_text(json.dumps({"pid": 4242, "platform": other}))
+            with mock.patch.object(checks, "find_executable", return_value="/usr/bin/node"), mock.patch.object(checks, "node_version", return_value=(22, 1, 0)), mock.patch.object(
+                checks, "check_dependencies", return_value=[]
+            ), mock.patch.object(checks, "pid_alive", side_effect=AssertionError("a foreign pid is never probed")):
+                code = cli.main([], root=root, env={}, out=lines.append, spawn_fn=lambda *a, **k: spawned.append(a))
+        text = "\n".join(lines)
+        self.assertEqual(code, 2)
+        self.assertEqual(spawned, [])
+        self.assertIn("was written on '" + other + "'", text)
+        self.assertIn("gamemind.lock.json", text)
+        self.assertIn("delete that file", text)
 
     def test_a_port_the_operator_asked_for_that_is_busy_is_an_error_not_a_silent_change(self) -> None:
         lines: list[str] = []

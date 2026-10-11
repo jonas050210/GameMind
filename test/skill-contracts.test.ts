@@ -19,6 +19,19 @@ function item(name: string, count: number) {
   return { slot: 9, name, type: 1, count, metadata: null, durabilityUsed: null };
 }
 
+test("the navigation contract uses the adapter's arrival definition, not its own", () => {
+  const before = observationAt({ x: 0.5, y: 64, z: 0.5 });
+  const goal = { x: 5, y: 67, z: 0, range: 1 };
+  // The goal sits on a ledge three blocks up: the adapter can stand next to it and reach it, so it is
+  // arrived. The contract's own vertical tolerance of two blocks used to call this unverified.
+  const onLedge = observationAt({ x: 5.5, y: 64, z: 0.5 });
+  assert.equal(verifySkillPostcondition("minecraft.navigate", goal, before, onLedge).verified, true);
+  // The pathfinder slack is the adapter's 1.25 blocks, not the looser 1.5 the contract used before.
+  const boundary = { x: 5, y: 64, z: 0, range: 1 };
+  assert.equal(verifySkillPostcondition("minecraft.navigate", boundary, before, observationAt({ x: 7.7, y: 64, z: 0.5 })).verified, true);
+  assert.equal(verifySkillPostcondition("minecraft.navigate", boundary, before, observationAt({ x: 7.8, y: 64, z: 0.5 })).verified, false);
+});
+
 test("navigation contract checks the observed position, not the adapter's claim", () => {
   const before = observationAt({ x: 0.5, y: 64, z: 0.5 });
   const arrived = observationAt({ x: 5.5, y: 64, z: 0.5 });
@@ -113,4 +126,42 @@ test("contracts for orientation and equipment compare the observed state", () =>
     equipment: { ...observationAt({ x: 0, y: 64, z: 0 }).equipment, head: item("oak_log", 1) },
   });
   assert.equal(verifySkillPostcondition("minecraft.equip-item", { item: "oak_log", destination: "head" }, null, equipped).verified, true);
+});
+
+test("without a pre-action observation an inventory change is unknown, not zero", () => {
+  // The task runner can end up without a "before" observation (the action failed first, or the world state was
+  // dropped). Treating that as "nothing was gained" reported a plain failure where the truth is unknown, and it
+  // hid a real success whenever the agent already had the item before the action started.
+  const after = observationAt({ x: 0, y: 64, z: 0 }, { inventory: [item("oak_log", 1)] });
+  assert.equal(verifySkillPostcondition("minecraft.collect-log", { blockName: "oak_log" }, null, after).verified, null);
+  assert.equal(verifySkillPostcondition("minecraft.pickup-item", { itemName: "bread" }, null, after).verified, null);
+  assert.equal(verifySkillPostcondition("minecraft.harvest-berries", { blockName: "sweet_berry_bush" }, null, after).verified, null);
+  assert.equal(verifySkillPostcondition("minecraft.drop-item", { itemName: "oak_log", count: 1 }, null, after).verified, null);
+  const eatAfter = observationAt({ x: 0, y: 64, z: 0 }, {
+    player: { ...observationAt({ x: 0, y: 64, z: 0 }).player, food: 12 },
+    inventory: [item("bread", 1)],
+  });
+  assert.equal(verifySkillPostcondition("minecraft.eat-food", { item: "bread" }, null, eatAfter).verified, null);
+
+  // The same observation with a known baseline is still verified by the delta alone.
+  const before = observationAt({ x: 0, y: 64, z: 0 });
+  assert.equal(verifySkillPostcondition("minecraft.collect-log", { blockName: "oak_log" }, before, after).verified, true);
+});
+
+test("mining and crafting fall back to what the observation can still prove", () => {
+  // The block is gone from the observation: mining is proven independently of any inventory delta.
+  const before = observationAt({ x: 0, y: 64, z: 0 }, { nearbyBlocks: [{ name: "coal_ore", position: { x: 2, y: 64, z: 0 }, type: 0, boundingBox: "block", distance: 2 }] });
+  const after = observationAt({ x: 0, y: 64, z: 0 }, { inventory: [item("coal", 1)] });
+  assert.equal(verifySkillPostcondition("minecraft.mine-block", { blockName: "coal_ore", x: 2, y: 64, z: 0 }, before, after).verified, true);
+  assert.equal(verifySkillPostcondition("minecraft.mine-block", { blockName: "coal_ore", x: 2, y: 64, z: 0 }, null, after).verified, true);
+  // The ore drop table is shared with the miner, so raw_iron is the item that counts, not iron_ore.
+  const iron = observationAt({ x: 0, y: 64, z: 0 }, { inventory: [item("raw_iron", 1)] });
+  assert.equal(verifySkillPostcondition("minecraft.mine-block", { blockName: "iron_ore", x: 2, y: 64, z: 0 }, before, iron).verified, true);
+  // With a baseline and the block still present, nothing is proven.
+  const stillThere = observationAt({ x: 0, y: 64, z: 0 }, { nearbyBlocks: [{ name: "coal_ore", position: { x: 2, y: 64, z: 0 }, type: 0, boundingBox: "block", distance: 2 }] });
+  assert.equal(verifySkillPostcondition("minecraft.mine-block", { blockName: "coal_ore", x: 2, y: 64, z: 0 }, before, stillThere).verified, false);
+  // Crafting without a baseline: the requested amount being present is the only provable part.
+  assert.equal(verifySkillPostcondition("minecraft.craft-item", { item: "stick", count: 4 }, null, after).verified, false);
+  const sticks = observationAt({ x: 0, y: 64, z: 0 }, { inventory: [item("stick", 4)] });
+  assert.equal(verifySkillPostcondition("minecraft.craft-item", { item: "stick", count: 4 }, null, sticks).verified, true);
 });

@@ -105,6 +105,8 @@ export interface SessionEnd {
   readonly reason: string;
   readonly error: SessionErrorView | null;
   readonly endedAt: string;
+  /** Shutdown steps that exceeded their timeout; empty for a clean stop. */
+  readonly incompleteSteps: readonly string[];
 }
 
 export interface StartupOutcome {
@@ -158,6 +160,8 @@ export class MinecraftSession {
   private lastViewState: SessionState | null = null;
   private startPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
+  /** Shutdown steps that did not finish in time; surfaced on the view and in the session end. */
+  private readonly incompleteShutdownSteps: string[] = [];
   private startupPromise: Promise<StartupOutcome> | null = null;
   private readonly endResolvers: Array<(end: SessionEnd) => void> = [];
   private endValue: SessionEnd | null = null;
@@ -265,6 +269,7 @@ export class MinecraftSession {
       autonomy: this.hostValue ? this.hostValue.autonomyEnabled : this.request.autonomy !== false,
       canConnect: this.phase === "shutdown",
       canStop: this.phase !== "shutdown" && this.phase !== "stopping",
+      shutdownIncomplete: this.incompleteShutdownSteps.length > 0,
     };
   }
 
@@ -452,12 +457,26 @@ export class MinecraftSession {
     this.endedAtMs = this.now();
     this.reason = reason;
     this.push("shutdown", reason);
-    this.record({ level: this.error ? "error" : "info", category: "shutdown", code: "SESSION_SHUTDOWN", message: `Session shut down: ${reason}`, data: { reason, runtimeMs: this.endedAtMs - this.createdAtMs } });
-    const end: SessionEnd = { reason, error: this.error, endedAt: new Date(this.endedAtMs).toISOString() };
+    const incomplete = [...this.incompleteShutdownSteps];
+    this.record({
+      level: this.error || incomplete.length > 0 ? "error" : "info",
+      category: "shutdown",
+      code: "SESSION_SHUTDOWN",
+      message: incomplete.length > 0
+        ? `Session shut down after ${Math.round((this.endedAtMs - this.createdAtMs) / 1000)} s with ${incomplete.length} step(s) that did not finish: ${incomplete.join(", ")}`
+        : `Session shut down: ${reason}`,
+      data: { reason, runtimeMs: this.endedAtMs - this.createdAtMs, incompleteSteps: incomplete },
+    });
+    const end: SessionEnd = { reason, error: this.error, endedAt: new Date(this.endedAtMs).toISOString(), incompleteSteps: incomplete };
     this.endValue = end;
     for (const resolve of this.endResolvers.splice(0)) resolve(end);
   }
 
+  /**
+   * Runs one shutdown step under a time limit. A step that does not finish does not stop the sequence (a wedged
+   * task must never leave the bot connected), but it is remembered: the session then reports that the stop was
+   * incomplete instead of claiming a clean shutdown while a step is still running in the background.
+   */
   private async step(label: string, run: () => Promise<void>): Promise<void> {
     const limit = this.options.stepTimeoutMs ?? 15_000;
     let timer: NodeJS.Timeout | null = null;
@@ -469,9 +488,11 @@ export class MinecraftSession {
         }),
       ]);
       if (outcome === "timeout") {
+        this.incompleteShutdownSteps.push(label);
         this.record({ level: "error", category: "shutdown", code: "SHUTDOWN_STEP_TIMEOUT", message: `Shutdown step '${label}' did not finish within ${Math.round(limit / 1000)} s; continuing` });
       }
     } catch (error) {
+      this.incompleteShutdownSteps.push(label);
       this.record({ level: "error", category: "shutdown", code: "SHUTDOWN_STEP_FAILED", message: `Shutdown step '${label}' failed: ${error instanceof Error ? error.message : String(error)}` });
     } finally {
       if (timer) clearTimeout(timer);

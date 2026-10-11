@@ -4,8 +4,22 @@ import { AutonomyController, subgoalSignature } from "../src/games/minecraft/aut
 import { generateAutonomousTask } from "../src/games/minecraft/autonomous-task.js";
 import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
 import { assessReflex, newlyUrgent, REFLEX_THRESHOLDS } from "../src/games/minecraft/reflex.js";
+import { CRITICAL_HEALTH, CRITICAL_HUNGER, LOW_HEALTH, LOW_HUNGER } from "../src/core/survival-thresholds.js";
+import { minecraftAttackHostileInputSchema } from "../src/games/minecraft/capabilities.js";
 import { ProgressTracker } from "../src/games/minecraft/progress-tracker.js";
 import type { MinecraftTaskResult } from "../src/games/minecraft/task-runner.js";
+
+test("health and hunger lines have one home: the reflex, the combat defaults and the decision model read it", () => {
+  // The numbers used to be written out in three modules; only the drowning lines had a shared constant.
+  assert.deepEqual(
+    [REFLEX_THRESHOLDS.criticalHealth, REFLEX_THRESHOLDS.lowHealth, REFLEX_THRESHOLDS.starvingHunger, REFLEX_THRESHOLDS.lowHunger],
+    [CRITICAL_HEALTH, LOW_HEALTH, CRITICAL_HUNGER, LOW_HUNGER],
+  );
+  assert.ok(CRITICAL_HEALTH < LOW_HEALTH && CRITICAL_HUNGER < LOW_HUNGER, "critical lines sit below the notice lines");
+  const combat = minecraftAttackHostileInputSchema.parse({ entityId: "zombie-1" });
+  assert.equal(combat.minHealth, LOW_HEALTH, "the combat floor is the low-health line");
+  assert.equal(combat.retreatHealth, CRITICAL_HEALTH, "retreating starts at the critical line");
+});
 
 function state(overrides: Partial<MinecraftObservation> & { playerOverrides?: Partial<MinecraftObservation["player"]> } = {}): MinecraftObservation {
   const { playerOverrides, ...rest } = overrides;

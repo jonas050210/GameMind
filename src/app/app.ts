@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { Logger } from "pino";
 import { startControlCenter } from "../control-center/server.js";
@@ -71,6 +72,10 @@ export interface AppOptions {
 /** Lock files held by apps in this very process, so a second app in the same process is refused too. */
 const HELD_LOCKS = new Set<string>();
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export class AppAlreadyRunningError extends Error {
   readonly code = "APP_ALREADY_RUNNING";
   constructor(
@@ -79,6 +84,25 @@ export class AppAlreadyRunningError extends Error {
   ) {
     super(`GameMind is already running in this project (process ${pid}${url ? `, Control Center at ${url}` : ""}). Open that address, or stop that process first.`);
     this.name = "AppAlreadyRunningError";
+  }
+}
+
+/**
+ * The instance lock exists but cannot be read or understood. Starting anyway would risk two agents on one
+ * Minecraft account and one data directory, so the operator is asked to look at the file — an unreadable lock is
+ * not evidence that nothing is running.
+ */
+export class InstanceLockUnreadableError extends Error {
+  readonly code = "INSTANCE_LOCK_UNREADABLE";
+  constructor(
+    readonly lockFile: string,
+    readonly problem: string,
+  ) {
+    super(
+      `Cannot tell whether GameMind is already running in this project: '${lockFile}' exists but could not be read (${problem}). ` +
+        "Stop any running GameMind and delete that file, then start again.",
+    );
+    this.name = "InstanceLockUnreadableError";
   }
 }
 
@@ -351,6 +375,9 @@ export class GameMindApp {
     this.shuttingDown = true;
     this.event("shutdown", "APP_SHUTDOWN_REQUESTED", `Shutting down: ${reason}`, "info", { reason });
     const limit = this.options.stepTimeoutMs ?? 20_000;
+    // Steps that did not finish are collected, so the completion event says whether the stop was clean instead of
+    // reporting success while something is still running in the background.
+    const incomplete: string[] = [];
     const step = async (label: string, run: () => Promise<void>): Promise<void> => {
       let timer: NodeJS.Timeout | null = null;
       try {
@@ -360,8 +387,12 @@ export class GameMindApp {
             timer = setTimeout(() => resolve("timeout"), limit);
           }),
         ]);
-        if (outcome === "timeout") this.event("shutdown", "SHUTDOWN_STEP_TIMEOUT", `Shutdown step '${label}' did not finish within ${Math.round(limit / 1000)} s; continuing`, "error");
+        if (outcome === "timeout") {
+          incomplete.push(label);
+          this.event("shutdown", "SHUTDOWN_STEP_TIMEOUT", `Shutdown step '${label}' did not finish within ${Math.round(limit / 1000)} s; continuing`, "error");
+        }
       } catch (error) {
+        incomplete.push(label);
         this.event("shutdown", "SHUTDOWN_STEP_FAILED", `Shutdown step '${label}' failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       } finally {
         if (timer) clearTimeout(timer);
@@ -375,7 +406,15 @@ export class GameMindApp {
     await step("experience stores", async () => {
       // The learners persist after each run; nothing is buffered, so there is nothing to flush beyond the log below.
     });
-    this.event("shutdown", "APP_SHUTDOWN_COMPLETE", `Shutdown complete: ${reason}`, "info", { reason });
+    this.event(
+      "shutdown",
+      incomplete.length > 0 ? "APP_SHUTDOWN_INCOMPLETE" : "APP_SHUTDOWN_COMPLETE",
+      incomplete.length > 0
+        ? `Shutdown finished with ${incomplete.length} step(s) that did not complete: ${incomplete.join(", ")} (${reason})`
+        : `Shutdown complete: ${reason}`,
+      incomplete.length > 0 ? "error" : "info",
+      { reason, incompleteSteps: [...incomplete] },
+    );
     await this.events.flush();
     await step("control center", async () => this.handleValue?.stop(reason));
     this.releaseInstanceLock();
@@ -702,28 +741,65 @@ export class GameMindApp {
 
   // ---- instance lock -------------------------------------------------------------------------------
 
+  /**
+   * The lock file is written to a unique temp name and renamed into place, so a reader never sees a half-written
+   * file; a missing file means free, and a file that cannot be read or parsed stops the start instead of being
+   * overwritten (that case used to be treated as "nothing is running", which is exactly the moment two agents
+   * could start on one account and one data directory).
+   */
   private acquireInstanceLock(): void {
     if (!this.lockFile) return;
+    let raw: string | null = null;
     try {
-      const existing = JSON.parse(readFileSync(this.lockFile, "utf8")) as { pid?: number; url?: string | null };
-      const alive = typeof existing.pid === "number" && (existing.pid === process.pid ? HELD_LOCKS.has(this.lockFile) : isProcessAlive(existing.pid));
-      if (alive) throw new AppAlreadyRunningError(existing.url ?? null, existing.pid as number);
+      raw = readFileSync(this.lockFile, "utf8");
     } catch (error) {
-      if (error instanceof AppAlreadyRunningError) throw error;
-      // No lock, or an unreadable one: nothing alive to protect.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") throw new InstanceLockUnreadableError(this.lockFile, errorMessage(error));
+      raw = null;
+    }
+    if (raw !== null) {
+      let existing: { pid?: unknown; url?: unknown; platform?: unknown } | null = null;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed && typeof parsed === "object" && typeof (parsed as { pid?: unknown }).pid === "number") {
+          existing = parsed as { pid: number; url?: unknown; platform?: unknown };
+        }
+      } catch {
+        existing = null;
+      }
+      if (!existing) throw new InstanceLockUnreadableError(this.lockFile, "it is not the expected JSON object");
+      const pid = existing.pid as number;
+      const foreign = typeof existing.platform === "string" && existing.platform !== "" && existing.platform !== process.platform;
+      if (foreign && pid !== process.pid) {
+        // The lock was written on the other side of the WSL/Windows boundary; its pid lives in a different
+        // process table, so this process can neither confirm nor deny it. Refusing to start is the only answer
+        // that cannot end in two bots on one account.
+        throw new InstanceLockUnreadableError(this.lockFile, `it was written on '${String(existing.platform)}'`);
+      }
+      const alive = pid === process.pid ? HELD_LOCKS.has(this.lockFile) : isProcessAlive(pid);
+      if (alive) throw new AppAlreadyRunningError(typeof existing.url === "string" ? existing.url : null, pid);
     }
     HELD_LOCKS.add(this.lockFile);
     mkdirSync(path.dirname(this.lockFile), { recursive: true });
-    writeFileSync(this.lockFile, `${JSON.stringify({ pid: process.pid, url: null, startedAt: this.startedAt })}\n`, "utf8");
+    this.writeInstanceLockFile({ pid: process.pid, url: null, startedAt: this.startedAt });
   }
 
   private writeInstanceLock(): void {
     if (!this.lockFile || !this.handleValue) return;
     try {
-      writeFileSync(this.lockFile, `${JSON.stringify({ pid: process.pid, url: this.handleValue.url, port: this.handleValue.port, startedAt: this.startedAt })}\n`, "utf8");
+      this.writeInstanceLockFile({ pid: process.pid, url: this.handleValue.url, port: this.handleValue.port, startedAt: this.startedAt });
     } catch {
       // The lock is a convenience for the launcher; the app works without it.
     }
+  }
+
+  private writeInstanceLockFile(body: Record<string, unknown>): void {
+    if (!this.lockFile) return;
+    const temporary = `${this.lockFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+    // The platform travels with the lock: a project folder shared between WSL and Windows (a OneDrive desktop,
+    // for instance) can hold a pid from the other process table, where no check on this side means anything.
+    writeFileSync(temporary, `${JSON.stringify({ ...body, platform: process.platform })}\n`, "utf8");
+    renameSync(temporary, this.lockFile);
   }
 
   private releaseInstanceLock(): void {
