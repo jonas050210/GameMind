@@ -14,6 +14,15 @@ game mode and dimension it was made under and their evidence) and the Bots tab (
 page publishes no block coordinates. The rewritten page has not been looked at in a browser either; see
 `LIVE_VERIFICATION.md` §18.
 
+**Update (this release).** Three of the causes in §1 now have one definition instead of two that could
+drift apart: the navigate confirmation reads `reachedNavigationGoal` in `src/games/minecraft/reach.ts`
+(the same rule the live adapter and the simulator use), so a walk the adapter confirmed cannot come back
+as unverified; the drowning check no longer asks for a `burning` flag the observation never carried; and
+the survival numbers it and its neighbours compare against live in `src/core/survival-thresholds.ts`.
+The planner refusals (`NO_FEASIBLE_GOAL`, `TASK_BLOCKED_THREAT`) no longer count against a skill's
+statistics — one set (`EXTERNAL_FAILURE_KINDS`) decides that. The scope note has not changed: none of it
+has been run against a live server; the regression tests are offline.
+
 ## 1. What the live report actually said, and what each line turned out to be
 
 | Reported symptom | Real cause | Evidence class |
