@@ -99,6 +99,9 @@ Each row has regression tests; none of it has been run against a live server.
 | The event log kept one file more than it promised, and slots from an older limit survived forever | The rotation shifted history slots up to `keepFiles` instead of `keepFiles - 1`, so `keepFiles: 1` left two files and a stale `events.9.jsonl` was never removed | `keepFiles` counts the total including the active file (default 4), out-of-range slots are deleted, and `keepFiles: 1` leaves exactly `events.jsonl` |
 | An uncaught error was logged and the process kept running | `onFatal` recorded the error and continued: the agent could stay half-alive with state that was no longer trustworthy | The app is shut down first and the process then ends with exit code 1; the exit function is injectable so a test can observe it without killing the runner |
 | The page's JavaScript was never compiled or type-checked | The browser modules are plain ES modules with no build step, so a drifted payload field or a helper called with the wrong shape only showed up in the browser | `tsconfig.public.json` checks every page module with `checkJs` (`npm run typecheck:public`, also a CI step); the modules carry JSDoc types, and `test/ui-static.test.ts` requires the project to be completely clean |
+| Every solid block of the local cube was ray-tested before the cap dropped it | The observation called `canSeeBlock` — a ray walked through the world — for each of the up to 605 cells, and then kept at most the configured number of blocks | Only the blocks that survive the cap are ray-tested; the observation still reports how many were found and how many were kept |
+| The memory tab re-read and re-parsed up to 40 stored snapshots on every poll | The query was rebuilt from disk per request while the page polls the tab every 1.5 s | A short window (`MemoryViewCache`, `MEMORY_VIEW_TTL_MS`) reuses the parsed view; the live counters in the same answer are never cached |
+| The event log called `stat` on the active file for every event | The rotation check measured the file at the head of every queued write, so each logged line paid a syscall | The size is measured once per log and then counted from the bytes that are appended; a file that is not there yet counts as empty |
 
 ## Current implementation
 
@@ -541,7 +544,7 @@ Everything in this repository was verified offline: unit and integration tests, 
 - Tests use offline fixtures, deterministic simulated worlds, an injected Mineflayer double, a fake DOM and the real HTTP server. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, plugin behaviour or how the page looks.
 
 ```bash
-npm test                 # 898 TypeScript tests
+npm test                 # 903 TypeScript tests
 npm run test:launcher    # 41 Python tests for main.py and the launcher
 npm run build            # type-check, compile, copy and verify the Control Center files
 ```
@@ -557,6 +560,7 @@ The original suites cover loaded-chunk/truncation memory, persistent world snaps
 | `training-safety`, `learning-evidence`, `progress-evidence`, `atomic-file` | Training lock, preflight, archive-never-delete and held-out evaluation; the success/failure/excluded rule and provenance; the wasted-action definition and what it must not steer; concurrent saves |
 | `safety-broker`, `skill-contracts`, `drowning-thresholds`, `reflex-and-autonomy` | The void check and its per-capability list, the one "arrived" definition shared by adapter, simulator and postcondition, the drowning threshold without the burning exception, and the survival constants read through `survival-thresholds.ts` |
 | `failure-taxonomy`, `learning-evidence`, `rl-readiness` | The external-failure kinds as one set (planner refusals are excluded from a skill's statistics), the code-only fallback, and the readiness report whose three in-process criteria are probed rather than asserted |
+| `memory-view-cache`, `event-log-rotation` | The memory view's reuse window (and that its live section stays fresh), and the log's one measurement per file plus the rotation that follows the counter |
 | `event-log-rotation`, `environment-settings`, `useful-drop-pickup` | The JSONL rotation honouring `keepFiles` including the active file and removing orphaned slots, the README/code round-trip of the documented environment variables, and the useful-drop list derived from the mining table |
 | `task-report`, `trace-console` | The printed task report: the simulator's clock and world statistics stay in it (on the one-shot path, the default persistent path and for dashboard tasks), a live report never carries simulated fields, and a detail that is not known is left out instead of invented; every trace event is recorded at every log level while per-tick observations print only at `debug` |
 

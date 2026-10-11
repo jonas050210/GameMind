@@ -876,7 +876,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const radius = this.config.observationRadius;
     const verticalRadius = 2;
     const localScanStartedAt = performance.now();
-    const cube: MinecraftObservation["nearbyBlocks"][number][] = [];
+    // The block reference is kept next to its entry: line-of-sight is tested below, after the cap, because
+    // each `canSeeBlock` walks a ray through the world and most of the cube does not survive the cap.
+    const cube: Array<{
+      readonly block: Parameters<typeof observedBlockVisibility>[1];
+      readonly entry: MinecraftObservation["nearbyBlocks"][number];
+    }> = [];
     let sampledCells = 0;
     let unknownCells = 0;
 
@@ -890,18 +895,19 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
             continue;
           }
           if (block.name.endsWith("_air") || block.name === "air") continue;
-          const visible = observedBlockVisibility(bot, block);
           cube.push({
-            position: {
-              x: Math.floor(block.position.x),
-              y: Math.floor(block.position.y),
-              z: Math.floor(block.position.z),
+            block,
+            entry: {
+              position: {
+                x: Math.floor(block.position.x),
+                y: Math.floor(block.position.y),
+                z: Math.floor(block.position.z),
+              },
+              name: block.name,
+              type: block.type,
+              boundingBox: block.boundingBox,
+              distance: block.position.distanceTo(position),
             },
-            name: block.name,
-            type: block.type,
-            boundingBox: block.boundingBox,
-            distance: block.position.distanceTo(position),
-            ...(visible === undefined ? {} : { visible }),
           });
         }
       }
@@ -910,13 +916,16 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     // iteration-order cut used to drop resource blocks on one side of the cube silently.
     const cubeTruncated = cube.length > this.config.maxObservedBlocks;
     const nearbyBlocks = cube
-      .map((block) => ({ block, distance: distanceBetween(block.position, center) }))
+      .map((candidate) => ({ candidate, distance: distanceBetween(candidate.entry.position, center) }))
       .sort((left, right) => {
-        const interest = blockObservationPriority(right.block.name) - blockObservationPriority(left.block.name);
+        const interest = blockObservationPriority(right.candidate.entry.name) - blockObservationPriority(left.candidate.entry.name);
         return interest || left.distance - right.distance;
       })
       .slice(0, this.config.maxObservedBlocks)
-      .map(({ block }) => block);
+      .map(({ candidate }) => {
+        const visible = observedBlockVisibility(bot, candidate.block);
+        return visible === undefined ? candidate.entry : { ...candidate.entry, visible };
+      });
     const localScanMs = performance.now() - localScanStartedAt;
 
     const strategicScanStartedAt = performance.now();

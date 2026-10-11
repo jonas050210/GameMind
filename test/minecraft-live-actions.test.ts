@@ -421,6 +421,31 @@ test("a rejected observation names the value that arrived, so the live log shows
   await adapter.disconnect("test");
 });
 
+test("only the blocks that survive the local cap are ray-tested; the kept ones keep their line of sight", async () => {
+  const mock = createLiveMock();
+  // Bedrock is neither a resource nor on the mining allowlist, so the wide scans ignore these blocks and
+  // every counted canSeeBlock call below belongs to the local cube.
+  for (let dx = -2; dx <= 2; dx += 1) {
+    for (let dz = -2; dz <= 2; dz += 1) mock.blocks.set(`${dx},64,${dz}`, { name: "bedrock", type: 7, boundingBox: "block" });
+  }
+  const rayTests: string[] = [];
+  const original = (mock.bot as unknown as { canSeeBlock: (block: never) => boolean }).canSeeBlock.bind(mock.bot);
+  (mock.bot as unknown as { canSeeBlock: unknown }).canSeeBlock = (block: { position: { x: number; y: number; z: number } }) => {
+    rayTests.push(`${block.position.x},${block.position.y},${block.position.z}`);
+    return original(block as never);
+  };
+  const adapter = await connectAdapter(mock, { maxObservedBlocks: 6 });
+  const observation = await adapter.observe();
+  const perception = observation.state.perception;
+  assert.equal(observation.state.nearbyBlocks.length, 6, "the cap is applied");
+  assert.ok((perception?.localBlocksFound ?? 0) > 6, "more blocks were found than the cap keeps");
+  assert.equal(rayTests.length, 6, "a raycast walks the world per block; only the kept blocks pay for one");
+  for (const block of observation.state.nearbyBlocks) {
+    assert.equal(typeof block.visible, "boolean", "kept blocks are still tested for line of sight");
+  }
+  await adapter.disconnect("test");
+});
+
 test("a line-of-sight test that throws stays unknown: the field is omitted, not guessed", async () => {
   const mock = createLiveMock();
   mock.blocks.set("12,64,0", { name: "stone", type: 1, boundingBox: "block" });

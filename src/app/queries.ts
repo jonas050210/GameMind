@@ -210,6 +210,9 @@ export interface MemoryWorldView {
 
 const GRID_LIMIT = 24;
 
+const MEMORY_NOTE =
+  "World memory is what the agent remembers from observation: resource sightings, explored cells and landmarks. It is saved after tasks and at shutdown, so a running session can be ahead of the saved file.";
+
 function foldGrid(cells: readonly string[]): { bounds: MemoryWorldView["bounds"]; grid: MemoryWorldView["grid"] } {
   const points: Array<[number, number]> = [];
   for (const cell of cells) {
@@ -241,22 +244,74 @@ function foldGrid(cells: readonly string[]): { bounds: MemoryWorldView["bounds"]
   return { bounds: { minX, maxX, minZ, maxZ }, grid: { columns, rows, cellsPerBucket: bucket * bucket, counts, max: Math.max(...counts) } };
 }
 
+/** The disk half of the memory view: everything that needs the stored files, and nothing about this session. */
+interface MemoryDirectoryView {
+  readonly directory: string | null;
+  readonly status: string;
+  readonly filesFound: number;
+  readonly worlds: readonly MemoryWorldView[];
+}
+
+/**
+ * The page polls the memory tab every 1.5 s, and this view is built by reading and parsing up to 40 stored
+ * world snapshots. This is how long such a disk-built view may be reused; a session writes those files
+ * only when it saves, so a few seconds of reuse shows the operator the same picture at a fraction of the
+ * disk work. The live section of the answer is never cached.
+ */
+export const MEMORY_VIEW_TTL_MS = 3_000;
+
+/** Reuses a disk-built memory view for `ttlMs`; `now` is injectable so a test can move the window. */
+export class MemoryViewCache {
+  private readonly entries = new Map<string, { readonly at: number; readonly value: MemoryDirectoryView }>();
+
+  constructor(private readonly options: { readonly ttlMs?: number; readonly now?: () => number } = {}) {}
+
+  async value(key: string, build: () => Promise<MemoryDirectoryView>): Promise<MemoryDirectoryView> {
+    const now = this.options.now?.() ?? Date.now();
+    const ttl = Math.max(0, this.options.ttlMs ?? MEMORY_VIEW_TTL_MS);
+    const cached = this.entries.get(key);
+    if (cached && now - cached.at < ttl) return cached.value;
+    const value = await build();
+    this.entries.set(key, { at: now, value });
+    return value;
+  }
+}
+
+/** Used when a caller does not bring its own cache; the app keeps one per process. */
+const sharedMemoryViewCache = new MemoryViewCache();
+
 export async function buildMemoryQuery(input: {
   readonly directory: string;
   readonly currentWorldKey: string | null;
   readonly liveSummary: { readonly worldKey: string; readonly observations: number; readonly exploredCells: number; readonly resourceBlocks: Readonly<Record<string, number>>; readonly landmarks: number } | null;
   readonly redaction: RedactionContext;
+  readonly cache?: MemoryViewCache;
 }): Promise<Record<string, unknown>> {
+  const cache = input.cache ?? sharedMemoryViewCache;
+  const key = `${input.directory}\u0000${input.currentWorldKey ?? ""}`;
+  const stored = await cache.value(key, () => readMemoryDirectoryView(input.directory, input.currentWorldKey, input.redaction));
+  return {
+    generatedAt: new Date().toISOString(),
+    directory: stored.directory,
+    status: stored.status,
+    filesFound: stored.filesFound,
+    worlds: stored.worlds,
+    live: input.liveSummary,
+    note: MEMORY_NOTE,
+  };
+}
+
+async function readMemoryDirectoryView(directory: string, currentWorldKey: string | null, redaction: RedactionContext): Promise<MemoryDirectoryView> {
   let names: string[] = [];
   try {
-    names = (await readdir(input.directory)).filter((name) => name.endsWith(".json"));
+    names = (await readdir(directory)).filter((name) => name.endsWith(".json"));
   } catch {
     names = [];
   }
   const worlds: MemoryWorldView[] = [];
   for (const name of names.slice(0, 40)) {
     try {
-      const stored = JSON.parse(await readFile(path.join(input.directory, name), "utf8")) as StoredMemory;
+      const stored = JSON.parse(await readFile(path.join(directory, name), "utf8")) as StoredMemory;
       if (typeof stored.worldKey !== "string") continue;
       const resources: Record<string, number> = {};
       for (const block of stored.blocks ?? []) resources[block.name] = (resources[block.name] ?? 0) + 1;
@@ -273,7 +328,7 @@ export async function buildMemoryQuery(input: {
         grid: folded.grid,
         landmarks: (stored.landmarks ?? []).slice(0, 60),
         landmarkTotal: stored.landmarks?.length ?? 0,
-        current: stored.worldKey === input.currentWorldKey,
+        current: stored.worldKey === currentWorldKey,
       });
     } catch {
       // unreadable memory files are skipped; the status below says how many were found
@@ -281,13 +336,10 @@ export async function buildMemoryQuery(input: {
   }
   worlds.sort((left, right) => (right.savedAt ?? "").localeCompare(left.savedAt ?? ""));
   return {
-    generatedAt: new Date().toISOString(),
-    directory: displayPath(input.directory, input.redaction),
+    directory: displayPath(directory, redaction),
     status: worlds.length === 0 ? "empty" : "ok",
     filesFound: names.length,
     worlds,
-    live: input.liveSummary,
-    note: "World memory is what the agent remembers from observation: resource sightings, explored cells and landmarks. It is saved after tasks and at shutdown, so a running session can be ahead of the saved file.",
   };
 }
 

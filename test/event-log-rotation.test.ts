@@ -78,6 +78,46 @@ test("rotation leaves exactly keepFiles files and removes forgotten slots", asyn
   });
 });
 
+test("the active file is measured once per log, not once per event", async () => {
+  await withDirectory(async (directory) => {
+    const measured: string[] = [];
+    const log = new AppEventLog({
+      directory,
+      redaction: defaultRedactionContext(directory),
+      // Two lines fill the limit, so the counter decides about rotation several times per run.
+      maxFileBytes: 200,
+      keepFiles: 3,
+      measureActiveFile: async (file) => {
+        measured.push(file);
+        // The file does not exist before the first append; the log counts from there.
+        return (await readFile(file, "utf8").catch(() => "")).length;
+      },
+    });
+    record(log, 0, 30);
+    await log.flush();
+    assert.equal(measured.length, 1, "the size is read from disk once; the counter follows the appends");
+    assert.equal(path.basename(measured[0] ?? ""), "events.jsonl");
+    const files = (await readdir(directory)).sort();
+    assert.deepEqual(files, ["events.1.jsonl", "events.2.jsonl", "events.jsonl"], "rotation still happened on the counter alone");
+  });
+});
+
+test("a log that finds an oversized active file still rotates it", async () => {
+  await withDirectory(async (directory) => {
+    await writeFile(path.join(directory, "events.jsonl"), `${"y".repeat(400)}\n`, "utf8");
+    const log = new AppEventLog({
+      directory,
+      redaction: defaultRedactionContext(directory),
+      maxFileBytes: 200,
+      keepFiles: 2,
+    });
+    log.record({ level: "info", category: "session", source: "system", message: "after the restart" });
+    await log.flush();
+    assert.deepEqual((await readdir(directory)).sort(), ["events.1.jsonl", "events.jsonl"]);
+    assert.match(await readFile(path.join(directory, "events.1.jsonl"), "utf8"), /^y{400}/, "the pre-existing file moved into history");
+  });
+});
+
 test("keepFiles 1 keeps only the active file", async () => {
   await withDirectory(async (directory) => {
     const log = new AppEventLog({
