@@ -13,6 +13,8 @@ import {
   type CurriculumStage,
 } from "./curriculum.js";
 import { acquireTrainingLock, type LockEnvironment } from "./lock.js";
+import { createProcessEpisodePool, type EpisodePool } from "./episode-pool.js";
+import { replayCapture, type EpisodeJob, type WorkerTelemetry } from "./episode-job.js";
 import { TRAINING_SCHEMA_VERSION, readControlCommand, readTrainingState, trainingPaths, writeControlCommand, writeJsonAtomic, type TrainingCheckpointRecord, type TrainingEpisodeRecord, type TrainingPaths, type TrainingState, archiveTrainingArtifacts, canonicalDigest } from "./state.js";
 
 /** Runs one scenario episode. Injectable so tests can drive the state machine without the simulator. */
@@ -45,6 +47,27 @@ export interface TrainingRunOptions {
   /** Set false only for callers that already hold the directory lock. Default: take it, so two runs cannot share a directory. */
   readonly lock?: boolean;
   readonly lockEnvironment?: LockEnvironment;
+  /**
+   * Number of episodes that run at the same time, each in its own worker process. One brain: every worker plays
+   * against the same learner state and the results are merged into the trainer's learner in job order. 1 (default)
+   * runs the episodes one after another in this process.
+   */
+  readonly workers?: number;
+  /** Test seam: an already-built pool (for example an in-process one). Overrides `workers` for the pool size. */
+  readonly episodePool?: EpisodePool;
+  /** Called once per finished episode, in order. Used for experiment logs and throughput measurement. */
+  readonly onEpisode?: (event: TrainingEpisodeEvent) => void;
+}
+
+export interface TrainingEpisodeEvent {
+  readonly record: TrainingEpisodeRecord;
+  readonly run: EvaluationRun;
+  readonly reward: number | null;
+  readonly runId: string;
+  readonly explorationRate: number;
+  readonly workers: number;
+  /** Worker-side numbers for this episode; null when it ran in the trainer process. */
+  readonly telemetry: WorkerTelemetry | null;
 }
 
 /** Thrown when a directory holds training data that a new run would silently overwrite. */
@@ -195,8 +218,78 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   await learner.load();
   logger?.info({ episodes: state.totalEpisodes, stage: stages[state.stageIndex]?.id }, "Training started");
 
+  const pool = await choosePool(options, learner, paths.experience, stages, logger);
+  // A resumed run that now runs in one process must not keep the throughput of an earlier parallel run.
+  if (!pool) delete state.parallel;
+  const batchSize = (): number => (pool ? pool.size : 1);
+  let runEpisodes = 0;
+  let runActiveMs = 0;
+
   let final: TrainingState["status"] = "completed";
   let stopReason: string | null = null;
+  const explorationRate = options.explorationRate ?? 0;
+
+  /** Books one finished episode: the record, the counters, the stage pass check and the checkpoint. */
+  const settle = async (
+    job: EpisodeJob,
+    run: EvaluationRun,
+    reward: number | null,
+    telemetry: WorkerTelemetry | null,
+  ): Promise<void> => {
+    const record: TrainingEpisodeRecord = {
+      index: job.index,
+      stageId: job.stageId,
+      scenarioId: job.scenarioId,
+      seed: job.seed,
+      success: run.success,
+      status: run.status,
+      failureCode: run.failureCode,
+      actions: run.metrics.actions,
+      wastedActions: run.metrics.wastedActions,
+      simulatedSeconds: Math.round(run.simulatedMs / 100) / 10,
+      reward: reward === null ? null : Math.round(reward * 1000) / 1000,
+      at: now().toISOString(),
+    };
+    state.recent = [record, ...state.recent].slice(0, RECENT_LIMIT);
+    state.totalEpisodes += 1;
+    runEpisodes += 1;
+    // An episode that was already running when its stage passed still counts in the totals and the record, but not
+    // toward the next stage's pass check: that stage was not the one it was planned for.
+    const stage = stages[state.stageIndex];
+    if (stage && job.stageId === stage.id) {
+      state.stageEpisodes += 1;
+      if (run.success) state.stageSuccesses += 1;
+      const successRate = state.stageEpisodes === 0 ? 0 : state.stageSuccesses / state.stageEpisodes;
+      // A configured episodes per stage is the minimum before the pass check; the curriculum's own minimum is a floor.
+      // Without a configured value, the curriculum's minimum applies unchanged.
+      const minimumEpisodes = configuredPerStage === null ? stage.minEpisodes : Math.max(stage.minEpisodes, configuredPerStage);
+      const passed = state.stageEpisodes >= minimumEpisodes && successRate >= stage.passRate;
+      const capped = state.stageEpisodes >= minimumEpisodes * 3;
+      if (passed || capped) {
+        const checkpoint = await saveCheckpoint(paths, learner.candidateWeights, stage.id, state.totalEpisodes, now);
+        state.checkpoints = [...state.checkpoints, checkpoint];
+        logger?.info(
+          { stage: stage.id, successRate, episodes: state.stageEpisodes, capped, checkpoint: checkpoint.id },
+          passed ? "Stage passed; checkpoint written" : "Stage episode cap reached; checkpoint written",
+        );
+        state.stageIndex += 1;
+        state.stageEpisodes = 0;
+        state.stageSuccesses = 0;
+      }
+    }
+    state.updatedAt = now().toISOString();
+    options.onEpisode?.({
+      record,
+      run,
+      reward,
+      runId: job.runId,
+      explorationRate: job.explorationRate,
+      workers: batchSize(),
+      telemetry,
+    });
+    await persist(paths, state, now);
+  };
+
   try {
     while (state.stageIndex < stages.length && state.totalEpisodes < state.maxEpisodes) {
       const command = await readControlCommand(paths);
@@ -223,60 +316,63 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
         logger?.info({ episodes: state.totalEpisodes }, "Training resumed");
       }
 
+      // A batch is the next few episodes of the current stage, one per worker. Seeds and scenarios depend only on the
+      // episode index, so the same budget gives the same episodes whatever the worker count.
       const stage = stages[state.stageIndex]!;
-      const scenarioId = stage.scenarioIds[state.stageEpisodes % stage.scenarioIds.length]!;
-      const scenario = scenarios.get(scenarioId)!;
-      const seed = trainingSeed(state.totalEpisodes);
-      const before = learner.rewardTotals;
-      const episodeStarted = performance.now();
-      const explorationRate = options.explorationRate ?? 0;
-      const run = await episodeRunner(scenario, seed, {
-        learner,
-        worldKey: `train:${scenario.id}:${seed}`,
-        runId: `train-${String(state.totalEpisodes).padStart(6, "0")}`,
-        provenance: "training",
-        explore: explorationRate > 0 ? { epsilon: explorationRate, seed } : null,
-      });
-      state.activeMs += performance.now() - episodeStarted;
-      const after = learner.rewardTotals;
-      const episodeReward = after.episodes > before.episodes ? after.sum - before.sum : null;
+      const size = Math.min(batchSize(), state.maxEpisodes - state.totalEpisodes);
+      const jobs: EpisodeJob[] = [];
+      for (let offset = 0; offset < size; offset += 1) {
+        const index = state.totalEpisodes + offset;
+        const scenarioId = stage.scenarioIds[(state.stageEpisodes + offset) % stage.scenarioIds.length]!;
+        const seed = trainingSeed(index);
+        jobs.push({
+          index,
+          stageId: stage.id,
+          scenarioId,
+          seed,
+          worldKey: `train:${scenarioId}:${seed}`,
+          runId: `train-${String(index).padStart(6, "0")}`,
+          explorationRate,
+        });
+      }
 
-      const record: TrainingEpisodeRecord = {
-        index: state.totalEpisodes,
-        stageId: stage.id,
-        scenarioId: scenario.id,
-        seed,
-        success: run.success,
-        status: run.status,
-        failureCode: run.failureCode,
-        actions: run.metrics.actions,
-        wastedActions: run.metrics.wastedActions,
-        simulatedSeconds: Math.round(run.simulatedMs / 100) / 10,
-        reward: episodeReward === null ? null : Math.round(episodeReward * 1000) / 1000,
-        at: now().toISOString(),
-      };
-      state.recent = [record, ...state.recent].slice(0, RECENT_LIMIT);
-      state.totalEpisodes += 1;
-      state.stageEpisodes += 1;
-      if (run.success) state.stageSuccesses += 1;
-      state.updatedAt = now().toISOString();
-
-      const successRate = state.stageEpisodes === 0 ? 0 : state.stageSuccesses / state.stageEpisodes;
-      // A configured episodes per stage is the minimum before the pass check; the curriculum's own minimum is a floor.
-      // Without a configured value, the curriculum's minimum applies unchanged.
-      const minimumEpisodes = configuredPerStage === null ? stage.minEpisodes : Math.max(stage.minEpisodes, configuredPerStage);
-      const passed = state.stageEpisodes >= minimumEpisodes && successRate >= stage.passRate;
-      const capped = state.stageEpisodes >= minimumEpisodes * 3;
-      if (passed || capped) {
-        const checkpoint = await saveCheckpoint(paths, learner.candidateWeights, stage.id, state.totalEpisodes, now);
-        state.checkpoints = [...state.checkpoints, checkpoint];
-        logger?.info(
-          { stage: stage.id, successRate, episodes: state.stageEpisodes, capped, checkpoint: checkpoint.id },
-          passed ? "Stage passed; checkpoint written" : "Stage episode cap reached; checkpoint written",
-        );
-        state.stageIndex += 1;
-        state.stageEpisodes = 0;
-        state.stageSuccesses = 0;
+      const batchStarted = performance.now();
+      if (pool) {
+        const results = await pool.runBatch(jobs);
+        // Results come back in job order; replaying them in that order reproduces a sequential run's learner calls.
+        for (const [position, result] of results.entries()) {
+          await replayCapture(learner, result.capture);
+          await settle(jobs[position]!, result.run, result.reward, result.telemetry);
+        }
+        const elapsedMs = performance.now() - batchStarted;
+        state.activeMs += elapsedMs;
+        runActiveMs += elapsedMs;
+        const poolStats = pool.stats();
+        const perMinute = runActiveMs > 0 ? (runEpisodes / runActiveMs) * 60_000 : 0;
+        state.parallel = {
+          workers: poolStats.workers,
+          episodesPerMinute: Math.round(perMinute * 10) / 10,
+          cpuPercent: runActiveMs > 0 ? Math.round((poolStats.totalCpuMs / (runActiveMs * poolStats.workers)) * 1000) / 10 : 0,
+          rssMb: poolStats.rssMb,
+          peakRssMb: poolStats.peakRssMb,
+          respawns: poolStats.respawns,
+        };
+      } else {
+        const job = jobs[0]!;
+        const scenario = scenarios.get(job.scenarioId)!;
+        const before = learner.rewardTotals;
+        const run = await episodeRunner(scenario, job.seed, {
+          learner,
+          worldKey: job.worldKey,
+          runId: job.runId,
+          provenance: "training",
+          explore: explorationRate > 0 ? { epsilon: explorationRate, seed: job.seed } : null,
+        });
+        const elapsedMs = performance.now() - batchStarted;
+        state.activeMs += elapsedMs;
+        runActiveMs += elapsedMs;
+        const after = learner.rewardTotals;
+        await settle(job, run, after.episodes > before.episodes ? after.sum - before.sum : null, null);
       }
       await persist(paths, state, now);
     }
@@ -288,6 +384,8 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
     final = "failed";
     state.lastError = error instanceof Error ? error.message : String(error);
     logger?.error({ err: error }, "Training failed; state is kept so the run can be resumed");
+  } finally {
+    await pool?.close();
   }
 
   // Stopping, pausing and finishing all leave a checkpoint of whatever has been learned since the last one.
@@ -305,6 +403,34 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
   await persist(paths, state, now);
   logger?.info({ status: final, episodes: state.totalEpisodes }, "Training finished");
   return state;
+}
+
+/**
+ * Decides how episodes run. Parallel workers need the simulator runner (the workers load it themselves), and they
+ * rebuild the learner from the episode log, so a promoted policy cannot be reproduced there: that case falls back to one
+ * worker and says so in the log instead of silently changing what the trainer learns from.
+ */
+async function choosePool(
+  options: TrainingRunOptions,
+  learner: ExperienceLearner,
+  experienceDirectory: string,
+  stages: readonly CurriculumStage[],
+  logger: Pick<Logger, "info" | "warn"> | undefined,
+): Promise<EpisodePool | null> {
+  if (options.episodePool) return options.episodePool;
+  const requested = options.workers ?? 1;
+  if (!Number.isInteger(requested) || requested < 1 || requested > 8) {
+    throw new Error("Workers must be a whole number from 1 through 8.");
+  }
+  if (requested === 1) return null;
+  if (options.episodeRunner) {
+    throw new Error("Parallel workers run the simulator in their own processes; a custom episode runner can only run with one worker.");
+  }
+  if (learner.activeWeights !== null) {
+    logger?.warn({ workers: requested }, "A promoted policy is in force; parallel workers cannot reproduce it, so this run uses one worker.");
+    return null;
+  }
+  return createProcessEpisodePool({ workers: requested, stages, experienceDirectory });
 }
 
 async function persist(paths: TrainingPaths, state: TrainingState, now: () => Date): Promise<void> {

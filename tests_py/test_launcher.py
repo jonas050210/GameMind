@@ -274,7 +274,8 @@ class AgentArguments(unittest.TestCase):
 
     def test_command_uses_node_and_tsx_directly_with_no_shell(self) -> None:
         command = process.build_command("/usr/bin/node", Path("/proj"), ["--help"])
-        self.assertEqual(command, ["/usr/bin/node", "/proj/node_modules/tsx/dist/cli.mjs", "/proj/src/cli.ts", "--help"])
+        # Built with the platform's own separator, so the expectation holds on Windows (backslashes) too.
+        self.assertEqual(command, ["/usr/bin/node", str(Path("/proj") / "node_modules" / "tsx" / "dist" / "cli.mjs"), str(Path("/proj") / "src" / "cli.ts"), "--help"])
 
     def test_default_is_a_persistent_live_session_that_opens_the_browser_once(self) -> None:
         args = self.parse()
@@ -386,6 +387,37 @@ class MainFlow(unittest.TestCase):
         self.assertIn("could not be opened automatically (No browser opener worked)", text)
         self.assertIn("Open http://127.0.0.1:8787/ yourself.", text)
 
+    def test_plain_start_opens_the_control_center_and_waits_for_the_page(self) -> None:
+        code, _lines, spawned = self.run_main([])
+        self.assertEqual(code, 0)
+        self.assertIn("--no-connect", spawned[0], "no connection is made until the operator connects from the page")
+        self.assertIn("--control-center", spawned[0])
+
+    def test_an_explicit_host_or_task_or_simulator_still_connects_at_once(self) -> None:
+        for argv in (["--host", "mc.local"], ["--port", "25566"], ["--task", "gather-logs"], ["--simulated"]):
+            with self.subTest(argv=argv):
+                _code, _lines, spawned = self.run_main(argv)
+                self.assertNotIn("--no-connect", spawned[0])
+
+    def test_a_connection_set_in_the_environment_counts_as_explicit(self) -> None:
+        _code, _lines, spawned = self.run_main([], env={"MINECRAFT_HOST": "mc.local"})
+        self.assertNotIn("--no-connect", spawned[0])
+
+    def test_missing_dependencies_are_installed_without_asking_unless_no_install_is_given(self) -> None:
+        calls: list[list[str]] = []
+        with mock.patch.object(cli.subprocess, "run", side_effect=lambda cmd, **kw: calls.append(list(cmd)) or mock.Mock(returncode=0)), \
+            mock.patch.object(checks, "check_dependencies", side_effect=[[checks.Problem("DEPENDENCIES_MISSING", "missing", "npm ci")], []]), \
+            mock.patch.object(checks, "find_executable", return_value="/usr/bin/npm"), \
+            mock.patch.object(checks, "node_version", return_value=(22, 22, 3)), \
+            mock.patch.object(checks, "is_port_free", return_value=True), \
+            mock.patch.object(cli, "ask", side_effect=lambda q, assume_yes, interactive: assume_yes), \
+            mock.patch.object(checks, "check_node", return_value=[]):
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                make_project(root)
+                cli.main([ "--no-browser"], root=root, env={}, out=lambda _line: None, spawn_fn=lambda *a, **k: FakeChild([]))
+        self.assertTrue(calls and calls[0][1] == "ci", "npm ci runs by default, without a prompt")
+
     def test_wsl2_with_only_the_windows_host_answering_uses_it_and_says_so(self) -> None:
         with mock.patch.object(wsl, "probe_tcp", side_effect=lambda host, port, timeout=1.5: "open" if host == "172.28.0.1" else "refused"), mock.patch.object(
             cli, "read_proc_version", return_value=WSL2_PROC
@@ -430,6 +462,54 @@ class MainFlow(unittest.TestCase):
                 code = cli.main(["--control-port", "8787"], root=root, env={}, out=lines.append, spawn_fn=lambda *a, **k: None)
         self.assertEqual(code, 2)
         self.assertIn("Control Center port 8787 is already in use", "\n".join(lines))
+
+
+class OptionalToolsTest(unittest.TestCase):
+    def _run(self, outputs):
+        def fake_run(argv, **kwargs):
+            key = argv[0].rsplit("/", 1)[-1]
+            text = outputs.get(key)
+            if text is None:
+                raise OSError("missing")
+            return mock.Mock(returncode=text[0], stdout=text[1], stderr=text[2])
+        return fake_run
+
+    def test_missing_tools_are_reported_but_never_block(self):
+        tools = checks.check_optional_tools("Linux", which=lambda name: None, run=self._run({}))
+        self.assertEqual([t.name for t in tools], ["Java", "Docker"])
+        self.assertTrue(all(not t.found for t in tools))
+        self.assertIn("not found", tools[1].render())
+
+    def test_java_version_is_read_from_stderr(self):
+        which = {"java": "/usr/bin/java", "docker": None}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"java": (0, "", 'openjdk version "21.0.2" 2024-01-16\n')}),
+        )
+        self.assertTrue(tools[0].found)
+        self.assertIn("21.0.2", tools[0].version)
+
+    def test_docker_installed_but_engine_down_says_so(self):
+        which = {"docker": "/usr/bin/docker"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"docker": (1, "", "Cannot connect to the Docker daemon")}),
+        )
+        docker = tools[1]
+        self.assertFalse(docker.found)
+        self.assertIn("engine does not answer", docker.hint)
+
+    def test_docker_with_running_engine_is_found(self):
+        which = {"docker": "/usr/bin/docker"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"docker": (0, "27.3.1\n", "")}),
+        )
+        self.assertTrue(tools[1].found)
+        self.assertIn("27.3.1", tools[1].version)
 
 
 if __name__ == "__main__":

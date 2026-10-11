@@ -1,4 +1,5 @@
 import { mkdirSync, readdirSync, statSync } from "node:fs";
+import { defaultsPathFor } from "../training/defaults.js";
 import path from "node:path";
 import type { ControlCenterTraining, ControlCommandResult } from "../control-center/types.js";
 import { TrainingManager, type TrainingControl, type TrainingPreflight, type TrainingStartOptions } from "../training/manager.js";
@@ -65,7 +66,7 @@ export class TrainingHub implements TrainingControl {
     if (!manager) {
       const root = path.join(this.options.dataDirectory, name);
       const display = `${this.options.displayData}/${name}`;
-      manager = this.options.createManager ? this.options.createManager(root, display) : new TrainingManager({ root, displayRoot: display });
+      manager = this.options.createManager ? this.options.createManager(root, display) : new TrainingManager({ root, displayRoot: display, defaultsFile: defaultsPathFor(this.options.dataDirectory) });
       this.managers.set(name, manager);
     }
     return manager;

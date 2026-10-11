@@ -1,7 +1,7 @@
 import { h } from "../lib/h.js";
 import { badge, button, card, empty, kv, notice, progress, sourceBadge, statusBadge, unknown, value } from "../lib/ui.js";
 import { fmtAgo, fmtDateTime, fmtDuration, fmtNumber, fmtPercent, fmtTime, humanise, orUnknown } from "../lib/format.js";
-import { SOURCES, activeProgress, sessionInfo, taskBlocker, worldSource } from "../lib/model.js";
+import { SOURCES, activeProgress, nowSummary, sessionInfo, taskBlocker, worldSource } from "../lib/model.js";
 
 const LEVEL_TONE = { debug: "neutral", info: "info", warn: "warn", error: "bad" };
 
@@ -24,6 +24,7 @@ function session(snapshot, now) {
   return card(
     { title: "Session", subtitle: "Lifecycle of the agent's connection to the game", class: `hero tone-${info.tone}` },
     h("div", { class: "hero-state" }, h("span", { class: `state-dot tone-${info.tone}`, "aria-hidden": "true" }), h("div", null, h("p", { class: "hero-label" }, info.label), h("p", { class: "muted" }, info.meaning))),
+    h("p", { class: "hero-now" }, nowSummary(snapshot)),
     view?.error ? notice("bad", view.error.summary, view.error.hints.length ? h("ul", null, view.error.hints.map((hint) => h("li", null, hint))) : null, h("p", { class: "small muted" }, `Error reported: ${view.error.detail || "none"}`)) : null,
     view?.reconnect ? notice("warn", `Reconnect attempt ${view.reconnect.attempt} of ${view.reconnect.maxAttempts}`, view.reconnect.nextAttemptAt ? `Next try ${fmtAgo(view.reconnect.nextAttemptAt, now).replace(" ago", "")} from the time shown: ${fmtTime(view.reconnect.nextAttemptAt)}.` : "Trying now.") : null,
     kv([
@@ -81,13 +82,14 @@ function vitals(snapshot, now) {
       meter("Food", world.food, 20, live),
     ),
     kv([
-      ["Position", position ? `${position.x}, ${position.y}, ${position.z}` : null],
       ["Dimension", world.dimension ?? null],
       ["Game mode", world.gameMode ?? null],
       ["Alive", world.alive === null || world.alive === undefined ? null : world.alive ? "yes" : "no — respawning"],
       ["Time of day", world.time ? `${world.time.isNight ? "night" : "day"}${world.time.day !== null && world.time.day !== undefined ? ` (day ${world.time.day})` : ""}` : null],
       ["Inventory", world.inventory?.length ? `${fmtNumber(world.inventory.reduce((sum, item) => sum + item.count, 0))} items in ${world.inventory.length} slots` : live ? "empty" : null],
     ]),
+    // Exact coordinates are for debugging, not for watching the agent: they stay one click away.
+    h("details", { class: "small" }, h("summary", null, "Exact position"), kv([["Position", position ? `${position.x}, ${position.y}, ${position.z}` : null]])),
   );
 }
 

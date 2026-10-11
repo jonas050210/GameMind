@@ -10,16 +10,17 @@
  * It never writes to an existing directory, so previous datasets and checkpoints are not touched.
  */
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFileSync } from "node:fs";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ExperienceLearner } from "../core/learning/learner.js";
 import { BASELINE_POLICY_WEIGHTS, type PolicyWeights } from "../core/learning/policy-weights.js";
-import { runEvaluationOnce, evaluationSeeds, type EvaluationRun, type EvaluationRunOptions } from "../testing/eval/harness.js";
+import { evaluationSeeds, runEvaluationOnce } from "../testing/eval/harness.js";
 import { evaluationScenarios } from "../testing/eval/scenarios.js";
 import { evaluateCheckpoint, loadCheckpoint } from "./evaluate.js";
 import { TRAINING_SEED_BASE } from "./curriculum.js";
 import { trainingPaths, writeJsonAtomic } from "./state.js";
-import { runTraining, type EpisodeRunner } from "./trainer.js";
+import { runTraining } from "./trainer.js";
 
 export interface HeadlessExperimentOptions {
   /** Experiment name; becomes the directory name under `outDir`. Must not already exist. */
@@ -29,6 +30,8 @@ export interface HeadlessExperimentOptions {
   readonly maxEpisodes: number;
   readonly explorationRate: number;
   readonly evaluationSeeds: number;
+  /** Episodes that run at the same time (one worker process each). Default 1. */
+  readonly workers?: number;
   readonly logger?: { info(obj: unknown, msg?: string): void };
 }
 
@@ -137,43 +140,37 @@ export async function runHeadlessExperiment(options: HeadlessExperimentOptions):
   const episodeLog = join(directory, "episodes.jsonl");
   await writeFile(episodeLog, "");
 
-  // Wrap the episode runner to record, per episode, the reward the learner was credited with, the outcome, and the
-  // number of exploratory switches. The trainer itself keeps only the last 50 episodes.
+  // Per episode: the reward the learner was credited with, the outcome, and the number of exploratory switches. The
+  // trainer calls this in episode order, whether the episodes ran in this process or in workers.
   let explorations = 0;
   let envSteps = 0;
   const started = performance.now();
-  const runner: EpisodeRunner = async (scenario, seed, runOptions: EvaluationRunOptions) => {
-    const before = runOptions.learner?.rewardTotals ?? { episodes: 0, sum: 0 };
-    const episodeStarted = performance.now();
-    const run: EvaluationRun = await runEvaluationOnce(scenario, seed, runOptions);
-    const after = runOptions.learner?.rewardTotals ?? { episodes: 0, sum: 0 };
-    const reward = after.episodes > before.episodes ? after.sum - before.sum : null;
-    explorations += run.metrics.explorations ?? 0;
-    envSteps += run.metrics.actions;
-    await appendFile(
-      episodeLog,
-      `${JSON.stringify({
-        runId: runOptions.runId ?? null,
-        scenarioId: scenario.id,
-        seed,
-        success: run.success,
-        failureCode: run.failureCode,
-        actions: run.metrics.actions,
-        explorations: run.metrics.explorations ?? 0,
-        reward: reward === null ? null : Math.round(reward * 1000) / 1000,
-        wallMs: Math.round((performance.now() - episodeStarted) * 10) / 10,
-      })}\n`,
-    );
-    return run;
-  };
-
   const state = await runTraining({
     root: join(directory, "training"),
     episodesPerStage: options.episodesPerStage,
     maxEpisodes: options.maxEpisodes,
     explorationRate: options.explorationRate,
+    workers: options.workers ?? 1,
     evaluationSeedCount: options.evaluationSeeds,
-    episodeRunner: runner,
+    onEpisode: (event) => {
+      const { record, run, reward, runId } = event;
+      explorations += run.metrics.explorations ?? 0;
+      envSteps += run.metrics.actions;
+      appendFileSync(
+        episodeLog,
+        `${JSON.stringify({
+          runId,
+          scenarioId: record.scenarioId,
+          seed: record.seed,
+          success: run.success,
+          failureCode: run.failureCode,
+          actions: run.metrics.actions,
+          explorations: run.metrics.explorations ?? 0,
+          reward: reward === null ? null : Math.round(reward * 1000) / 1000,
+          workers: event.workers,
+        })}\n`,
+      );
+    },
     ...(options.logger ? { logger: options.logger as never } : {}),
   });
   const wallSeconds = (performance.now() - started) / 1000;

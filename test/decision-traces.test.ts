@@ -88,7 +88,8 @@ test("combat is never planned without the operator switch, and the refusal is re
   assert.equal(enabled.selected?.skillId, "minecraft.attack-hostile");
   const input = enabled.selected?.input as { entityId: string; maxHits: number };
   assert.equal(input.entityId, "e1");
-  assert.equal(input.maxHits, 4);
+  // A stone sword (5 damage) needs 4 hits on a 20-health zombie, plus one spare swing.
+  assert.equal(input.maxHits, 5);
 });
 
 test("defence is refused even with combat enabled when the weapon is too weak", () => {

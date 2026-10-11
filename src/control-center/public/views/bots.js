@@ -38,7 +38,6 @@ function botCard(bot, now) {
       ["Connection", snapshot.connection?.adapterStatus ?? null],
       ["World", session.worldKey ?? null],
       ["Task", task ? task.label : active ? "none (idle)" : null],
-      ["Position", world.position ? `${world.position.x}, ${world.position.y}, ${world.position.z}` : null],
       ["Health", typeof world.health === "number" ? `${fmtNumber(world.health, 1)} / 20` : null],
       ["Food", typeof world.food === "number" ? `${fmtNumber(world.food)} / 20` : null],
       ["Runtime", session.runtimeMs !== null && session.runtimeMs !== undefined ? fmtDuration(session.runtimeMs) : null],
@@ -47,6 +46,8 @@ function botCard(bot, now) {
       ["Last task", lastTask ? h("span", null, statusBadge(lastTask.status ?? lastTask.state), " ", lastTask.label) : null],
     ]),
     source === "historical" ? h("p", { class: "muted small" }, "These values are from the last observation before the session ended.") : null,
+    // Exact coordinates are for debugging, not for watching the agent: they stay one click away.
+    world.position ? h("details", { class: "small" }, h("summary", null, "Exact position"), kv([["Position", `${world.position.x}, ${world.position.y}, ${world.position.z}`]])) : null,
     h(
       "footer",
       { class: "button-row" },
@@ -105,7 +106,7 @@ function safety(snapshot) {
       button("Reset trip", { command: "resetTrip", disabled: !safetyState.tripped }),
       snapshot.combatAllowed === null || snapshot.combatAllowed === undefined
         ? null
-        : button(snapshot.combatAllowed ? "Disarm combat" : "Arm combat", { command: "enableCombat", payload: { enabled: !snapshot.combatAllowed }, tone: snapshot.combatAllowed ? "" : "warn", data: snapshot.combatAllowed ? {} : { confirm: "Arm the combat capability? The bot may then attack hostile mobs that threaten it." } }),
+        : button(snapshot.combatAllowed ? "Fighting allowed: turn off" : "Fighting off: allow", { command: "enableCombat", payload: { enabled: !snapshot.combatAllowed }, tone: snapshot.combatAllowed ? "" : "warn", data: snapshot.combatAllowed ? {} : { confirm: "Allow the bot to fight back against hostile mobs that threaten it? It attacks only with a weapon, enough health, and one enemy at a time, and it withdraws when health gets low." } }),
     ),
     (safetyState.recentVerdicts ?? []).length
       ? h("details", null, h("summary", null, "Recent safety verdicts"), table({ dense: true, columns: [{ label: "Time", cell: (v) => fmtTime(v.evaluatedAt) }, { label: "Capability", cell: (v) => v.capability }, { label: "Verdict", cell: (v) => (v.allowed ? badge("allowed", "good") : badge("denied", "warn")) }, { label: "Why", cell: (v) => v.message }], rows: safetyState.recentVerdicts.map((v, index) => ({ key: index, value: v })) }))
@@ -225,10 +226,47 @@ function library(snapshot) {
   );
 }
 
+const TEST_SERVER_LABELS = {
+  unknown: ["Not checked yet", "neutral"],
+  "docker-missing": ["Docker missing", "bad"],
+  "docker-stopped": ["Docker not running", "bad"],
+  stopped: ["Stopped", "neutral"],
+  starting: ["Starting…", "neutral"],
+  running: ["Running", "good"],
+  stopping: ["Stopping…", "neutral"],
+  failed: ["Failed", "bad"],
+};
+
+/** The offline test server (Docker, vanilla 1.20.4) with the three things an operator needs: state, connection details, and the buttons. */
+export function testServerCard(status) {
+  if (!status) return card({ title: "Offline test server" }, empty("Not checked yet", "The state of the Docker test server appears here in a moment."));
+  const [label, tone] = TEST_SERVER_LABELS[status.state] ?? ["Unknown", "neutral"];
+  const running = status.state === "running";
+  const docker = status.state !== "docker-missing" && status.state !== "docker-stopped";
+  const busy = Boolean(status.busy);
+  return card(
+    { title: "Offline test server", subtitle: "Vanilla Minecraft 1.20.4 in Docker on this machine. Offline sign-in, nothing leaves this PC.", actions: badge(label, tone) },
+    notice(tone === "bad" ? "warn" : "neutral", status.message),
+    kv([
+      ["Connect to", `${status.connection.host}:${status.connection.port}`],
+      ["Version", status.connection.version],
+      ["Sign-in", status.connection.auth],
+    ]),
+    h(
+      "footer",
+      { class: "button-row" },
+      button("Start test server", { command: "startTestServer", tone: "primary", disabled: running || busy || !docker }),
+      button("Stop test server", { command: "stopTestServer", tone: "warn", disabled: !running || busy, data: { confirm: "Stop the test server? The world is kept in its Docker volume." } }),
+      button("Fill in the connection", { action: "use-test-server", title: "Fills the host, port, version and sign-in in the form below" }),
+    ),
+  );
+}
+
 export function renderBots(ctx) {
   const { snapshot, now } = ctx;
   const bots = botsFrom(snapshot);
   return {
+    "bots-testserver": testServerCard(ctx.data?.testServer?.value ?? null),
     "bots-list": h(
       "div",
       { class: "bot-list" },

@@ -147,7 +147,7 @@ function lastEvaluation(training) {
 export function renderTraining(ctx) {
   const training = ctx.snapshot.training;
   if (!training) {
-    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null };
+    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null, "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null) };
   }
   return {
     "training-notice": notice("info", "Offline simulator training — not real-world training", "Training runs the agent's decision loop on the built-in simulator in a separate process, without rendering. What it learns is measured on held-out simulator seeds. It says nothing about a real Minecraft world until a live run is verified separately."),
@@ -157,7 +157,82 @@ export function renderTraining(ctx) {
     "training-checkpoints": checkpoints(training),
     "training-episodes-table": episodes(training),
     "training-eval": lastEvaluation(training),
+    "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null),
   };
+}
+
+const GATE_TEXT = { promotable: "promotable", "not-promotable": "not promotable" };
+
+/** Exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
+export function benchmarksCard(listing) {
+  const subtitle = "Step 1 times 1–4 workers (about 20 s each), step 2 compares exploration rates on the offline simulator with the chosen worker count. The winning settings are saved as the default.";
+  const start = button("Start benchmark", {
+    command: "runBenchmark",
+    tone: "primary",
+    title: "Measures worker counts, then runs four exploration rates one after another on the offline simulator",
+    data: { confirm: "Start a benchmark? It first times each worker count (about 20 seconds each), then runs several full training runs one after another on the offline simulator. It can take hours. You can cancel it from the Tests & Evaluation tab." },
+  });
+  const saved = listing?.savedDefault
+    ? notice(
+        "info",
+        `Current default: ${listing.savedDefault.workers} worker${listing.savedDefault.workers === 1 ? "" : "s"}, exploration rate ${fmtNumber(listing.savedDefault.explorationRate, 2)}`,
+        `Saved ${fmtDateTime(listing.savedDefault.savedAt)}${listing.savedDefault.benchmark ? ` by benchmark ${listing.savedDefault.benchmark}` : ""}. New runs use it unless they choose otherwise.`,
+      )
+    : notice("neutral", "No default saved yet", "Run a benchmark to choose the worker count and exploration rate. Until then, one worker and the standard rate are used.");
+  if (!listing || !listing.reports?.length) {
+    return card({ title: "Benchmarks", subtitle }, saved, empty("No benchmark yet", "A benchmark measures the worker counts, then compares exploration rates and shows the comparison here."), h("footer", { class: "button-row" }, start));
+  }
+  return card(
+    { title: "Benchmarks", subtitle, actions: start },
+    saved,
+    ...listing.reports.map((report) =>
+      h(
+        "section",
+        { class: "benchmark", key: report.file },
+        h("h4", null, report.name, " ", report.createdAt ? h("span", { class: "muted small" }, fmtDateTime(report.createdAt)) : null),
+        report.unreadable
+          ? notice("warn", "This report could not be read", report.file)
+          : h(
+              "div",
+              null,
+              report.probe
+                ? table({
+                    dense: true,
+                    caption: `Worker throughput (chosen: ${report.workers ?? "?"})`,
+                    columns: [
+                      { label: "Workers", align: "right", cell: (r) => r.workers },
+                      { label: "Episodes / min", align: "right", cell: (r) => (r.episodesPerMinute === null ? unknown() : fmtNumber(r.episodesPerMinute, 0)) },
+                      { label: "CPU", align: "right", cell: (r) => (r.cpuPercent === null ? unknown() : fmtPercent(r.cpuPercent / 100, 0)) },
+                      { label: "Peak RAM", align: "right", cell: (r) => (r.peakRssMb === null ? unknown() : `${fmtNumber(r.peakRssMb, 0)} MB`) },
+                      { label: "Result", cell: (r) => (r.eligible ? (r.workers === report.workers ? "chosen" : "ok") : r.reason ?? "not used") },
+                    ],
+                    rows: report.probe.map((value, index) => ({ key: `${report.file}-probe-${index}`, value })),
+                    empty: { title: "No probe" },
+                  })
+                : null,
+              report.winner
+                ? notice("info", `Winner: exploration rate ${report.winner}`, report.decision ?? null)
+                : notice("neutral", "No winner", report.decision ?? "No candidate passed the gate and the margin."),
+              table({
+                dense: true,
+                caption: "Results per candidate",
+                columns: [
+                  { label: "Candidate", cell: (r) => r.id },
+                  { label: "Exploration rate", align: "right", cell: (r) => (r.explorationRate === null ? unknown() : fmtNumber(r.explorationRate, 2)) },
+                  { label: "Status", cell: (r) => statusBadge(r.status) },
+                  { label: "Baseline", align: "right", cell: (r) => (r.baselineSuccess === null ? unknown() : fmtPercent(r.baselineSuccess, 0)) },
+                  { label: "Trained", align: "right", cell: (r) => (r.trainedSuccess === null ? unknown() : fmtPercent(r.trainedSuccess, 0)) },
+                  { label: "Gain", align: "right", cell: (r) => (r.deltaPoints === null ? unknown() : fmtSigned(r.deltaPoints * 100, 1, " pts")) },
+                  { label: "Gate", cell: (r) => (r.gateVerdict ? GATE_TEXT[r.gateVerdict] ?? r.gateVerdict : unknown()) },
+                  { label: "Error", cell: (r) => r.error ?? "—" },
+                ],
+                rows: report.rows.map((value, index) => ({ key: `${report.file}-${index}`, value })),
+                empty: { title: "No results" },
+              }),
+            ),
+      ),
+    ),
+  );
 }
 
 export { fmtSigned, unknown };

@@ -26,7 +26,7 @@ import {
   minecraftPlaceableBlockNames,
   miningDropFor,
 } from "./mining.js";
-import { COMBAT_APPROACH_MAX_BLOCKS, bestWeapon, combatIsAllowed } from "./combat.js";
+import { COMBAT_APPROACH_MAX_BLOCKS, UNARMED_DAMAGE, bestWeapon, combatIsAllowed, hitBudgetFor } from "./combat.js";
 import { shelterCardinalSolidCount } from "./skill-contracts.js";
 import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
@@ -265,6 +265,20 @@ function centerOf(position: { x: number; y: number; z: number }): { x: number; y
   return { x: position.x + 0.5, y: position.y + 0.5, z: position.z + 0.5 };
 }
 
+/**
+ * Feet height for a navigation target at (x, z). The target used to take the player's own height, so a goal on a
+ * hill or a step was a block inside terrain or a floating cell, and the walk failed. This takes the highest observed
+ * solid block with air above it near the player, and falls back to the player's height when the column is not observed.
+ */
+export function standingYAt(state: MinecraftObservation, x: number, z: number, fallbackY: number): number {
+  const solids = solidKeys(state);
+  const top = Math.floor(state.player.position.y) + 2;
+  for (let y = top; y >= top - 6; y -= 1) {
+    if (solids.has(positionKey({ x, y, z })) && !solids.has(positionKey({ x, y: y + 1, z }))) return y + 1;
+  }
+  return Math.floor(fallbackY);
+}
+
 function positionKey(position: { x: number; y: number; z: number }): string {
   return blockKey({ x: position.x, y: position.y, z: position.z });
 }
@@ -477,7 +491,7 @@ function fleeCandidates(
       priorityBand: BAND_SAFETY,
       score: 1_000 + candidate.score - index * 0.01,
       skillId: "minecraft.navigate",
-      input: { x: candidate.x, y: Math.floor(player.y), z: candidate.z, range: 1 },
+      input: { x: candidate.x, y: standingYAt(state, candidate.x, candidate.z, player.y), z: candidate.z, range: 1 },
       targetKey: `flee:${candidate.x},${Math.floor(player.y)},${candidate.z}`,
       rationale: `Move away from ${threats.length} visible hostile entit${threats.length === 1 ? "y" : "ies"}; conservative navigation avoids digging and building (${candidate.blocked} observed solid blocks on the route).`,
     }))
@@ -536,7 +550,7 @@ function recoveryCandidates(
       priorityBand: BAND_SAFETY,
       score: 950 - blocked * 4 - progress * 0.5,
       skillId: "minecraft.navigate",
-      input: { x, y: Math.floor(player.y), z, range: 1 },
+      input: { x, y: standingYAt(state, x, z, player.y), z, range: 1 },
       targetKey: key,
       rationale: `Recover from ${stuck.reason} with an alternative straight route that avoids the stalled segment (${blocked} observed solid blocks on the route).`,
       progress,
@@ -621,7 +635,7 @@ function hazardCandidate(
     priorityBand: BAND_SAFETY,
     score: 990 + best.score,
     skillId: "minecraft.navigate",
-    input: { x: best.x, y: Math.floor(player.y), z: best.z, range: 1 },
+    input: { x: best.x, y: standingYAt(state, best.x, best.z, player.y), z: best.z, range: 1 },
     targetKey,
     rationale: `A ${hazard.name} block is ${hazard.distance.toFixed(1)} blocks away; move to a cell that keeps distance from it before doing anything else.`,
   };
@@ -733,7 +747,7 @@ function defendCandidate(
     targetDistance: hostile.distance,
     maxTargetDistance: COMBAT_APPROACH_MAX_BLOCKS,
     hitsAlreadyAttempted: 0,
-    maxHits: 4,
+    maxHits: hitBudgetFor(hostile.name, weapon?.damage ?? UNARMED_DAMAGE),
     hostileName: hostile.name,
     hostileType: hostile.type,
     hunger: state.player.food,
@@ -762,7 +776,7 @@ function defendCandidate(
     skillId: "minecraft.attack-hostile",
     input: {
       entityId: hostile.id,
-      maxHits: 4,
+      maxHits: hitBudgetFor(hostile.name, weapon?.damage ?? UNARMED_DAMAGE),
       dangerRadius: task.dangerRadius,
       minHealth: 10,
       retreatHealth: 6,
@@ -1335,7 +1349,7 @@ function explorationCandidate(
     priorityBand: purpose === "food" ? BAND_SURVIVAL : BAND_PROGRESS,
     score: (purpose === "food" ? 600 : 300) - waypoint.distance / 10,
     skillId: "minecraft.navigate",
-    input: { x: waypoint.x, y: Math.floor(player.y), z: waypoint.z, range: 3 },
+    input: { x: waypoint.x, y: standingYAt(state, waypoint.x, waypoint.z, player.y), z: waypoint.z, range: 3 },
     targetKey: waypoint.key,
     rationale: `Explore toward unexplored coverage ${waypoint.distance.toFixed(0)} blocks away (${legsLeft} exploration leg${legsLeft === 1 ? "" : "s"} left) to find ${purpose === "food" ? "food" : "the required resource"}.`,
   };

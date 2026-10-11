@@ -4,13 +4,16 @@ import { evaluateCheckpoint } from "./evaluate.js";
 import { DEFAULT_TRAINING_EXPLORATION_RATE, TRAINING_STAGES } from "./curriculum.js";
 import { readControlCommand, readTrainingState, trainingPaths, writeControlCommand } from "./state.js";
 import { runTraining } from "./trainer.js";
+import { readTrainingDefaults } from "./defaults.js";
 
 const USAGE = `GameMind training
 
-  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh] [--explore RATE] [--stages A,B]
+  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh] [--explore RATE] [--stages A,B] [--workers N] [--defaults-file FILE]
       Runs the curriculum on the offline simulator. Resumes from DIR/state.json unless --fresh is given; --fresh
       archives (never deletes) the existing run first. --explore defaults to ${DEFAULT_TRAINING_EXPLORATION_RATE} (0 = greedy).
       --stages picks curriculum stages by id (${TRAINING_STAGES.map((stage) => stage.id).join(", ")}). One run per directory at a time.
+      --workers runs that many episodes at once (1-8). Without --workers and --explore, the saved default from
+      the benchmark (--defaults-file, default data/training-defaults.json) is used when there is one.
   npm run train -- evaluate [--dir DIR] [--checkpoint ID] [--seeds N]
       Scores a checkpoint against the baseline on held-out evaluation seeds and writes a JSON report.
   npm run train -- status [--dir DIR]
@@ -30,6 +33,8 @@ interface ParsedArgs {
   readonly stages?: readonly string[];
   readonly checkpoint?: string;
   readonly seeds?: number;
+  readonly workers?: number;
+  readonly defaultsFile: string;
 }
 
 function integerFlag(name: string, value: string | undefined, min: number, max: number): number {
@@ -42,7 +47,7 @@ function integerFlag(name: string, value: string | undefined, min: number, max: 
 
 export function parseTrainingArgs(argv: readonly string[]): ParsedArgs {
   const [command = "help", ...rest] = argv;
-  const parsed: { -readonly [K in keyof ParsedArgs]: ParsedArgs[K] } = { command, dir: "data/training", fresh: false };
+  const parsed: { -readonly [K in keyof ParsedArgs]: ParsedArgs[K] } = { command, dir: "data/training", fresh: false, defaultsFile: "data/training-defaults.json" };
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index]!;
     const value = () => {
@@ -87,6 +92,12 @@ export function parseTrainingArgs(argv: readonly string[]): ParsedArgs {
       case "--seeds":
         parsed.seeds = integerFlag(flag, value(), 1, 200);
         break;
+      case "--workers":
+        parsed.workers = integerFlag(flag, value(), 1, 8);
+        break;
+      case "--defaults-file":
+        parsed.defaultsFile = value();
+        break;
       default:
         throw new Error(`Unknown option ${flag}.\n\n${USAGE}`);
     }
@@ -101,13 +112,15 @@ async function main(): Promise<number> {
 
   switch (args.command) {
     case "train": {
+      const saved = await readTrainingDefaults(args.defaultsFile);
       const state = await runTraining({
         root: args.dir,
         ...(args.episodesPerStage !== undefined ? { episodesPerStage: args.episodesPerStage } : {}),
         ...(args.maxEpisodes !== undefined ? { maxEpisodes: args.maxEpisodes } : {}),
         ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes } : {}),
         fresh: args.fresh,
-        explorationRate: args.explore ?? DEFAULT_TRAINING_EXPLORATION_RATE,
+        explorationRate: args.explore ?? saved?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE,
+        workers: args.workers ?? saved?.workers ?? 1,
         ...(args.stages ? { stages: TRAINING_STAGES.filter((stage) => args.stages!.includes(stage.id)) } : {}),
         evaluationSeedCount: 10,
         logger,

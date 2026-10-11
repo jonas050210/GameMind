@@ -1068,3 +1068,46 @@ test("a Library action with parameters gets an inline form that survives polling
     assert.match(page.visibleText("toasts"), /X must be a whole number/);
   });
 });
+
+// ---- offline test server and port check (Bots tab) ----------------------------------------------------------
+
+const testServerStatus = (state: string, message: string, busy = false) => ({
+  state,
+  message,
+  connection: { host: "127.0.0.1", port: 25565, version: "1.20.4", auth: "offline" },
+  busy,
+  updatedAt: "2026-10-10T10:00:00.000Z",
+});
+
+test("the offline test server card enables Start only when Docker can run it, and Stop only while it runs", async () => {
+  await openBots(server(idleSession, { testServer: testServerStatus("stopped", "The test server is not running. Press Start to run it.") }), async ({ page, settle }) => {
+    await settle();
+    assert.equal(page.button("Start test server", "bots-testserver").disabled, false);
+    assert.equal(page.button("Stop test server", "bots-testserver").disabled, true);
+    assert.match(page.visibleText("bots-testserver"), /Offline-Testserver|Offline test server/);
+    assert.match(page.visibleText("bots-testserver"), /127\.0\.0\.1:25565/);
+  });
+  await openBots(server(idleSession, { testServer: testServerStatus("docker-missing", "Docker is not installed.") }), async ({ page, settle }) => {
+    await settle();
+    assert.equal(page.button("Start test server", "bots-testserver").disabled, true, "nothing to start without Docker");
+    assert.match(page.visibleText("bots-testserver"), /Docker is not installed/);
+  });
+  await openBots(server(idleSession, { testServer: testServerStatus("running", "running") }), async ({ page, settle }) => {
+    await settle();
+    assert.equal(page.button("Start test server", "bots-testserver").disabled, true);
+    assert.equal(page.button("Stop test server", "bots-testserver").disabled, false);
+  });
+});
+
+test("Check the port sends a read-only probe for the host and port typed in the form", async () => {
+  const stub = server(idleSession);
+  await openBots(stub, async ({ page, settle }) => {
+    page.byId("connect-host").value = "127.0.0.1";
+    page.byId("connect-port").value = "25570";
+    page.click(page.byId("connect-check"));
+    await settle();
+    const sent = stub.commands().filter((entry) => entry.type === "probeServer");
+    assert.equal(sent.length, 1, "exactly one probe");
+    assert.deepEqual(sent[0]?.payload, { host: "127.0.0.1", port: 25570 });
+  });
+});

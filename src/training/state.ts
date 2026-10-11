@@ -86,6 +86,17 @@ export const trainingStateSchema = z.object({
   stageIds: z.array(z.string()).optional(),
   /** Exploration rate this run last used, so the operator can see how its experience was collected. */
   explorationRate: z.number().min(0).max(1).optional(),
+  /** Throughput of the parallel workers this run used. Absent for single-process runs. */
+  parallel: z
+    .object({
+      workers: z.number().int().min(1),
+      episodesPerMinute: z.number().min(0),
+      cpuPercent: z.number().min(0),
+      rssMb: z.number().min(0),
+      peakRssMb: z.number().min(0),
+      respawns: z.number().int().min(0),
+    })
+    .optional(),
 });
 
 export type TrainingState = z.infer<typeof trainingStateSchema>;

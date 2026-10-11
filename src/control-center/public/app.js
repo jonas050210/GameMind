@@ -42,7 +42,11 @@ export function tabFromHash(hash) {
 export function wantedResources(ui, folder) {
   const list = [{ name: "tasks", everyMs: 30000 }];
   if (ui.tab === "training") list.push({ name: "training-preflight", params: folder ? { directory: folder } : {}, everyMs: 3000 });
-  if (ui.tab === "bots") list.push({ name: "diagnostics", everyMs: 30000 });
+  if (ui.tab === "bots") {
+    list.push({ name: "diagnostics", everyMs: 30000 });
+    list.push({ name: "testServer", everyMs: 4000 });
+  }
+  if (ui.tab === "training") list.push({ name: "benchmarks", everyMs: 15000 });
   if (ui.tab === "evaluation") list.push({ name: "evaluation", everyMs: 4000 });
   if (ui.tab === "learning") list.push({ name: "learning", params: { store: ui.learningStore }, everyMs: 5000 });
   if (ui.tab === "memory") {
@@ -188,6 +192,8 @@ export function boot(env = {}) {
         events: data("events"),
         preflight: data("training-preflight"),
         diagnostics: data("diagnostics"),
+        testServer: data("testServer"),
+        benchmarks: data("benchmarks"),
       },
       ui,
       now: now(),
@@ -609,7 +615,7 @@ export function boot(env = {}) {
     }
   }
 
-  function handleAction(name, control) {
+  async function handleAction(name, control) {
     switch (name) {
       case "toggle-theme":
         toggleTheme();
@@ -644,6 +650,22 @@ export function boot(env = {}) {
         if (host) el("connect-host").value = host;
         break;
       }
+      case "check-port": {
+        const host = (el("connect-host").value || "127.0.0.1").trim();
+        const port = Number(el("connect-port").value || 25565);
+        setText(el("connect-probe"), "Checking…");
+        const result = await runCommand("probeServer", { host, port }, { silent: true });
+        setText(el("connect-probe"), result ? result.message : "The check could not be sent.");
+        break;
+      }
+      case "use-test-server":
+        el("connect-host").value = "127.0.0.1";
+        el("connect-port").value = "25565";
+        el("connect-username").value = el("connect-username").value || "GameMind";
+        el("connect-version").value = "1.20.4";
+        el("connect-auth").value = "offline";
+        setText(el("connect-probe"), "Filled in for the offline test server. Press Connect.");
+        break;
       case "seed-clear":
         el("seed-input").value = "";
         void runCommand("setWorldSeed", null);
@@ -658,7 +680,7 @@ export function boot(env = {}) {
     if (!control || control.disabled) return;
     const action = control.getAttribute("data-action");
     if (action) {
-      handleAction(action, control);
+      void handleAction(action, control);
       return;
     }
     if (control.getAttribute("role") === "tab") {

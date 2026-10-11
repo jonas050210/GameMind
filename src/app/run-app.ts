@@ -52,24 +52,53 @@ export interface SignalHub {
   onShutdown(handler: (reason: string) => void): () => void;
 }
 
-export function processSignalHub(logger: Logger): SignalHub {
+/**
+ * A second signal within this window is treated as a duplicate, not as a deliberate second Ctrl-C. Process groups
+ * deliver the same SIGINT twice: once directly, once relayed by the tsx wrapper in front of the agent. Without this
+ * window the agent would force-exit (code 130) in the middle of its clean shutdown.
+ */
+export const DUPLICATE_SIGNAL_WINDOW_MS = 1500;
+
+export interface SignalTarget {
+  on(name: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): unknown;
+  off(name: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): unknown;
+}
+
+export interface SignalHubOptions {
+  readonly now?: () => number;
+  readonly exit?: (code: number) => void;
+  readonly target?: SignalTarget;
+  readonly platform?: NodeJS.Platform;
+}
+
+export function processSignalHub(logger: Logger, options: SignalHubOptions = {}): SignalHub {
+  const now = options.now ?? Date.now;
+  const exit = options.exit ?? ((code: number) => process.exit(code));
+  const target = options.target ?? process;
+  const platform = options.platform ?? process.platform;
   return {
     onShutdown(handler) {
       let count = 0;
+      let firstAt = 0;
       const listener = (name: NodeJS.Signals): void => {
-        count += 1;
-        if (count === 1) {
+        if (count === 0) {
+          count = 1;
+          firstAt = now();
           logger.warn({ signal: name }, "Shutdown signal received; closing the session and the Control Center cleanly. Press Ctrl-C again to force an immediate exit.");
           handler(name);
           return;
         }
+        if (now() - firstAt < DUPLICATE_SIGNAL_WINDOW_MS) {
+          logger.debug({ signal: name }, "Duplicate shutdown signal ignored; the clean shutdown is already running.");
+          return;
+        }
         logger.error({ signal: name }, "Second shutdown signal: exiting immediately without finishing cleanup.");
-        process.exit(130);
+        exit(130);
       };
-      const names: NodeJS.Signals[] = ["SIGINT", "SIGTERM", ...(process.platform === "win32" ? (["SIGBREAK"] as NodeJS.Signals[]) : (["SIGHUP"] as NodeJS.Signals[]))];
-      for (const name of names) process.on(name, listener);
+      const names: NodeJS.Signals[] = ["SIGINT", "SIGTERM", ...(platform === "win32" ? (["SIGBREAK"] as NodeJS.Signals[]) : (["SIGHUP"] as NodeJS.Signals[]))];
+      for (const name of names) target.on(name, listener);
       return () => {
-        for (const name of names) process.off(name, listener);
+        for (const name of names) target.off(name, listener);
       };
     },
   };

@@ -28,6 +28,7 @@ import { WorldMemory } from "./world-memory.js";
 import { explorationKeyCenter } from "./exploration.js";
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { combatEnabledForPlanner } from "./combat.js";
 import { observedMovementProgress } from "./progress-evidence.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
 import { REFLEX_THRESHOLDS, urgentReflexesSince } from "./reflex.js";
@@ -596,7 +597,12 @@ export class MinecraftTaskRunner {
           previousGoalKey,
           stuck,
           safetyNote: lastSafetyNote,
-          ...(this.options.allowCombat ? { combatEnabled: true } : {}),
+          ...(combatEnabledForPlanner(
+            this.options.allowCombat === true,
+            (this.runtime.adapter as { combatAllowed?: boolean }).combatAllowed,
+          )
+            ? { combatEnabled: true }
+            : {}),
           combatAttempts,
           ...(learner ? { advisor: learner.advisor() } : {}),
           ...(worldKey ? { worldKey } : {}),

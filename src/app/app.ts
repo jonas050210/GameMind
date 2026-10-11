@@ -20,14 +20,17 @@ import { evaluationScenarios } from "../testing/eval/scenarios.js";
 import { BrowserOpener, type BrowserOpenResult } from "./browser.js";
 import { buildDetachedSnapshot } from "./detached-snapshot.js";
 import { AppEventLog, type AppEventCategory, type AppEventLevel, type AppEventSource } from "./event-log.js";
-import { planLiveVerification, planOfflineEval, planUnitTests, JobPlanError, type PlanContext } from "./job-plans.js";
-import { JobRunner } from "./jobs.js";
+import { planBenchmark, planLiveVerification, planOfflineEval, planUnitTests, JobPlanError, type PlanContext } from "./job-plans.js";
+import { JobRunner, type JobSpec } from "./jobs.js";
 import { detectPlatform, discoverWindowsHost, type PlatformInfo } from "./platform.js";
 import { buildLearningQuery, buildMemoryQuery, evaluationOverview } from "./queries.js";
 import { defaultRedactionContext, displayPath, redactStrings, type RedactionContext } from "./redact.js";
 import { DEFAULT_RECONNECT_POLICY, MinecraftSession, SessionStartError, type ReconnectPolicy } from "./session.js";
 import { DEFAULT_SIMULATED_SCENARIO, SessionRequestError, createSessionFactory, type SessionFactory, type SessionFactoryDeps } from "./session-factory.js";
 import { TrainingDirectoryNameError, TrainingHub } from "./training-hub.js";
+import { TestServerController, describeProbe, probePort } from "./test-server.js";
+import { readBenchmarkListing } from "./benchmark-view.js";
+import { defaultsPathFor } from "../training/defaults.js";
 import { NO_SESSION_VIEW, type ConnectRequest, type SessionMode, type SessionView } from "./types.js";
 
 /**
@@ -128,6 +131,7 @@ export class GameMindApp {
   private readonly sessionDefaults: { mode: SessionMode; autonomy: boolean; reconnect: ReconnectPolicy };
   private readonly lockFile: string | null;
   private handleValue: ControlCenterHandle | null = null;
+  private readonly testServer = new TestServerController();
   private sessionValue: MinecraftSession | null = null;
   private sessionCounter = 0;
   private connecting = false;
@@ -525,6 +529,19 @@ export class GameMindApp {
         }));
       },
       runLiveVerification: (payload: unknown) => this.commandLive(payload),
+      runBenchmark: (payload: unknown) => {
+        const name = typeof payload === "object" && payload !== null && typeof (payload as { name?: unknown }).name === "string" ? (payload as { name: string }).name : undefined;
+        return this.commandJob(() => planBenchmark(this.planContext(), name ? { name } : {}));
+      },
+      startTestServer: () => this.testServer.start(),
+      stopTestServer: () => this.testServer.stop(),
+      probeServer: async (payload: unknown) => {
+        const raw = typeof payload === "object" && payload !== null ? (payload as { host?: unknown; port?: unknown }) : {};
+        const host = typeof raw.host === "string" && raw.host.trim().length > 0 ? raw.host.trim() : "127.0.0.1";
+        const port = typeof raw.port === "number" ? raw.port : Number(raw.port ?? 25565);
+        const result = await probePort(host, port);
+        return { ok: result === "open", message: describeProbe(host, port, result), data: { host, port, result } };
+      },
       cancelJob: async (payload: unknown) => {
         const id = typeof payload === "string" ? payload : typeof payload === "object" && payload !== null ? String((payload as { id?: unknown }).id ?? "") : "";
         const cancelled = await this.jobs.cancel(id.length > 0 ? id : undefined);
@@ -564,7 +581,7 @@ export class GameMindApp {
     }
   }
 
-  private commandJob(plan: () => ReturnType<typeof planUnitTests>): ControlCommandResult {
+  private commandJob(plan: () => JobSpec): ControlCommandResult {
     try {
       const started = this.jobs.start(plan());
       return started.ok ? { ok: true, message: `${started.job.label} started.`, data: { id: started.job.id } } : { ok: false, message: started.message, data: { code: started.code } };
@@ -601,6 +618,8 @@ export class GameMindApp {
   private queries(): NonNullable<ControlCenterHost["queries"]> {
     const evaluationReportPath = path.join(this.dataDirectory, "eval", "offline-report.json");
     const raw: NonNullable<ControlCenterHost["queries"]> = {
+      testServer: async () => this.testServer.refresh(),
+      benchmarks: () => readBenchmarkListing(path.join(this.dataDirectory, "experiments"), 5, defaultsPathFor(this.dataDirectory)),
       events: (params) => {
         const category = params.get("category");
         const level = params.get("level");

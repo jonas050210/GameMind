@@ -11,6 +11,7 @@ import test from "node:test";
 import { BASELINE_POLICY_WEIGHTS } from "../src/core/learning/policy-weights.js";
 import { acquireTrainingLock, readTrainingLock, TrainingLockError, TRAINING_LOCK_FILE } from "../src/training/lock.js";
 import { TrainingManager } from "../src/training/manager.js";
+import { saveTrainingDefaults } from "../src/training/defaults.js";
 import { analyseComparison, evaluateCheckpoint, wilsonInterval, type PolicyMeasurement } from "../src/training/evaluate.js";
 import { DEFAULT_TRAINING_EXPLORATION_RATE, type CurriculumStage } from "../src/training/curriculum.js";
 import { readTrainingState, trainingPaths } from "../src/training/state.js";
@@ -276,6 +277,40 @@ test("the manager explains a fresh start before it happens, and refuses it witho
     assert.match(refused.message, /confirm it explicitly; nothing was changed/);
     assert.equal(await readFile(trainingPaths(root).state, "utf8"), before, "the refused fresh start changed nothing");
     assert.equal((await readdir(root)).includes("archive"), false, "and archived nothing");
+  });
+});
+
+test("a start without its own settings uses the saved benchmark default for workers and exploration", async () => {
+  await withRoot(async (root) => {
+    const entry = join(root, "record-args.mjs");
+    await writeFile(entry, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(root, "args.json"))}, JSON.stringify(process.argv.slice(2)));\n`);
+    const defaultsFile = join(root, "..", `${root.split(/[\\/]/).pop()}-defaults.json`);
+    await saveTrainingDefaults(defaultsFile, {
+      schemaVersion: 1,
+      workers: 3,
+      explorationRate: 0.3,
+      savedAt: "2026-10-10T10:00:00.000Z",
+      benchmark: "gui-test",
+      decision: "test",
+      probe: null,
+      machine: { platform: "test", cpus: 1, memoryGb: 1, node: "test" },
+    });
+    try {
+      const manager = new TrainingManager({ root, entry, defaultsFile });
+      const started = await manager.start({ fresh: true, confirmFresh: true, maxEpisodes: 30, stageIds: ["basics"] });
+      assert.equal(started.ok, true, started.message);
+      const deadline = Date.now() + 8_000;
+      let recorded: string[] | null = null;
+      while (Date.now() < deadline && recorded === null) {
+        recorded = await readFile(join(root, "args.json"), "utf8").then((text) => JSON.parse(text) as string[], () => null);
+        if (recorded === null) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(recorded, "the child ran");
+      assert.deepEqual(recorded!.slice(recorded!.indexOf("--explore"), recorded!.indexOf("--explore") + 2), ["--explore", "0.3"]);
+      assert.deepEqual(recorded!.slice(recorded!.indexOf("--workers"), recorded!.indexOf("--workers") + 2), ["--workers", "3"]);
+    } finally {
+      await rm(defaultsFile, { force: true });
+    }
   });
 });
 

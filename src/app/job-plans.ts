@@ -87,6 +87,50 @@ export function planOfflineEval(context: PlanContext, options: EvalPlanOptions =
   };
 }
 
+export interface BenchmarkPlanOptions {
+  /** Report name; letters, digits, dot, underscore and dash. Defaults to a timestamp. */
+  readonly name?: string;
+  readonly now?: Date;
+}
+
+/**
+ * The exploration-rate benchmark on the offline simulator (`npm run train:benchmark`), started from the Control Center.
+ * It writes into the data directory the Training tab reads from, and never overwrites an earlier report: the CLI refuses
+ * an existing name, so an invalid or taken name is reported before anything starts.
+ */
+export function planBenchmark(context: PlanContext, options: BenchmarkPlanOptions = {}): JobSpec {
+  const cli = tsxCli(context.root);
+  const stamp = (options.now ?? new Date()).toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "-");
+  const name = options.name ?? `gui-${stamp}`;
+  if (!/^[A-Za-z0-9._-]{1,60}$/.test(name)) throw new JobPlanError("INVALID_OPTION", "The benchmark name may only contain letters, digits, dots, underscores and dashes (max 60).");
+  const experiments = path.join(context.dataDirectory, "experiments");
+  if (existsSync(path.join(experiments, "benchmarks", `${name}.json`))) {
+    throw new JobPlanError("INVALID_OPTION", `A benchmark named '${name}' already exists. Choose another name; earlier benchmarks are never overwritten.`);
+  }
+  return {
+    kind: "benchmark",
+    label: `Exploration-rate benchmark (${name})`,
+    source: "offline",
+    command: process.execPath,
+    args: [
+      cli,
+      path.join("src", "training", "benchmark-cli.ts"),
+      "--name",
+      name,
+      "--out",
+      experiments,
+      "--defaults-file",
+      path.join(context.dataDirectory, "training-defaults.json"),
+    ],
+    cwd: context.root,
+    // Four candidates, each a full training run plus its held-out evaluation: allow several hours.
+    timeoutMs: 6 * 60 * 60_000,
+    display: `tsx src/training/benchmark-cli.ts --name ${name}`,
+    meta: { name, world: "simulated" },
+    summarise: () => ({ kind: "benchmark", reportPath: relative(context.root, path.join(experiments, "benchmarks", `${name}.json`)) }),
+  };
+}
+
 export interface LivePlanOptions {
   readonly host: string;
   readonly port: number;

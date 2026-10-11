@@ -96,6 +96,29 @@ export function estimatedHitsToKill(weaponDamage: number, hostileHealth: number)
   return Math.max(1, Math.ceil(hostileHealth / Math.max(0.5, weaponDamage)));
 }
 
+/** Health used when a hostile is not in the table: as durable as a zombie. */
+const DEFAULT_HOSTILE_HEALTH = 20;
+/** Upper bound of the attack capability's `maxHits` input (see the capability schema). */
+export const MAX_COMBAT_HIT_BUDGET = 6;
+
+/**
+ * Swings the agent is allowed for one engagement: the hits needed to kill the hostile with the held weapon, plus
+ * one spare swing for armour or a miss, capped at the capability limit. A fixed budget of 4 ended fights against a
+ * zombie with a wooden sword (5 hits needed) one hit short.
+ */
+export function hitBudgetFor(hostileName: string, weaponDamage: number): number {
+  const health = minecraftHostileHealth[hostileName] ?? DEFAULT_HOSTILE_HEALTH;
+  return Math.min(MAX_COMBAT_HIT_BUDGET, estimatedHitsToKill(weaponDamage, health) + 1);
+}
+
+/**
+ * Whether the planner may propose defence. The live adapter flag wins once the adapter reports one, so an operator
+ * who disarms combat in the Control Center stops the planner too. Otherwise the start-up option decides.
+ */
+export function combatEnabledForPlanner(startupAllowed: boolean, adapterArmed: boolean | undefined): boolean {
+  return adapterArmed ?? startupAllowed;
+}
+
 export interface CombatSafetyInput {
   readonly enabled: boolean;
   readonly health: number | null;
