@@ -272,7 +272,7 @@ npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
 npm run ui:demo                                   # simulator + Control Center on all interfaces (sandbox previews)
 ```
 
-The compact header keeps session state, data source, last-update age, an emergency stop and the theme switch in view. Seven tabs share one polling store:
+The compact header keeps session state, data source, last-update age, an emergency stop, a language switch (EN/DE) and the theme switch in view. Seven tabs share one polling store:
 
 | Tab | What it shows and does |
 | --- | --- |
@@ -283,6 +283,8 @@ The compact header keeps session state, data source, last-update age, an emergen
 | **Tests & Evaluation** | Unit tests and the offline evaluation as monitored jobs (one at a time, cancellable); baseline-versus-candidate comparisons with success rate, median actions, wasted actions, unsafe actions, deaths, 95% intervals and per-scenario deltas; PASS, FAIL and SKIPPED with the reason for every skip; the roadmap queue. **Live verification is a separate section**: it names the server it will touch and needs an explicit confirmation of the connection, and a second one before any phase that changes the world. |
 | **Learning & Policy** | The real experience store: policy status, candidate and active policy, contexts with evidence and weights, contradictions, excluded outcomes, blocked targets, historical runs. Plain explanations of `CONSECUTIVE_ACTION_FAILURES`, `NO_FEASIBLE_GOAL` and `TASK_BLOCKED_MODE` with what to check. Promote and reject only through the existing gate. |
 | **World Memory & Events** | World identity, remembered resource sightings, explored regions and memory status; the world seed (entered by hand, never auto-detected); and a searchable event log of connections, decisions, actions, task transitions, safety refusals, errors and shutdown reasons. |
+
+**Language.** The page is written in English and can be switched to German with the **EN/DE** buttons beside the theme switch; the choice is remembered per browser and applied before the first render. The switch covers everything the page itself writes, including sentences assembled from values (`Vor 3s aktualisiert`, `12 Seeds, disjunkt zum Training: ja`) and the browser tab title; text that the *runtime* supplies stays as the runtime wrote it — skill, action and scenario descriptions from the Minecraft library, event-log messages, failure codes, ids and numbers. The translation lives in `src/control-center/public/lib/i18n-de.js` (fixed strings plus patterns for composed sentences) and is applied in `lib/i18n.js` where text reaches the DOM, so no view has to know about languages. `test/ui-language.test.ts` fails when an interface string has no German entry, when a pattern is not anchored, or when a pattern or entry would rewrite runtime text.
 
 **Where each number comes from.** Every panel carries a badge: **LIVE** (a connected Minecraft session), **SIMULATED** (the offline simulator), **HISTORICAL** (remembered or stored data, or a session that has ended), **OFFLINE** (unit tests, evaluation and training) or **UNAVAILABLE**. A value that was not reported is shown as *unknown*, never as a default; there are no placeholder charts and no invented metrics. An offline result is never labelled live, and nothing is called "improved" or "promotable" except by the existing gate's own verdict.
 
@@ -544,7 +546,7 @@ Everything in this repository was verified offline: unit and integration tests, 
 - Tests use offline fixtures, deterministic simulated worlds, an injected Mineflayer double, a fake DOM and the real HTTP server. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, plugin behaviour or how the page looks.
 
 ```bash
-npm test                 # 903 TypeScript tests
+npm test                 # 907 TypeScript tests
 npm run test:launcher    # 41 Python tests for main.py and the launcher
 npm run build            # type-check, compile, copy and verify the Control Center files
 ```
@@ -562,6 +564,7 @@ The original suites cover loaded-chunk/truncation memory, persistent world snaps
 | `failure-taxonomy`, `learning-evidence`, `rl-readiness` | The external-failure kinds as one set (planner refusals are excluded from a skill's statistics), the code-only fallback, and the readiness report whose three in-process criteria are probed rather than asserted |
 | `memory-view-cache`, `event-log-rotation` | The memory view's reuse window (and that its live section stays fresh), and the log's one measurement per file plus the rotation that follows the counter |
 | `event-log-rotation`, `environment-settings`, `useful-drop-pickup` | The JSONL rotation honouring `keepFiles` including the active file and removing orphaned slots, the README/code round-trip of the documented environment variables, and the useful-drop list derived from the mining table |
+| `ui-language` | The EN/DE switch (static text, composed sentences, the tab title, the remembered choice), the catalog's coverage of every interface string, and that the patterns stay anchored and leave runtime text alone |
 | `task-report`, `trace-console` | The printed task report: the simulator's clock and world statistics stay in it (on the one-shot path, the default persistent path and for dashboard tasks), a live report never carries simulated fields, and a detail that is not known is left out instead of invented; every trace event is recorded at every log level while per-tick observations print only at `debug` |
 
 Existing tests were edited in a handful of places, each because behaviour changed on purpose; no test was removed or skipped, and every other assertion is unchanged:

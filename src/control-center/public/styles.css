@@ -224,6 +224,16 @@ a { color: var(--accent); }
 .btn.warn { border-color: var(--warn); color: var(--warn); }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn.danger:hover:not(:disabled) { background: var(--bad-soft); }
+.lang-switch {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.lang-switch .btn[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-2); }
 .btn.compact { padding: 4px 10px; font-size: 0.8rem; }
 .btn.confirming { background: var(--bad); border-color: var(--bad); color: #fff; }
