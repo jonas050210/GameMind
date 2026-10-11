@@ -114,7 +114,7 @@ def check_project(root: Path) -> list[Problem]:
 
 def check_windows_mount(root: Path, wsl: bool) -> Optional[str]:
     """A warning (not an error) for a project on the Windows drive seen from WSL: it works, but slowly and with watchers off."""
-    text = str(root)
+    text = root.as_posix()  # POSIX form, so a path object built on any OS is judged the same way
     if wsl and re.match(r"^/mnt/[a-z]/", text):
         return "The project is on the Windows drive (/mnt/<drive>). It works, but file access from WSL is much slower there; cloning into the Linux home folder is faster."
     return None

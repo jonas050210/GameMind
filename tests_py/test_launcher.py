@@ -274,7 +274,8 @@ class AgentArguments(unittest.TestCase):
 
     def test_command_uses_node_and_tsx_directly_with_no_shell(self) -> None:
         command = process.build_command("/usr/bin/node", Path("/proj"), ["--help"])
-        self.assertEqual(command, ["/usr/bin/node", "/proj/node_modules/tsx/dist/cli.mjs", "/proj/src/cli.ts", "--help"])
+        # Built with the platform's own separator, so the expectation holds on Windows (backslashes) too.
+        self.assertEqual(command, ["/usr/bin/node", str(Path("/proj") / "node_modules" / "tsx" / "dist" / "cli.mjs"), str(Path("/proj") / "src" / "cli.ts"), "--help"])
 
     def test_default_is_a_persistent_live_session_that_opens_the_browser_once(self) -> None:
         args = self.parse()
