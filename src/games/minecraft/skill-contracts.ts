@@ -1,6 +1,7 @@
 import { countItemAndEquipment } from "./recipes.js";
 import type { MinecraftObservation } from "./observation.js";
 import { COMBAT_APPROACH_MAX_BLOCKS } from "./combat.js";
+import { miningDropFor } from "./mining.js";
 
 /** Number of the four cardinal cells around the player that are observed solid at feet level. */
 export function shelterCardinalSolidCount(state: MinecraftObservation): number {
@@ -47,8 +48,15 @@ export function verifySkillPostcondition(
     return { verified: null, evidence: "No post-action observation was available; the adapter confirmation stands." };
   }
   const record = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
-  const countBefore = (name: string): number => (before ? countItemAndEquipment(before.inventory, before.equipment, name) : 0);
+  /**
+   * Inventory count before the action, or null when there is no pre-action observation. The delta is then
+   * *unknown*, not zero: claiming "0" would let an item that was already in the inventory pass a
+   * "+1 collected" contract, which the world never confirmed.
+   */
+  const countBefore = (name: string): number | null => (before ? countItemAndEquipment(before.inventory, before.equipment, name) : null);
   const countAfter = (name: string): number => countItemAndEquipment(after.inventory, after.equipment, name);
+  const UNKNOWN_BEFORE_EVIDENCE =
+    "No pre-action observation was available, so the inventory change cannot be measured; the adapter confirmation stands.";
 
   switch (skillId) {
     case "minecraft.inspect-block":
@@ -76,7 +84,10 @@ export function verifySkillPostcondition(
           : skillId === "minecraft.pickup-item"
             ? String(record.itemName)
             : "sweet_berries";
-      const delta = countAfter(item) - countBefore(item);
+      const had = countBefore(item);
+      const now = countAfter(item);
+      if (had === null) return { verified: null, evidence: UNKNOWN_BEFORE_EVIDENCE };
+      const delta = now - had;
       return {
         verified: delta > 0,
         evidence: `Observed ${item} inventory change ${delta >= 0 ? "+" : ""}${delta}.`,
@@ -85,9 +96,19 @@ export function verifySkillPostcondition(
     case "minecraft.craft-item": {
       const item = String(record.item);
       const requested = Number(record.count ?? 1);
-      const delta = countAfter(item) - countBefore(item);
+      const had = countBefore(item);
+      const now = countAfter(item);
+      if (had === null) {
+        // Without a pre-action count the change is unknown; the requested amount in the inventory is the
+        // one thing the observation can still prove.
+        return {
+          verified: now >= requested,
+          evidence: `No pre-action inventory was available; ${item} is ${now >= requested ? "" : "not "}present in the requested amount of ${requested}.`,
+        };
+      }
+      const delta = now - had;
       return {
-        verified: delta > 0 || countAfter(item) >= requested,
+        verified: delta > 0 || now >= requested,
         evidence: `Observed ${item} inventory change ${delta >= 0 ? "+" : ""}${delta}; requested ${requested}.`,
       };
     }
@@ -95,8 +116,12 @@ export function verifySkillPostcondition(
       const item = String(record.item);
       const hungerBefore = before?.player.food ?? null;
       const hungerAfter = after.player.food;
-      const verified =
-        hungerBefore !== null && hungerAfter !== null && hungerAfter > hungerBefore && countAfter(item) < countBefore(item);
+      const itemBefore = countBefore(item);
+      const itemAfter = countAfter(item);
+      if (hungerBefore === null || itemBefore === null) {
+        return { verified: null, evidence: UNKNOWN_BEFORE_EVIDENCE };
+      }
+      const verified = hungerAfter !== null && hungerAfter > hungerBefore && itemAfter < itemBefore;
       return { verified, evidence: `Observed hunger ${hungerBefore ?? "?"} → ${hungerAfter ?? "?"} and ${item} count change.` };
     }
     case "minecraft.place-crafting-table": {
@@ -118,26 +143,21 @@ export function verifySkillPostcondition(
     }
     case "minecraft.mine-block": {
       const blockName = String(record.blockName);
-      const drops: Record<string, string> = {
-        stone: "cobblestone",
-        cobblestone: "cobblestone",
-        deepslate: "cobbled_deepslate",
-        cobbled_deepslate: "cobbled_deepslate",
-        coal_ore: "coal",
-        deepslate_coal_ore: "coal",
-        iron_ore: "raw_iron",
-        deepslate_iron_ore: "raw_iron",
-        copper_ore: "raw_copper",
-        deepslate_copper_ore: "raw_copper",
-      };
-      const item = drops[blockName] ?? blockName;
-      const delta = countAfter(item) - countBefore(item);
+      // One drop table for the whole project: the same mapping the miner uses to predict what a block yields.
+      const item = miningDropFor(blockName) ?? blockName;
+      const had = countBefore(item);
+      const now = countAfter(item);
       const gone = ![...(after.nearbyBlocks ?? [])].some(
         (block) => block.position.x === Number(record.x) && block.position.y === Number(record.y) && block.position.z === Number(record.z),
       );
+      // The source block being gone is evidence by itself; without a pre-action count the inventory delta
+      // stays unknown instead of being read as zero.
+      const delta = had === null ? null : now - had;
       return {
-        verified: delta > 0 || gone,
-        evidence: `Observed ${item} inventory change ${delta >= 0 ? "+" : ""}${delta}; source block ${gone ? "no longer observed" : "still observed"}.`,
+        verified: gone || (delta !== null && delta > 0),
+        evidence: delta === null
+          ? `Source block ${gone ? "no longer observed" : "still observed"}; ${UNKNOWN_BEFORE_EVIDENCE}`
+          : `Observed ${item} inventory change ${delta >= 0 ? "+" : ""}${delta}; source block ${gone ? "no longer observed" : "still observed"}.`,
       };
     }
     case "minecraft.place-block": {
@@ -198,7 +218,9 @@ export function verifySkillPostcondition(
     case "minecraft.drop-item": {
       const item = String(record.itemName);
       const count = Number(record.count ?? 1);
-      const delta = countBefore(item) - countAfter(item);
+      const had = countBefore(item);
+      if (had === null) return { verified: null, evidence: UNKNOWN_BEFORE_EVIDENCE };
+      const delta = had - countAfter(item);
       return {
         verified: delta >= count,
         evidence: `Observed ${item} inventory decrease of ${delta} for a requested drop of ${count}.`,

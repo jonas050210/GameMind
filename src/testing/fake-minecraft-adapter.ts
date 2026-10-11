@@ -275,6 +275,8 @@ export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private deadObservationCount = 0;
   private connectionCount = 0;
   private activeActionId: string | null = null;
+  /** One-shot unresponsiveness for the next action (see `makeNextActionUnresponsive`). */
+  private unresponsiveNextActionMs = 0;
   private activeActionWaiters: Array<() => void> = [];
   private nextActionError: Error | null = null;
   private nextNavigationError: Error | null = null;
@@ -358,6 +360,14 @@ export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
     this.activeActionId = action.actionId;
     for (const resolve of this.activeActionWaiters.splice(0)) resolve();
     try {
+      // An unresponsive action deliberately ignores the abort signal: the executor's grace window then expires
+      // and it quarantines the adapter, exactly as it does with a real client that does not answer a cancel.
+      const unresponsiveMs = this.unresponsiveNextActionMs;
+      this.unresponsiveNextActionMs = 0;
+      if (unresponsiveMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, unresponsiveMs));
+        throw new Error("Unresponsive action never completed.");
+      }
       if ((this.options.actionDelayMs ?? 0) > 0) {
         await waitWithAbort(this.options.actionDelayMs ?? 0, signal);
       }
@@ -391,6 +401,14 @@ export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
     } finally {
       if (this.activeActionId === action.actionId) this.activeActionId = null;
     }
+  }
+
+  /**
+   * Test-only: the next action ignores cancellation and only settles after `ms`. It models a client that does not
+   * answer a cancel request, which is what puts the action executor into quarantine.
+   */
+  makeNextActionUnresponsive(ms: number): void {
+    this.unresponsiveNextActionMs = ms;
   }
 
   failNextAction(error = new Error("Injected deterministic action failure.")): void {

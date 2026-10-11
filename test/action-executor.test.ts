@@ -147,3 +147,35 @@ test("the action executor rejects concurrent action requests", async () => {
   assert.equal(adapter.status, "connected");
   await runtime.shutdown("test complete");
 });
+
+test("a quarantine from an unresponsive action is lifted once a new session is established", async () => {
+  // An action that does not answer the cancel request makes the executor quarantine the adapter (it disconnects
+  // and refuses further work). The quarantine used to be permanent, so a later, healthy reconnect still refused
+  // every action with ADAPTER_QUARANTINED and the agent only came back after a manual stop.
+  const { runtime, skills, adapter } = makeAgent({ seed: 42 });
+  await runtime.connect();
+  adapter.makeNextActionUnresponsive(4_000);
+  const quarantinedRun = await skills.run("minecraft.orient", { yaw: 0.4, pitch: 0 }, { timeoutMs: 20 });
+  assert.equal(quarantinedRun.action.status, "timed_out");
+  assert.equal(runtime.actionExecutor.isQuarantined, true, "the unresponsive action quarantines the executor");
+  assert.equal(adapter.status, "disconnected", "the unresponsive adapter is disconnected, as before");
+
+  // Until a new session exists, work stays refused (the adapter is not connected any more, and the quarantine
+  // would refuse it even if it were).
+  const blocked = await runtime.actionExecutor.execute({
+    sessionId: runtime.session?.id ?? null,
+    capability: "minecraft.look",
+    input: { yaw: 0, pitch: 0 },
+    source: "test",
+  });
+  assert.ok(["ADAPTER_QUARANTINED", "NO_ACTIVE_SESSION"].includes(blocked.failure?.code ?? ""));
+
+  // A reconnect (the same adapter instance, a new session) must restore the ability to act.
+  await adapter.disconnect("operator reconnected by hand");
+  await runtime.connect();
+  assert.equal(runtime.actionExecutor.isQuarantined, false, "a new session lifts the quarantine");
+  const afterReconnect = await skills.run("minecraft.orient", { yaw: 0.25, pitch: 0 }, { timeoutMs: 2_000 });
+  assert.equal(afterReconnect.action.status, "succeeded");
+  assert.equal(afterReconnect.action.confirmed, true);
+  await runtime.shutdown("test complete");
+});

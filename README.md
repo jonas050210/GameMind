@@ -8,19 +8,20 @@ GameMind is a modular, observable game-agent runtime. The current implementation
 
 ```bash
 npm ci               # once; `python3 main.py --install` does this for you when node_modules is missing
-python3 main.py      # checks, Control Center, browser and a persistent Minecraft session
+python3 main.py      # checks, Control Center, browser; connect from the Bots tab (or pass --host to connect at once)
 ```
 
 `python3 main.py` is the supported way to run GameMind. It is a launcher around the TypeScript agent, not a second implementation: no agent, planner or learning code exists in Python. It:
 
 1. checks Node.js 22+ (set `NODE=/full/path/to/node`, or `GAMEMIND_NODE`, if it is installed somewhere unusual), the installed dependencies (including the platform build of `esbuild`), the project path (a warning for `/mnt/c/...` checkouts under WSL, which are slow), whether another GameMind is already running in this project, and the Control Center port (8787, or the next free one unless you pass `--control-port`);
-2. under **WSL2**, with no `--host` and no `MINECRAFT_HOST`: if nothing answers on `127.0.0.1:<port>` but the Windows host does, connects to the Windows host. An explicit `--host` or `MINECRAFT_HOST` always wins and is never rewritten;
+2. decides whether to connect at once: with an explicit connection request (`--host`, `--port`, `--task`, `--simulated`, `$MINECRAFT_HOST` or `$MINECRAFT_PORT`) it starts the persistent session there, otherwise it starts only the Control Center (`--no-connect`) and the page connects. Under **WSL2** with no `--host` and no `MINECRAFT_HOST` it discovers the Windows host and pre-fills it. An explicit `--host` or `MINECRAFT_HOST` always wins and is never rewritten;
 3. starts `src/cli.ts` through the project's own `tsx`, waits for its `GAMEMIND_READY` line, prints the Control Center address and has the agent open your default browser **once**. The Control Center stays up for the whole session, so refreshing or closing the tab restarts nothing, and state updates never open another tab;
 4. on Ctrl-C or SIGTERM asks the agent to stop: the running task is stopped, queued work is cancelled, the bot disconnects once, the Control Center closes and the single-instance lock is released. If that takes longer than 25 s the launcher sends SIGTERM, then SIGKILL; a second Ctrl-C sends SIGTERM at once.
 
 | Command | What it does |
 | --- | --- |
-| `python3 main.py` | Persistent session on `$MINECRAFT_HOST` (default `127.0.0.1`) port `$MINECRAFT_PORT` (default 25565) |
+| `python3 main.py` | Only the Control Center, nothing connects: the host field on the **Bots** tab is pre-filled (from the Windows host under WSL2). Same as `--no-connect` |
+| `python3 main.py --host 127.0.0.1` | Persistent session (default host `127.0.0.1`, port `$MINECRAFT_PORT` or 25565); with `$MINECRAFT_HOST`/`$MINECRAFT_PORT` set, the launcher connects without any flag |
 | `python3 main.py --host 192.168.1.20 --port 25565 --username GameMind` | The same, on an explicit server |
 | `python3 main.py --task gather-logs --resource oak_log --count 2` | Run that task first (it has priority over autonomy), then stay connected |
 | `python3 main.py --task gather-logs --one-shot` | End the session when the task finishes; exit code 1 if it did not succeed |
@@ -71,6 +72,14 @@ Each row has regression tests; none of it has been run against a live server.
 | A context that failed because of the game mode or a safety refusal looked like a skill that never works | Every non-success counted against the chosen skill | Environment, session and policy outcomes are *excluded*: counted and shown, never held against a skill |
 | Demo episodes shaped the live policy | One store pooled simulator and live episodes | Episodes carry a provenance; each store admits only its own (`live`, `simulator-demo`) |
 | "Wasted actions" reported more than half of all actions as waste | Only item and food gains counted as an effect, so every move, rest and retreat was "waste" | A verified effect is also revealed ground, a measurably shorter distance to the target, healing from a rest, or a retreat from a hostile (see [Offline evaluation](#offline-evaluation)); the figure is a measurement and steers nothing |
+| A reconnect after an unresponsive action still refused every action | The action executor's quarantine (the adapter could not prove that a cancelled action stopped) had no way out: it survived the session that caused it, so the agent stayed blocked until it was stopped by hand | A new session clears it (`resetAfterReconnect()`), the quarantine still holds for the session that caused it |
+| A skill that gained the item was reported as "not verified" | Without a pre-action observation the inventory count was read as 0, so the delta was fiction (and a real gain looked like no change) | A missing baseline yields `verified: null` (unverified) instead of a made-up zero; mining still counts the source block disappearing, crafting the requested amount being present |
+| The Learning panel's reward figures started at zero after every restart; a checkpoint reported `minReward: 0` | The running aggregate existed only in memory; the episode log it was derived from was never re-read. `Infinity`/`-Infinity` do not survive JSON, and the `null` they became was parsed back as `0` | Reward statistics are part of the learning state, rebuilt from the episode log when a file has none, and an unknown minimum/maximum stays `null` |
+| A reconnect was followed by "no active session" although the bot was connected | The previous client's `error`/`end`/`kicked` handlers were still attached to it and nulled the *current* session (they belonged to the session they were created for) | A client's events only change the adapter state while that client is the current one |
+| After a kick the adapter said "disconnected" while the socket stayed open | Nothing closed the client on `kicked`; Mineflayer does not close it by itself | A kick quits the client, and a kick during the handshake closes the attempt and the socket |
+| A font or image served by the Control Center was corrupted | The static handler built every response by decoding the file as UTF-8 and used the decoded string's length | Only the HTML page is treated as text; every other asset is sent as the bytes on disk (`content-length` included) |
+| `python3 main.py` looked like it would connect to a server while it only starts the Control Center | README and the launcher's own examples still described the old default | Both now state what a plain start does (Control Center only, host pre-filled on the Bots tab) and that any explicit host/port/task/`--simulated`/`MINECRAFT_HOST` connects at once |
+| `npm run test:record` failed on Windows with `ENOENT` | `spawnSync("npm")`: Windows has no `npm` executable, only `npm.cmd`, and this spawn did not use a shell | `npm.cmd` on Windows, spawned through the shell |
 
 ## Current implementation
 

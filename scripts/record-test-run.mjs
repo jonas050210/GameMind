@@ -8,7 +8,9 @@ import { dirname } from "node:path";
 
 const outPath = process.argv[2] ?? "data/evidence/tests.json";
 const started = Date.now();
-const run = spawnSync("npm", ["test"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+// Windows has no `npm` executable, only `npm.cmd`; without the shell a spawn of "npm" fails with ENOENT there.
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const run = spawnSync(npm, ["test"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, shell: process.platform === "win32" });
 const output = `${run.stdout ?? ""}\n${run.stderr ?? ""}`;
 const passed = Number(/^# pass (\d+)/m.exec(output)?.[1]);
 const failed = Number(/^# fail (\d+)/m.exec(output)?.[1]);

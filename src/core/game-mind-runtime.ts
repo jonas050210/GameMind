@@ -125,6 +125,9 @@ export class GameMindRuntime<TState = unknown> {
 
     const session = await this.adapter.connect();
     this.sessionValue = session;
+    // A quarantined executor was blocked because one adapter instance could not prove that a cancelled action
+    // had stopped. The new session supersedes that operation, so acting is allowed again.
+    this.actionExecutor.resetAfterReconnect();
     this.worldModel.beginSession(session);
     this.safety?.beginSession(session.id);
     await this.trace.record({

@@ -15,7 +15,6 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { writeFileAtomic } from "../atomic-file.js";
 import type { PolicyWeights } from "./policy-weights.js";
-import type { RewardAggregate } from "./reward.js";
 
 export const CHECKPOINT_VERSION = 1 as const;
 
@@ -34,6 +33,9 @@ export interface PolicyCheckpoint {
       readonly meanReward: number;
       readonly ewmaReward: number;
       readonly positiveRate: number;
+      /** Lowest and highest episode reward the checkpoint was derived from; null before any episode. */
+      readonly minReward: number | null;
+      readonly maxReward: number | null;
     } | null;
   };
   /** Why this policy was created (e.g. "promoted after gate pass", "initial baseline"). */

@@ -17,7 +17,7 @@ DEFAULT_CONTROL_PORT = 8787
 
 EPILOG = """\
 Examples:
-  python3 main.py                               persistent session on the Minecraft server (MINECRAFT_HOST or 127.0.0.1:25565)
+  python3 main.py                               Control Center only; connect from the Bots tab (the field is pre-filled)
   python3 main.py --host 192.168.1.20 --port 25565
   python3 main.py --task gather-logs            run a task first, then stay connected
   python3 main.py --simulated                   offline simulator instead of a real server (labelled simulated everywhere)

@@ -650,3 +650,64 @@ test("a planning run that times out is reported as PATH_PLANNING_TIMEOUT and cle
   );
   await adapter.disconnect("test");
 });
+
+test("a late end/error from a superseded client cannot destroy the current session", async () => {
+  // Two clients in a row (a reconnect): the first one's events arrive after the second is connected. They used to
+  // null `adapter.session` and flip the status to disconnected/failed, so a healthy bot could not act any more.
+  const first = createLiveMock();
+  const second = createLiveMock();
+  const botQueue = [first.bot, second.bot];
+  const adapter = new MinecraftAdapter(pino({ level: "silent" }), config(), {
+    botFactory: (_options: BotOptions) => {
+      const bot = botQueue.shift();
+      if (!bot) throw new Error("No mock bot left.");
+      queueMicrotask(() => bot.emit("spawn"));
+      return bot;
+    },
+    installPlugins: () => undefined,
+    configureSafeMovements: () => undefined,
+  });
+
+  await adapter.connect();
+  const firstSessionId = adapter.session?.id ?? null;
+  assert.ok(firstSessionId);
+  // A connection drop followed by a reconnect, as the session supervisor does it.
+  (first.bot as unknown as EventEmitter).emit("end", "first connection dropped");
+  await adapter.disconnect("reconnecting");
+  await adapter.connect();
+  const secondSessionId = adapter.session?.id ?? null;
+  assert.ok(secondSessionId && secondSessionId !== firstSessionId, "a new session was established");
+
+  // Late events from the superseded client.
+  (first.bot as unknown as EventEmitter).emit("error", new Error("late error from the old client"));
+  (first.bot as unknown as EventEmitter).emit("end", "late end from the old client");
+  (first.bot as unknown as EventEmitter).emit("kicked", "late kick from the old client");
+
+  assert.equal(adapter.status, "connected", "the current connection stays connected");
+  assert.equal(adapter.session?.id, secondSessionId, "the current session is untouched");
+  // `run` reads the adapter's current session (and asserts it exists), so a nulled session fails right here;
+  // with a session, the action has to reach the (second) client and come back with an outcome.
+  await assert.doesNotReject(run(adapter, "minecraft.look", { yaw: 0.5, pitch: 0 }));
+  assert.equal(adapter.status, "connected", "the connection is still usable after the late events");
+  await adapter.disconnect("test");
+});
+
+test("a kick closes the client instead of leaving the socket open", async () => {
+  // Mineflayer does not close the connection on a kick by itself; without an explicit quit the socket stayed open
+  // while the adapter already reported "disconnected", so a reconnect found a stray client behind.
+  const mock = createLiveMock();
+  const adapter = await connectAdapter(mock);
+  let quitReason: string | null = null;
+  const originalQuit = (mock.bot as unknown as { quit: (reason?: string) => void }).quit;
+  (mock.bot as unknown as { quit: (reason?: string) => void }).quit = (reason?: string) => {
+    quitReason = reason ?? "quit";
+    originalQuit.call(mock.bot, reason);
+  };
+
+  (mock.bot as unknown as EventEmitter).emit("kicked", "You are banned from this server");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(quitReason ?? "", /kicked|banned/, "the kicked client is asked to close");
+  assert.equal(adapter.status, "disconnected");
+  assert.equal(adapter.session, null, "the session is gone and a reconnect starts clean");
+});

@@ -333,20 +333,24 @@ export class ControlCenter {
       return;
     }
     const extension = path.extname(target);
-    let body = content.toString("utf8");
+    // Only the page is text that needs substitution. Everything else is served as the bytes on disk: decoding a
+    // font or an image through UTF-8 would replace invalid sequences and corrupt the asset (and its length).
+    let body: Buffer = content;
     if (target.endsWith("index.html")) {
       // The token is injected into the served page instead of being readable from an API endpoint.
       // Values go in as JSON inside a <script> element: `<`, `>`, `&` and the JS line separators are escaped
       // so text such as `</script>` cannot end the element early. Function replacers keep `$&`-style
       // sequences in a value from being read as replacement patterns.
-      body = body
+      const page = content
+        .toString("utf8")
         .replace('"__CONTROL_TOKEN__"', () => scriptJson(this.token))
         .replace('"__BANNER__"', () => scriptJson(this.options.banner ?? ""))
         .replace('"__TITLE__"', () => scriptJson(this.host.title));
+      body = Buffer.from(page, "utf8");
     }
     response.writeHead(200, {
       "content-type": CONTENT_TYPES[extension] ?? "application/octet-stream",
-      "content-length": Buffer.byteLength(body),
+      "content-length": body.byteLength,
       "cache-control": extension === ".html" ? "no-store" : "no-cache",
       "x-content-type-options": "nosniff",
       "referrer-policy": "no-referrer",

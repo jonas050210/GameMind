@@ -791,12 +791,20 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         resolve(session);
       };
 
+      /**
+       * A client that has been superseded (a stale connection torn down by a reconnect) must not be able to
+       * change the adapter's state: a late `error` or `end` from the previous bot used to null the *new*
+       * session and mark the healthy connection as failed, which made every action fail with
+       * NO_ACTIVE_SESSION until the operator reconnected by hand.
+       */
+      const ownsCurrentState = (): boolean => this.bot === bot || (!settled && this.bot === null);
+
       const onError = (error: Error): void => {
         this.logger.error({ err: error, sessionId }, "Minecraft client emitted an error");
         if (!settled) {
           finishFailure(error);
           void this.quitAfterConnectFailure(bot, error.message);
-        } else if (this.statusValue === "connected") {
+        } else if (this.statusValue === "connected" && ownsCurrentState()) {
           this.sessionValue = null;
           this.transition("failed", error.message, sessionId);
           void this.quitAfterConnectFailure(bot, error.message);
@@ -805,17 +813,29 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
 
       const onKicked = (reason: string): void => {
         const message = `Minecraft server kicked the bot: ${reason}`;
-        if (!settled) finishFailure(new Error(message), "disconnected");
-        else {
-          this.pendingSessionId = null;
-          this.sessionValue = null;
-          this.transition("disconnected", message, sessionId);
+        if (!settled) {
+          // A kick during the handshake closes the connect attempt *and* the socket; the server does not
+          // necessarily close it for us.
+          finishFailure(new Error(message), "disconnected");
+          void this.quitAfterConnectFailure(bot, message);
+          return;
         }
+        if (!ownsCurrentState()) return;
+        this.pendingSessionId = null;
+        this.sessionValue = null;
+        // A kicked client is not necessarily closed by the server; release the socket so a reconnect
+        // never leaves a stray connection behind.
+        void this.quitAfterConnectFailure(bot, message);
+        this.transition("disconnected", message, sessionId);
       };
 
       const onEnd = (reason: string): void => {
         const message = reason || "Minecraft client connection ended.";
-        if (!settled) finishFailure(new Error(message), "disconnected");
+        if (!settled) {
+          finishFailure(new Error(message), "disconnected");
+          return;
+        }
+        if (!ownsCurrentState()) return;
         this.pendingSessionId = null;
         this.sessionValue = null;
         if (this.bot === bot) this.bot = null;

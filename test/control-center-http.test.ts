@@ -3,7 +3,9 @@
  * static-file containment. The agent is not involved; the host is a stub so only the server is exercised.
  */
 import assert from "node:assert/strict";
+import { writeFile, rm } from "node:fs/promises";
 import { createServer } from "node:net";
+import path from "node:path";
 import test from "node:test";
 import { ControlCenter, startControlCenter } from "../src/control-center/server.js";
 import type { ControlCenterHost } from "../src/control-center/types.js";
@@ -278,4 +280,26 @@ test("stop() resolves promptly even when a browser keeps a connection open", asy
   await handle.stop("test complete");
   assert.ok(Date.now() - started < 3_000, `shutdown took ${Date.now() - started} ms with a keep-alive client connected`);
   agent.destroy();
+});
+
+test("binary assets are served byte for byte, not decoded through UTF-8", async () => {
+  // The static handler used to build every response with `content.toString("utf8")` and a `Buffer.byteLength` of
+  // that string: a font or image with bytes that are invalid UTF-8 came back silently rewritten, with a
+  // content-length that did not match the body. Only the HTML page needs text handling.
+  const bytes = Buffer.from([0x77, 0x4f, 0x46, 0x32, 0x00, 0x01, 0x80, 0xff, 0xfe, 0xc3, 0x28, 0xa0, 0x0a, 0xff]);
+  const assetPath = path.join(process.cwd(), "src", "control-center", "public", "test-binary-asset.woff2");
+  await writeFile(assetPath, bytes);
+  const center = new ControlCenter(stubHost, { port: 0, host: "127.0.0.1" });
+  const handle = await center.start();
+  try {
+    const response = await fetch(`${handle.url}test-binary-asset.woff2`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "font/woff2");
+    assert.equal(Number(response.headers.get("content-length")), bytes.byteLength);
+    const received = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(received, bytes, "the bytes reach the browser unchanged");
+  } finally {
+    await handle.stop("test complete");
+    await rm(assetPath, { force: true });
+  }
 });
