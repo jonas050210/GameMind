@@ -12,6 +12,7 @@
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
     "test": "tsx --test \"test/**/*.test.ts\"",
+    "typecheck:public": "tsc -p tsconfig.public.json",
     "scenario:demo": "tsx src/cli.ts --demo",
     "scenario:minecraft": "tsx src/cli.ts --minecraft --look-yaw 1.5707963267948966 --look-pitch 0",
     "task:demo": "tsx src/cli.ts --demo-task",

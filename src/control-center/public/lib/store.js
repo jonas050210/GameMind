@@ -7,7 +7,13 @@ export const LOST_AFTER_FAILURES = 2;
 
 const EMPTY_RESOURCE = () => ({ status: "idle", value: null, error: null, at: null, params: null });
 
+/** One detail resource, in the shape every view reads. @typedef {{ status: string, value: any, error: string | null, at: number | null, params: any }} Resource */
+
+/**
+ * @param {{ api: any, now?: () => number, setTimer?: (fn: () => void, ms: number) => any, clearTimer?: (id: any) => void, isHidden?: () => boolean, wanted?: () => Array<{ name: string, everyMs: number, params?: any, keep?: boolean }>, onChange?: () => void }} options
+ */
 export function createStore({ api, now = () => Date.now(), setTimer = (fn, ms) => setTimeout(fn, ms), clearTimer = (id) => clearTimeout(id), isHidden = () => false, wanted = () => [], onChange = () => {} }) {
+  /** @type {{ snapshot: any, snapshotAt: number | null, snapshotError: string | null, failures: number, lost: boolean, resources: Record<string, Resource> }} */
   const state = {
     snapshot: null,
     snapshotAt: null,
@@ -21,7 +27,9 @@ export function createStore({ api, now = () => Date.now(), setTimer = (fn, ms) =
   let running = false;
   let inFlight = null;
 
+  /** @param {string} name @returns {Resource} */
   const resource = (name) => (state.resources[name] ??= EMPTY_RESOURCE());
+  /** @param {string} key @returns {number} */
   const next = (key) => {
     const value = (sequences.get(key) ?? 0) + 1;
     sequences.set(key, value);

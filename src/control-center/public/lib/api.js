@@ -10,6 +10,7 @@ export class ApiError extends Error {
 }
 
 /** Relative URLs on purpose: the page works at "/" and behind any path prefix or preview proxy. */
+/** @param {{ fetch?: typeof fetch, token?: string }} [options] */
 export function createApi({ fetch: fetchImpl = globalThis.fetch?.bind(globalThis), token = "" } = {}) {
   async function readJson(response) {
     try {
@@ -19,6 +20,7 @@ export function createApi({ fetch: fetchImpl = globalThis.fetch?.bind(globalThis
     }
   }
 
+  /** @param {string} path @param {{ signal?: AbortSignal }} [options] */
   async function getJson(path, { signal } = {}) {
     let response;
     try {

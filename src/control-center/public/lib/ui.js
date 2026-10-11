@@ -3,30 +3,36 @@ import { h } from "./h.js";
 import { SOURCES, statusInfo } from "./model.js";
 import { UNKNOWN } from "./format.js";
 
+/** @param {any} text @param {any} [tone] @param {any} [title] @returns {any} */
 export function badge(text, tone = "neutral", title) {
   return h("span", { class: `badge tone-${tone}`, ...(title ? { title } : {}) }, text);
 }
 
+/** @param {any} status @returns {any} */
 export function statusBadge(status) {
   const info = statusInfo(status);
   return badge(info.label, info.tone);
 }
 
 /** LIVE / SIMULATED / OFFLINE / HISTORICAL / UNAVAILABLE: the provenance of whatever sits next to it. */
+/** @param {any} source @returns {any} */
 export function sourceBadge(source) {
   const info = SOURCES[source] ?? SOURCES.unavailable;
   return h("span", { class: `badge source source-${source in SOURCES ? source : "unavailable"}`, title: info.title }, info.label);
 }
 
+/** @param {any} [note] @returns {any} */
 export function unknown(note) {
   return h("span", { class: "unknown", ...(note ? { title: note } : {}) }, UNKNOWN);
 }
 
+/** @param {any} content @param {((content: any) => any)} [formatter] @returns {any} */
 export function value(content, formatter) {
   if (content === null || content === undefined || (typeof content === "number" && !Number.isFinite(content))) return unknown();
   return formatter ? formatter(content) : String(content);
 }
 
+/** @param {{ title?: any, subtitle?: any, actions?: any, tone?: any, id?: any, class?: any }} [options] @param {...any} body @returns {any} */
 export function card({ title, subtitle, actions, tone, id, class: extra } = {}, ...body) {
   return h(
     "section",
@@ -38,6 +44,7 @@ export function card({ title, subtitle, actions, tone, id, class: extra } = {}, 
   );
 }
 
+/** @param {any[]} rows @returns {any} */
 export function kv(rows) {
   return h(
     "dl",
@@ -48,14 +55,17 @@ export function kv(rows) {
   );
 }
 
+/** @param {any} title @param {any} [detail] @returns {any} */
 export function empty(title, detail) {
   return h("div", { class: "empty" }, h("strong", null, title), detail ? h("p", { class: "muted" }, detail) : null);
 }
 
+/** @param {any} tone @param {any} title @param {...any} body @returns {any} */
 export function notice(tone, title, ...body) {
   return h("div", { class: `notice tone-${tone}`, role: tone === "bad" ? "alert" : "note" }, h("strong", null, title), body.length ? h("div", null, ...body) : null);
 }
 
+/** @param {any} valueNow @param {any} max @param {any} [label] @returns {any} */
 export function progress(valueNow, max, label) {
   if (!(typeof valueNow === "number" && typeof max === "number" && max > 0)) return h("div", { class: "progress unknown-progress", role: "img", "aria-label": label ? `${label}: unknown` : "unknown", title: "Progress cannot be measured" });
   const percent = Math.max(0, Math.min(100, (valueNow / max) * 100));
@@ -66,6 +76,7 @@ export function progress(valueNow, max, label) {
   );
 }
 
+/** @param {{ columns: any[], rows: any[], empty?: { title?: any, detail?: any }, caption?: any, dense?: any }} options @returns {any} */
 export function table({ columns, rows, empty: emptyText, caption, dense }) {
   if (!rows.length) return empty(emptyText?.title ?? "Nothing to show", emptyText?.detail);
   return h(
@@ -92,6 +103,7 @@ export function table({ columns, rows, empty: emptyText, caption, dense }) {
 }
 
 /** A real series as a line. Fewer than two points draws nothing: no placeholder shapes. */
+/** @param {any[]} values @param {{ width?: number, height?: number, label?: any }} [options] @returns {any} */
 export function sparkline(values, { width = 220, height = 44, label } = {}) {
   const points = values.map((entry, index) => ({ entry, index })).filter((point) => typeof point.entry === "number" && Number.isFinite(point.entry));
   if (points.length < 2) return h("p", { class: "muted small" }, "Not enough measured points to draw a trend yet.");
@@ -107,10 +119,12 @@ export function sparkline(values, { width = 220, height = 44, label } = {}) {
   );
 }
 
+/** @param {any[]} items @param {any} [tone] @returns {any} */
 export function chips(items, tone = "neutral") {
   return h("div", { class: "chips" }, items.map((item) => badge(item, tone)));
 }
 
+/** @param {any} label @param {{ action?: any, command?: any, payload?: any, tone?: any, disabled?: any, title?: any, data?: Record<string, any>, type?: any }} [options] @returns {any} */
 export function button(label, { action, command, payload, tone = "", disabled = false, title, data = {}, type = "button" } = {}) {
   const attributes = { type, class: `btn${tone ? ` ${tone}` : ""}`, ...(disabled ? { disabled: true } : {}), ...(title ? { title } : {}) };
   if (action) attributes["data-action"] = action;

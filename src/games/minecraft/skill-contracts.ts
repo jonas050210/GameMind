@@ -2,6 +2,7 @@ import { countItemAndEquipment } from "./recipes.js";
 import type { MinecraftObservation } from "./observation.js";
 import { COMBAT_APPROACH_MAX_BLOCKS } from "./combat.js";
 import { miningDropFor } from "./mining.js";
+import { reachedNavigationGoal } from "./reach.js";
 
 /** Number of the four cardinal cells around the player that are observed solid at feet level. */
 export function shelterCardinalSolidCount(state: MinecraftObservation): number {
@@ -69,7 +70,9 @@ export function verifySkillPostcondition(
       const position = after.player.position;
       const horizontal = Math.hypot(position.x - (x + 0.5), position.z - (z + 0.5));
       const vertical = Math.abs(position.y - y);
-      const verified = horizontal <= range + 1.5 && vertical <= 2;
+      // The same "arrived" the adapter uses; a stricter private tolerance used to contradict a
+      // confirmation the world actually backed up (for example a goal on a reachable ledge).
+      const verified = reachedNavigationGoal(position, { x, y, z }, range);
       return {
         verified,
         evidence: `Observed player ${horizontal.toFixed(2)} blocks horizontally and ${vertical.toFixed(2)} vertically from the goal.`,
@@ -166,9 +169,7 @@ export function verifySkillPostcondition(
       const z = Number(record.z);
       const expected = String(record.blockName);
       const seen = [...after.nearbyBlocks, ...after.resourceSightings, ...(after.minableSightings ?? [])].some(
-        (block) =>
-          block.position.x === x && block.position.y === y && block.position.z === z &&
-          (block.name === expected || (expected === "cobblestone" && block.name === "cobblestone")),
+        (block) => block.position.x === x && block.position.y === y && block.position.z === z && block.name === expected,
       );
       return {
         verified: seen,

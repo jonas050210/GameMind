@@ -15,6 +15,8 @@ import {
   classifyFailure,
   failureIsExternal,
   formatFailure,
+  FailureKind,
+  isExternalFailureKind,
 } from "../src/core/failure-taxonomy.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -94,6 +96,18 @@ test("codes are normalised and hostile input is refused", () => {
   assert.equal(classifyFailure("NOT_CONNECTED; DROP TABLE").kind, "unknown", "an unparsable code stays unclassified rather than being trusted");
   assert.equal(classifyFailure("".padEnd(400, "A")).kind, "unknown");
   assert.equal(classifyFailure(undefined, undefined).code, null);
+});
+
+test("there is one definition of an external failure, and it includes planner refusals", () => {
+  const kinds: FailureKind[] = ["safety", "capability", "connection", "perception", "planner", "task", "action", "unknown"];
+  assert.deepEqual(kinds.filter(isExternalFailureKind), ["safety", "capability", "connection", "perception", "planner"]);
+  for (const kind of kinds) {
+    assert.equal(
+      failureIsExternal({ ...classifyFailure(null), kind }),
+      isExternalFailureKind(kind),
+      `${kind}: the dashboard and the learner must agree`,
+    );
+  }
 });
 
 test("formatFailure is one readable line, and external means 'not a code bug'", () => {

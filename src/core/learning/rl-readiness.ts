@@ -27,6 +27,9 @@
 
 import type { PolicyAdvisor, PolicyAssessment, PolicyFeatureQuery } from "./policy-advisor.js";
 import type { PolicyWeights } from "./policy-weights.js";
+import { SafetyBroker } from "../safety-broker.js";
+import { extendedFeaturesSchema } from "./episode-extended.js";
+import { emptyRewardAggregate, updateRewardAggregate } from "./reward.js";
 
 /**
  * A learned policy is anything that implements PolicyAdvisor. The existing evaluation harness
@@ -164,64 +167,96 @@ export interface LearnedPolicyGate {
   }>;
 }
 
+/** Steps per second a training environment needs before an RL training loop is worth it. */
+export const RL_STEPS_PER_SECOND_TARGET = 10_000;
+
+/**
+ * What the caller has actually measured. The criteria that cannot be probed in-process are only
+ * "met" when this evidence says so; an absent number is an unmet criterion, never an assumed one.
+ */
+export interface RLReadinessEvidence {
+  /** Throughput of the fastest training environment, measured by a benchmark run. */
+  readonly simulatorStepsPerSecond?: number | null;
+  /** True when an advisor implementing `LearnedPolicyAdvisor` (a π(a|s) output) is registered. */
+  readonly learnedAdvisorRegistered?: boolean;
+  /** True when the reward function was compared against human judgement on real gameplay. */
+  readonly rewardValidated?: boolean;
+  /** True when simulator-trained behaviour was shown to transfer to real Minecraft. */
+  readonly transferEvidence?: boolean;
+  /** Number of automated verification runs completed against a real Minecraft server. */
+  readonly liveVerificationRuns?: number;
+}
+
 /**
  * RL readiness score. Evaluates whether the prerequisites for RL training are met.
- * Returns a score 0-100 and a list of blockers.
+ *
+ * The three criteria that can be probed in-process are actually probed: the continuous feature contract
+ * must parse, the reward aggregate must produce finite numbers, and a fresh safety broker must refuse a
+ * high-risk capability. Before, every `met` was a hard-coded boolean, so the score said the same thing
+ * whether the modules existed or not. The remaining criteria come from `evidence` and stay unmet until
+ * the caller can point at a measurement.
  */
-export function assessRLReadiness(): {
+export function assessRLReadiness(evidence: RLReadinessEvidence = {}): {
   score: number;
   maxScore: number;
   blockers: readonly string[];
   ready: readonly string[];
 } {
+  const continuousFeaturesParse = extendedFeaturesSchema.safeParse({ exactDistance: 3.5, dayPhase: 0.5 }).success;
+  const rewardIsFinite = Number.isFinite(updateRewardAggregate(emptyRewardAggregate(), 1).mean);
+  const brokerFailsClosed =
+    new SafetyBroker({ maxRisk: "medium" }).evaluate({ capability: "rl.readiness.probe", risk: "high" }).code ===
+    "RISK_ABOVE_CEILING";
+  const stepsPerSecond = evidence.simulatorStepsPerSecond ?? 0;
+
   const criteria: { name: string; met: boolean; weight: number; blocker: string }[] = [
     {
       name: "Continuous state representation",
-      met: true,  // episode-extended.ts provides continuous features
+      met: continuousFeaturesParse, // probed: the continuous feature contract must accept numbers
       weight: 15,
-      blocker: "",
+      blocker: "Need continuous features (episode-extended.ts) that actually parse",
     },
     {
       name: "Action parameterisation",
-      met: false, // skills have continuous params but no probability distribution
+      met: evidence.learnedAdvisorRegistered === true, // needs a registered π(a|s) advisor
       weight: 10,
       blocker: "Need π(a|s) output; current system outputs discrete skill choices",
     },
     {
       name: "Reward function",
-      met: true,  // reward.ts provides multi-objective reward
+      met: rewardIsFinite, // probed: the reward module must produce finite numbers
       weight: 15,
-      blocker: "",
+      blocker: "Need a reward function (reward.ts) that produces finite values",
     },
     {
       name: "Reward validation",
-      met: false, // reward function is untested against real gameplay
+      met: evidence.rewardValidated === true,
       weight: 10,
       blocker: "Reward must be validated against human judgement on real Minecraft data",
     },
     {
       name: "Fast training environment",
-      met: false, // simulator is too simple; Mineflayer is too slow
+      met: stepsPerSecond >= RL_STEPS_PER_SECOND_TARGET,
       weight: 20,
-      blocker: "Need ≥10k steps/sec with faithful Minecraft mechanics",
+      blocker: `Need ≥${RL_STEPS_PER_SECOND_TARGET / 1000}k steps/sec with faithful Minecraft mechanics`,
     },
     {
       name: "Sim-to-real transfer evidence",
-      met: false, // no live testing exists
+      met: evidence.transferEvidence === true,
       weight: 15,
       blocker: "Must demonstrate that simulator-trained policies transfer to real Minecraft",
     },
     {
       name: "Live Minecraft testing",
-      met: false, // no Docker-based test infrastructure
+      met: (evidence.liveVerificationRuns ?? 0) > 0,
       weight: 10,
       blocker: "Need automated testing against a real Minecraft 1.20.4 server",
     },
     {
       name: "Safety broker integration",
-      met: true,  // safety broker is external to any policy
+      met: brokerFailsClosed, // probed: the broker must refuse what the policy does not allow
       weight: 5,
-      blocker: "",
+      blocker: "The safety broker must sit outside any policy and fail closed",
     },
   ];
 

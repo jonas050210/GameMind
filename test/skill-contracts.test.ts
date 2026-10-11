@@ -19,6 +19,19 @@ function item(name: string, count: number) {
   return { slot: 9, name, type: 1, count, metadata: null, durabilityUsed: null };
 }
 
+test("the navigation contract uses the adapter's arrival definition, not its own", () => {
+  const before = observationAt({ x: 0.5, y: 64, z: 0.5 });
+  const goal = { x: 5, y: 67, z: 0, range: 1 };
+  // The goal sits on a ledge three blocks up: the adapter can stand next to it and reach it, so it is
+  // arrived. The contract's own vertical tolerance of two blocks used to call this unverified.
+  const onLedge = observationAt({ x: 5.5, y: 64, z: 0.5 });
+  assert.equal(verifySkillPostcondition("minecraft.navigate", goal, before, onLedge).verified, true);
+  // The pathfinder slack is the adapter's 1.25 blocks, not the looser 1.5 the contract used before.
+  const boundary = { x: 5, y: 64, z: 0, range: 1 };
+  assert.equal(verifySkillPostcondition("minecraft.navigate", boundary, before, observationAt({ x: 7.7, y: 64, z: 0.5 })).verified, true);
+  assert.equal(verifySkillPostcondition("minecraft.navigate", boundary, before, observationAt({ x: 7.8, y: 64, z: 0.5 })).verified, false);
+});
+
 test("navigation contract checks the observed position, not the adapter's claim", () => {
   const before = observationAt({ x: 0.5, y: 64, z: 0.5 });
   const arrived = observationAt({ x: 5.5, y: 64, z: 0.5 });

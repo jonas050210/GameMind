@@ -11,7 +11,7 @@ export declare function filterRoadmap<T extends { status: string; kind?: string;
   items: readonly T[],
   options?: { category?: string; kind?: string; showClosed?: boolean },
 ): T[];
-export declare function groupByCategory<T extends { category: string }>(items: readonly T[]): Array<[string, T[]]>;
+export declare function groupByCategory<T extends { category?: string }>(items: readonly T[]): Array<[string, T[]]>;
 export declare function roadmapActionsFor(item: { status: string }): string[];
 export declare const ROADMAP_ACTION_LABELS: Readonly<Record<string, string>>;
 export declare const ROADMAP_ACTIONS_WITH_NOTE: ReadonlySet<string>;

@@ -1,4 +1,4 @@
-import { classifyFailure, type FailureKind } from "../failure-taxonomy.js";
+import { classifyFailure, isExternalFailureKind, type FailureKind } from "../failure-taxonomy.js";
 import type { EpisodeOutcome } from "./episode.js";
 
 /**
@@ -29,9 +29,6 @@ export interface EvidenceClassification {
 /** Statuses where the action did not run to a verdict: someone stopped it or the session went away. */
 const NO_VERDICT_STATUSES: ReadonlySet<string> = new Set(["disconnected", "aborted"]);
 
-/** Taxonomy kinds that describe the environment around the choice, not the choice. */
-const ENVIRONMENT_KINDS: ReadonlySet<FailureKind> = new Set<FailureKind>(["safety", "capability", "connection", "perception"]);
-
 /** Action-level codes that are still environment or plumbing: the same choice would fail for any skill. */
 function isEnvironmentCode(code: string): boolean {
   return (
@@ -61,7 +58,7 @@ export function classifyOutcome(outcome: Pick<EpisodeOutcome, "status" | "confir
   const code = outcome.failureCode;
   if (code) {
     const kind = classifyFailure(code).kind;
-    if (ENVIRONMENT_KINDS.has(kind) || isEnvironmentCode(code)) {
+    if (isExternalFailureKind(kind) || isEnvironmentCode(code)) {
       return { verdict: "excluded", reason: `${code}: the environment, not the choice`, kind };
     }
     return { verdict: "failure", reason: code, kind };

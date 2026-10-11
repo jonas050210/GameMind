@@ -113,6 +113,7 @@ export function boot(env = {}) {
   const real = (text) => (typeof text === "string" && text.length > 0 && !text.startsWith("__") ? text : "");
 
   const api = createApi({ fetch: env.fetch ?? win.fetch?.bind(win), token: real(bootData.token) });
+  /** @type {{ tab: string, trainingMode: string, trainingDirectory: string | null, evalReportIndex: number, roadmapShowClosed: boolean, eventsPaused: boolean, learningStore: string, eventFilters: { q: string, level: string, scope: string, source: string, categories: string[] } }} */
   const ui = {
     tab: "overview",
     trainingMode: "resume",
@@ -804,6 +805,9 @@ export function boot(env = {}) {
     return payload;
   }
 
+  /** @typedef {{ error: string } | { error?: never, environmentCases: number, environmentSecondsPerCase: number, workerLimit: number, stageIds: string[] }} BenchmarkPayload */
+
+  /** @returns {BenchmarkPayload} */
   function benchmarkPayload() {
     const cases = numberOrUndefined("benchmark-environment-cases");
     const seconds = numberOrUndefined("benchmark-environment-seconds");
@@ -817,6 +821,9 @@ export function boot(env = {}) {
     return { environmentCases: cases, environmentSecondsPerCase: seconds, workerLimit, stageIds };
   }
 
+  /** @typedef {{ error: string } | { scope: string, allowDig: boolean, allowCombat: boolean, confirmed: boolean, confirmedWorldChanges: boolean, host?: string, port?: number, username?: string }} LivePayload */
+
+  /** @returns {LivePayload} */
   function livePayload() {
     const port = numberOrUndefined("live-port");
     if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) return { error: "The port must be a whole number from 1 to 65535." };
@@ -881,12 +888,15 @@ export function boot(env = {}) {
       }
       case "live-form": {
         const payload = livePayload();
-        if (!payload.error && (payload.allowDig || payload.allowCombat) && !ask(`This lets a verification bot ${[payload.allowDig ? "dig a block" : null, payload.allowCombat ? "attack a hostile mob" : null].filter(Boolean).join(" and ")} on ${liveTarget()}. This changes the world on that server. Continue?`)) return;
+        // The union is discriminated by the presence of `error`: a payload the form could not fill is sent back
+        // unchanged so the operator sees the reason instead of a half-built command.
+        if ("error" in payload) return send("runLiveVerification", payload);
+        if ((payload.allowDig || payload.allowCombat) && !ask(`This lets a verification bot ${[payload.allowDig ? "dig a block" : null, payload.allowCombat ? "attack a hostile mob" : null].filter(Boolean).join(" and ")} on ${liveTarget()}. This changes the world on that server. Continue?`)) return;
         return send("runLiveVerification", payload);
       }
       case "benchmark-form": {
         const payload = benchmarkPayload();
-        if (payload.error) return send("runBenchmark", { error: payload.error });
+        if ("error" in payload) return send("runBenchmark", { error: payload.error });
         const environmentSeconds = payload.environmentCases * payload.environmentSecondsPerCase;
         const workerSeconds = payload.workerLimit * 20;
         const estimate = fmtDuration((environmentSeconds + workerSeconds) * 1000);

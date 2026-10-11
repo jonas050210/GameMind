@@ -87,6 +87,10 @@ test("failures that are about the environment or the session are excluded, not c
     [{ status: "failed", confirmed: false, failureCode: "ADAPTER_DISCONNECTED" }, /environment/],
     [{ status: "failed", confirmed: false, failureCode: "STALE_OBSERVATION" }, /environment/],
     [{ status: "failed", confirmed: false, failureCode: "CAPABILITY_NOT_AVAILABLE" }, /environment/],
+    // Planner refusals are about the world and the task, not about the skill that happened to be chosen;
+    // the learner used to charge them to that skill because its own kind list was shorter than the taxonomy's.
+    [{ status: "failed", confirmed: false, failureCode: "NO_FEASIBLE_GOAL" }, /environment/],
+    [{ status: "failed", confirmed: false, failureCode: "TASK_BLOCKED_THREAT" }, /environment/],
     [{ status: "disconnected", confirmed: false, failureCode: "ADAPTER_DISCONNECTED" }, /session was lost/],
     [{ status: "aborted", confirmed: false, failureCode: "OPERATOR_STOP" }, /interrupted/],
     [{ status: "rejected", confirmed: false, safetyDenied: true, failureCode: "SAFETY_HAZARD_NEARBY" }, /safety policy/],

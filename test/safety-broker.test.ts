@@ -236,18 +236,58 @@ test("hazards block stationary actions but never the escape", () => {
   assert.equal(broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 }).allowed, true);
 });
 
-test("a running-out-of-air check denies stationary work and the void dimension denies everything", () => {
+test("a running-out-of-air check denies stationary work and never the escape", () => {
   const broker = new SafetyBroker({ drowningBlockedCapabilities: ["minecraft.rest"] });
   broker.beginRun("run-drown");
   broker.updateWorld(worldContext({ oxygenTicks: 40 }));
   assert.equal(broker.evaluate({ capability: "minecraft.rest", risk: "low", nowMs: 1_000 }).code, "DROWNING_RISK");
+  assert.equal(
+    broker.evaluate({ capability: "minecraft.swim_to_surface", risk: "low", nowMs: 1_000 }).allowed,
+    true,
+    "swimming up stays allowed while the air runs out",
+  );
   broker.updateWorld(worldContext({ oxygenTicks: 300 }));
   assert.equal(broker.evaluate({ capability: "minecraft.rest", risk: "low", nowMs: 1_000 }).allowed, true);
+});
 
-  const voidBroker = new SafetyBroker({ hazardMaxDistance: 2.5 });
-  voidBroker.beginRun("run-void");
-  voidBroker.updateWorld(worldContext({ dimension: "minecraft:the_void" }));
-  assert.equal(voidBroker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 }).code, "VOID");
+test("the void check refuses stationary work in the void dimension and below the world floor", () => {
+  const broker = new SafetyBroker({ voidBlockedCapabilities: ["minecraft.mine_block"] });
+  broker.beginRun("run-void");
+  broker.updateWorld(worldContext({ dimension: "minecraft:the_void" }));
+  const inVoid = broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 });
+  assert.equal(inVoid.code, "VOID");
+  assert.match(inVoid.message, /dimension minecraft:the_void is the void/);
+  assert.equal(
+    broker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 }).allowed,
+    true,
+    "moving out of the void dimension stays allowed",
+  );
+
+  // The same check works from the height alone, which is all the adapter needs to report.
+  broker.updateWorld(worldContext({ dimension: "minecraft:overworld", positionY: -70 }));
+  const fallen = broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 });
+  assert.equal(fallen.code, "VOID");
+  assert.match(fallen.message, /y=-70 is below the world floor at -64/);
+  broker.updateWorld(worldContext({ dimension: "minecraft:overworld", positionY: -64 }));
+  assert.equal(
+    broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 }).allowed,
+    true,
+    "standing on the lowest block layer is not falling",
+  );
+
+  // Without a dimension the overworld floor is assumed; above it nothing changes.
+  broker.updateWorld(worldContext({ dimension: null, positionY: -70 }));
+  assert.equal(broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 }).code, "VOID");
+  broker.updateWorld(worldContext({ dimension: "minecraft:the_nether", positionY: 4 }));
+  assert.equal(broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 }).allowed, true);
+  broker.updateWorld(worldContext({ dimension: "minecraft:the_nether", positionY: -1 }));
+  assert.equal(broker.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 }).code, "VOID");
+
+  // A policy that does not know world floors keeps the previous behaviour: no void check at all.
+  const blind = new SafetyBroker();
+  blind.beginRun("run-blind");
+  blind.updateWorld(worldContext({ dimension: "minecraft:the_void", positionY: -200 }));
+  assert.equal(blind.evaluate({ capability: "minecraft.mine_block", risk: "medium", nowMs: 1_000 }).allowed, true);
 });
 
 test("the snapshot reports cumulative telemetry without imposing a global action ceiling", () => {

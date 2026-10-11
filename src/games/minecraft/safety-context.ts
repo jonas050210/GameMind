@@ -52,6 +52,20 @@ export function minecraftSafetyContext(
  * the `medium` ceiling denies it; an operator unlocks it through `optedInCapabilities`, and the
  * per-capability budget bounds how many swings a single run may take even then.
  */
+/**
+ * Actions that keep the agent exactly where it is. They are refused next to a hazard block and while the
+ * agent is falling out of the world; everything that moves, looks, eats or drops stays allowed, because
+ * leaving is exactly what has to work in those moments.
+ */
+const MINECRAFT_STATIONARY_CAPABILITIES = [
+  "minecraft.mine_block",
+  "minecraft.place_block",
+  "minecraft.build_shelter",
+  "minecraft.attack_hostile",
+  "minecraft.rest",
+  "minecraft.craft_item",
+] as const;
+
 export const MINECRAFT_SAFETY_POLICY: SafetyPolicy = {
   id: "gamemind-minecraft-v1",
   enabled: true,
@@ -72,18 +86,12 @@ export const MINECRAFT_SAFETY_POLICY: SafetyPolicy = {
   ],
   maxObservationAgeMs: 120_000,
   readOnlyCapabilities: ["minecraft.look", "minecraft.inspect_block"],
-  // Standing in lava or drowning is refused for the capabilities that keep the agent in place. Fleeing,
-  // looking, eating and dropping stay allowed: escaping is exactly what the agent must be able to do.
+  // Standing in lava, drowning or falling out of the world is refused for the capabilities that keep the
+  // agent in place. Fleeing, looking, eating and dropping stay allowed: escaping is what it must do then.
   hazardMaxDistance: 2.5,
-  hazardBlockedCapabilities: [
-    "minecraft.mine_block",
-    "minecraft.place_block",
-    "minecraft.build_shelter",
-    "minecraft.attack_hostile",
-    "minecraft.rest",
-    "minecraft.craft_item",
-  ],
+  hazardBlockedCapabilities: [...MINECRAFT_STATIONARY_CAPABILITIES],
   drowningBlockedCapabilities: ["minecraft.rest", "minecraft.mine_block", "minecraft.build_shelter"],
+  voidBlockedCapabilities: [...MINECRAFT_STATIONARY_CAPABILITIES],
 };
 
 export const MINECRAFT_COMBAT_CAPABILITY = "minecraft.attack_hostile";

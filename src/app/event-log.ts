@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, readdir, rename, stat } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { redactDeep, redactText, type RedactionContext } from "./redact.js";
 
@@ -87,6 +87,7 @@ export interface AppEventLogOptions {
   readonly boot?: string;
   /** Rotates the active file once it exceeds this many bytes. */
   readonly maxFileBytes?: number;
+  /** How many JSONL files the log leaves behind in total, the active one included. Default 4. */
   readonly keepFiles?: number;
   /** Called when persistence fails; the log keeps working in memory. */
   readonly onPersistError?: (error: Error) => void;
@@ -274,6 +275,9 @@ export class AppEventLog {
 
   private async rotateIfNeeded(directory: string): Promise<void> {
     const limit = this.options.maxFileBytes ?? 2_000_000;
+    // `keepFiles` counts every file the log leaves behind, the active one included; before, it counted
+    // only the rotated files and the log kept one file more than configured (and never removed files a
+    // previous, larger configuration had left in the directory).
     const keep = Math.max(1, this.options.keepFiles ?? 4);
     let size = 0;
     try {
@@ -282,9 +286,21 @@ export class AppEventLog {
       return;
     }
     if (size < limit) return;
-    for (let index = keep - 1; index >= 1; index -= 1) {
+    for (const name of await readdir(directory)) {
+      const index = rotationIndex(name);
+      if (index >= keep && (index > 0 || name !== ACTIVE_FILE)) {
+        await rm(path.join(directory, name), { force: true }).catch(() => undefined);
+      }
+    }
+    const historySlots = keep - 1;
+    if (historySlots === 0) {
+      // Only the newest file is kept: start the active file over instead of renaming it into history.
+      await rm(path.join(directory, ACTIVE_FILE), { force: true }).catch(() => undefined);
+      return;
+    }
+    for (let index = historySlots; index >= 2; index -= 1) {
       try {
-        await rename(path.join(directory, `events.${index}.jsonl`), path.join(directory, `events.${index + 1}.jsonl`));
+        await rename(path.join(directory, `events.${index - 1}.jsonl`), path.join(directory, `events.${index}.jsonl`));
       } catch {
         // Missing rotation slots are normal.
       }

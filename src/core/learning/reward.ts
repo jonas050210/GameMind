@@ -14,6 +14,8 @@
  *     what it was.
  */
 
+import { CRITICAL_HEALTH, CRITICAL_HUNGER, FOOD_PRIORITY_HUNGER } from "../survival-thresholds.js";
+
 export interface RewardBreakdown {
   /** Maintaining health and food above critical levels. Death is a large penalty. */
   readonly survival: number;
@@ -100,9 +102,9 @@ export const DEFAULT_REWARD_CONFIG: RewardConfig = {
   },
   fastDurationMs: 500,
   slowDurationMs: 5_000,
-  criticalHealth: 6,
-  criticalHunger: 4,
-  hungerRewardThreshold: 14,
+  criticalHealth: CRITICAL_HEALTH,
+  criticalHunger: CRITICAL_HUNGER,
+  hungerRewardThreshold: FOOD_PRIORITY_HUNGER,
   componentCap: 3.0,
 };
 

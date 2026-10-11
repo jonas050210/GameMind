@@ -53,18 +53,19 @@ import {
   plankNameForLog,
 } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { CRITICAL_HEALTH, CRITICAL_HUNGER, FOOD_PRIORITY_HUNGER, LOW_HUNGER, REGEN_HUNGER } from "../../core/survival-thresholds.js";
 import { describeSessionField, isSurvivalLike, type SessionFieldInfo } from "./live-session.js";
 import { blockKey, WorldMemory, type ItemSighting } from "./world-memory.js";
 export { isHostileMinecraftEntity } from "./threats.js";
 
-const FOOD_PRIORITY_THRESHOLD = 14; // Lowered from 10: proactive eating before hunger becomes critical
-const LOW_FOOD_EXPLORATION_THRESHOLD = 8; // Raised from 6: explore for food earlier
-const CRITICAL_FOOD_THRESHOLD = 4;
-const REGEN_FOOD_THRESHOLD = 18;
+const FOOD_PRIORITY_THRESHOLD = FOOD_PRIORITY_HUNGER; // Lowered from 10: proactive eating before hunger becomes critical
+const LOW_FOOD_EXPLORATION_THRESHOLD = LOW_HUNGER; // Raised from 6: explore for food earlier
+const CRITICAL_FOOD_THRESHOLD = CRITICAL_HUNGER;
+const REGEN_FOOD_THRESHOLD = REGEN_HUNGER;
 const REST_HEALTH_THRESHOLD = 14; // Raised from 12: rest earlier to prevent death
 const REST_TARGET_HEALTH = 18; // Raised from 16: heal to safer level
 const REST_CHUNK_MS = 10_000;
-const CRITICAL_HEALTH_THRESHOLD = 6;
+const CRITICAL_HEALTH_THRESHOLD = CRITICAL_HEALTH;
 const POST_COMBAT_REST_HEALTH = 14; // Rest after combat if health below this
 const MAX_CRAFTING_TABLE_DISTANCE = MINECRAFT_CRAFTING_TABLE_REACH;
 const HYSTERESIS_BONUS = 25;

@@ -97,6 +97,27 @@ function harness(directory: string): Harness {
   };
 }
 
+test("an unexpected error shuts the run down and ends the process with code 1", async () => {
+  await withDirectory(async (directory) => {
+    const h = harness(directory);
+    const exits: number[] = [];
+    const listeners = new Map<string, (error: unknown) => void>();
+    const fatalEvents = {
+      on: (name: string, listener: (error: unknown) => void) => listeners.set(name, listener),
+      off: (name: string) => listeners.delete(name),
+    };
+    const finished = runCommandLine(
+      h.request({ connect: null, exit: (code) => exits.push(code), fatalEvents: fatalEvents as never }),
+    );
+    await waitFor(() => h.ready() !== null, "the READY line was printed");
+    assert.ok(listeners.has("uncaughtException") && listeners.has("unhandledRejection"), "both handlers are installed");
+    listeners.get("uncaughtException")!(new Error("boom"));
+    assert.equal(await finished, 1, "the run reports the failure instead of exiting 0");
+    assert.deepEqual(exits, [1], "the process is ended explicitly, not left running with unknown state");
+    assert.equal(listeners.size, 0, "the handlers are removed again");
+  });
+});
+
 test("regression: a persistent run stays connected after its task and ends only when told to", async () => {
   await withDirectory(async (directory) => {
     const h = harness(directory);

@@ -86,7 +86,7 @@ import type {
   GameObservation,
   GameSession,
 } from "../../core/types.js";
-import { standingReaches } from "./reach.js";
+import { NAVIGATION_RANGE_SLACK, reachedNavigationGoal } from "./reach.js";
 
 const require = createRequire(import.meta.url);
 const unsafePlacementSupportNames = new Set([
@@ -1476,8 +1476,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const to = { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z };
     const horizontalDistance = Math.hypot(to.x - (x + 0.5), to.z - (z + 0.5));
     const verticalDistance = Math.abs(to.y - y);
-    const confirmed =
-      horizontalDistance <= range + 1.25 && standingReaches(to.y, { x, y, z }, horizontalDistance, range + 1.25);
+    const confirmed = reachedNavigationGoal(to, { x, y, z }, range);
     return {
       confirmed,
       confirmation: confirmed
