@@ -147,7 +147,7 @@ function lastEvaluation(training) {
 export function renderTraining(ctx) {
   const training = ctx.snapshot.training;
   if (!training) {
-    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null, "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null) };
+    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null, "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null, null) };
   }
   return {
     "training-notice": notice("info", "Offline simulator training — not real-world training", "Training runs the agent's decision loop on the built-in simulator in a separate process, without rendering. What it learns is measured on held-out simulator seeds. It says nothing about a real Minecraft world until a live run is verified separately."),
@@ -157,82 +157,120 @@ export function renderTraining(ctx) {
     "training-checkpoints": checkpoints(training),
     "training-episodes-table": episodes(training),
     "training-eval": lastEvaluation(training),
-    "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null),
+    "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null, training),
   };
 }
 
 const GATE_TEXT = { promotable: "promotable", "not-promotable": "not promotable" };
 
-/** Exploration-rate benchmarks from `npm run train:benchmark`: one table per report, newest first, no raw file contents. */
-export function benchmarksCard(listing) {
-  const subtitle = "Step 1 times 1–4 workers (about 20 s each), step 2 compares exploration rates on the offline simulator with the chosen worker count. The winning settings are saved as the default.";
-  const start = button("Start benchmark", {
-    command: "runBenchmark",
-    tone: "primary",
-    title: "Measures worker counts, then runs four exploration rates one after another on the offline simulator",
-    data: { confirm: "Start a benchmark? It first times each worker count (about 20 seconds each), then runs several full training runs one after another on the offline simulator. It can take hours. You can cancel it from the Tests & Evaluation tab." },
-  });
+/** Headless worker/environment/exploration benchmark. It is only started by the operator's explicit submit. */
+export function benchmarksCard(listing, training) {
+  const stages = training?.availableStages ?? [];
+  const savedStageIds = listing?.savedDefault?.stageIds ?? training?.defaultStageIds ?? null;
+  const selectedStageIds = savedStageIds?.length ? savedStageIds : stages.map((stage) => stage.id);
+  const stageKey = JSON.stringify({ ids: stages.map((stage) => stage.id), selected: selectedStageIds });
+  const benchmarkForm = stages.length
+    ? h.stat(`benchmark-form-${stageKey}`, h("form", { id: "benchmark-form", class: "form benchmark-controls" },
+        h("fieldset", null,
+          h("legend", null, "Environment stages"),
+          h("div", { class: "check-grid benchmark-stage-grid" }, stages.map((stage) =>
+            h("label", { class: "choice", key: stage.id },
+              h("input", { type: "checkbox", id: `benchmark-stage-${stage.id}`, value: stage.id, checked: selectedStageIds.includes(stage.id) }),
+              h("span", null, `${stage.label} (${fmtNumber(stage.scenarioCount)} environments)`),
+            ),
+          )),
+        ),
+        h("div", { class: "field-row" },
+          h("div", null, h("label", { for: "benchmark-environment-cases" }, "Environment cases (1–256)"), h("input", { id: "benchmark-environment-cases", name: "environmentCases", type: "number", min: "1", max: "256", step: "1", value: String(stages.reduce((sum, stage) => sum + stage.scenarioCount, 0) || 13) })),
+          h("div", null, h("label", { for: "benchmark-environment-seconds" }, "Seconds per environment"), h("input", { id: "benchmark-environment-seconds", name: "environmentSecondsPerCase", type: "number", min: "1", max: "600", step: "1", value: "20" })),
+          h("div", null, h("label", { for: "benchmark-worker-limit" }, "Probe workers up to"), h("select", { id: "benchmark-worker-limit", name: "workerLimit" }, Array.from({ length: 8 }, (_, index) => h("option", { value: String(index + 1), selected: index + 1 === 4 }, `${index + 1} worker${index === 0 ? "" : "s"}`)))),
+        ),
+        h("p", { id: "benchmark-estimate", class: "hint" }, "Environment and worker-sweep estimates appear here."),
+        h("p", { class: "hint" }, "Each environment probe is isolated, headless and uses training-only seeds. The final held-out comparison—not this early/late reward signal—is the quality gate. This benchmark never starts automatically after training."),
+        h("div", { class: "button-row" }, h("button", { type: "submit", class: "btn primary", id: "benchmark-start" }, "Start headless benchmark")),
+        h("p", { id: "benchmark-start-hint", class: "hint" }, "No Minecraft server is used; the built-in simulator runs without rendering."),
+      ))
+    : notice("neutral", "Training benchmark unavailable", "This run does not expose the offline curriculum required for a worker/environment benchmark.");
+
   const saved = listing?.savedDefault
     ? notice(
         "info",
-        `Current default: ${listing.savedDefault.workers} worker${listing.savedDefault.workers === 1 ? "" : "s"}, exploration rate ${fmtNumber(listing.savedDefault.explorationRate, 2)}`,
-        `Saved ${fmtDateTime(listing.savedDefault.savedAt)}${listing.savedDefault.benchmark ? ` by benchmark ${listing.savedDefault.benchmark}` : ""}. New runs use it unless they choose otherwise.`,
+        `Current defaults: ${listing.savedDefault.workers} worker${listing.savedDefault.workers === 1 ? "" : "s"}, exploration ${fmtNumber(listing.savedDefault.explorationRate, 2)}${listing.savedDefault.stageIds?.length ? `, stages ${listing.savedDefault.stageIds.join(", ")}` : ""}`,
+        `Saved ${fmtDateTime(listing.savedDefault.savedAt)}${listing.savedDefault.benchmark ? ` by benchmark ${listing.savedDefault.benchmark}` : ""}. New training runs use these unless the operator explicitly chooses otherwise.`,
       )
-    : notice("neutral", "No default saved yet", "Run a benchmark to choose the worker count and exploration rate. Until then, one worker and the standard rate are used.");
-  if (!listing || !listing.reports?.length) {
-    return card({ title: "Benchmarks", subtitle }, saved, empty("No benchmark yet", "A benchmark measures the worker counts, then compares exploration rates and shows the comparison here."), h("footer", { class: "button-row" }, start));
-  }
-  return card(
-    { title: "Benchmarks", subtitle, actions: start },
-    saved,
-    ...listing.reports.map((report) =>
-      h(
-        "section",
-        { class: "benchmark", key: report.file },
-        h("h4", null, report.name, " ", report.createdAt ? h("span", { class: "muted small" }, fmtDateTime(report.createdAt)) : null),
-        report.unreadable
-          ? notice("warn", "This report could not be read", report.file)
-          : h(
-              "div",
-              null,
-              report.probe
-                ? table({
-                    dense: true,
-                    caption: `Worker throughput (chosen: ${report.workers ?? "?"})`,
-                    columns: [
-                      { label: "Workers", align: "right", cell: (r) => r.workers },
-                      { label: "Episodes / min", align: "right", cell: (r) => (r.episodesPerMinute === null ? unknown() : fmtNumber(r.episodesPerMinute, 0)) },
-                      { label: "CPU", align: "right", cell: (r) => (r.cpuPercent === null ? unknown() : fmtPercent(r.cpuPercent / 100, 0)) },
-                      { label: "Peak RAM", align: "right", cell: (r) => (r.peakRssMb === null ? unknown() : `${fmtNumber(r.peakRssMb, 0)} MB`) },
-                      { label: "Result", cell: (r) => (r.eligible ? (r.workers === report.workers ? "chosen" : "ok") : r.reason ?? "not used") },
-                    ],
-                    rows: report.probe.map((value, index) => ({ key: `${report.file}-probe-${index}`, value })),
-                    empty: { title: "No probe" },
-                  })
-                : null,
-              report.winner
-                ? notice("info", `Winner: exploration rate ${report.winner}`, report.decision ?? null)
-                : notice("neutral", "No winner", report.decision ?? "No candidate passed the gate and the margin."),
-              table({
-                dense: true,
-                caption: "Results per candidate",
-                columns: [
-                  { label: "Candidate", cell: (r) => r.id },
-                  { label: "Exploration rate", align: "right", cell: (r) => (r.explorationRate === null ? unknown() : fmtNumber(r.explorationRate, 2)) },
-                  { label: "Status", cell: (r) => statusBadge(r.status) },
-                  { label: "Baseline", align: "right", cell: (r) => (r.baselineSuccess === null ? unknown() : fmtPercent(r.baselineSuccess, 0)) },
-                  { label: "Trained", align: "right", cell: (r) => (r.trainedSuccess === null ? unknown() : fmtPercent(r.trainedSuccess, 0)) },
-                  { label: "Gain", align: "right", cell: (r) => (r.deltaPoints === null ? unknown() : fmtSigned(r.deltaPoints * 100, 1, " pts")) },
-                  { label: "Gate", cell: (r) => (r.gateVerdict ? GATE_TEXT[r.gateVerdict] ?? r.gateVerdict : unknown()) },
-                  { label: "Error", cell: (r) => r.error ?? "—" },
-                ],
-                rows: report.rows.map((value, index) => ({ key: `${report.file}-${index}`, value })),
-                empty: { title: "No results" },
-              }),
-            ),
-      ),
-    ),
-  );
+    : notice("neutral", "No benchmark defaults saved", "Training uses one worker and the standard exploration rate until a benchmark produces a measured recommendation.");
+  const subtitle = "Choose worker range and curriculum environments. The benchmark probes learning signals, then compares exploration rates with held-out evaluation.";
+  const reports = !listing || !listing.reports?.length
+    ? [empty("No benchmark yet", "Run the headless sweep explicitly to measure worker throughput, environment learning signals and held-out policy quality.")]
+    : listing.reports.map((report) =>
+        h(
+          "section",
+          { class: "benchmark", key: report.file },
+          h("h4", null, report.name, " ", report.createdAt ? h("span", { class: "muted small" }, fmtDateTime(report.createdAt)) : null),
+          report.unreadable
+            ? notice("warn", "This report could not be read", report.file)
+            : h(
+                "div",
+                null,
+                report.environmentScores.length
+                  ? table({
+                      dense: true,
+                      caption: `Environment learning signal (${report.environmentCases ?? "?"} cases × ${report.environmentSecondsPerCase ?? "?"} s; recommended: ${report.recommendedStageIds.join(", ") || "none"})`,
+                      columns: [
+                        { label: "Stage", cell: (r) => r.stageId },
+                        { label: "Cases", align: "right", cell: (r) => `${r.completedCases}/${r.cases}` },
+                        { label: "Episodes", align: "right", cell: (r) => fmtNumber(r.episodes) },
+                        { label: "Learning signal", align: "right", cell: (r) => (r.meanLearningSignal === null ? unknown() : fmtNumber(r.meanLearningSignal, 3)) },
+                        {
+                          label: "Selection",
+                          cell: (r) => r.recommended
+                            ? r.meanLearningSignal === null
+                              ? badge("retained · unmeasured", "neutral")
+                              : badge("recommended", "info")
+                            : "not selected",
+                        },
+                      ],
+                      rows: report.environmentScores.map((value, index) => ({ key: `${report.file}-environment-${index}`, value })),
+                    })
+                  : null,
+                report.probe
+                  ? table({
+                      dense: true,
+                      caption: `Worker throughput (chosen: ${report.workers ?? "?"})`,
+                      columns: [
+                        { label: "Workers", align: "right", cell: (r) => r.workers },
+                        { label: "Episodes / min", align: "right", cell: (r) => (r.episodesPerMinute === null ? unknown() : fmtNumber(r.episodesPerMinute, 0)) },
+                        { label: "CPU", align: "right", cell: (r) => (r.cpuPercent === null ? unknown() : fmtPercent(r.cpuPercent / 100, 0)) },
+                        { label: "Peak RAM", align: "right", cell: (r) => (r.peakRssMb === null ? unknown() : `${fmtNumber(r.peakRssMb, 0)} MB`) },
+                        { label: "Result", cell: (r) => (r.eligible ? (r.workers === report.workers ? "chosen" : "ok") : r.reason ?? "not used") },
+                      ],
+                      rows: report.probe.map((value, index) => ({ key: `${report.file}-probe-${index}`, value })),
+                      empty: { title: "No probe" },
+                    })
+                  : null,
+                report.winner
+                  ? notice("info", `Winner: exploration rate ${report.winner}`, report.decision ?? null)
+                  : notice("neutral", "No winner", report.decision ?? "No candidate passed the gate and the margin."),
+                table({
+                  dense: true,
+                  caption: "Held-out results per exploration candidate",
+                  columns: [
+                    { label: "Candidate", cell: (r) => r.id },
+                    { label: "Exploration rate", align: "right", cell: (r) => (r.explorationRate === null ? unknown() : fmtNumber(r.explorationRate, 2)) },
+                    { label: "Status", cell: (r) => statusBadge(r.status) },
+                    { label: "Baseline", align: "right", cell: (r) => (r.baselineSuccess === null ? unknown() : fmtPercent(r.baselineSuccess, 0)) },
+                    { label: "Trained", align: "right", cell: (r) => (r.trainedSuccess === null ? unknown() : fmtPercent(r.trainedSuccess, 0)) },
+                    { label: "Gain", align: "right", cell: (r) => (r.deltaPoints === null ? unknown() : fmtSigned(r.deltaPoints * 100, 1, " pts")) },
+                    { label: "Gate", cell: (r) => (r.gateVerdict ? GATE_TEXT[r.gateVerdict] ?? r.gateVerdict : unknown()) },
+                    { label: "Error", cell: (r) => r.error ?? "—" },
+                  ],
+                  rows: report.rows.map((value, index) => ({ key: `${report.file}-${index}`, value })),
+                  empty: { title: "No results" },
+                }),
+              ),
+        ),
+      );
+  return card({ title: "Headless learning benchmark", subtitle }, saved, benchmarkForm, ...reports);
 }
 
 export { fmtSigned, unknown };

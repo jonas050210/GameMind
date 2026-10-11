@@ -32,6 +32,7 @@ function passing(): EvaluationRun {
     worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0 },
     actionGoals: [],
     actionChoices: [],
+    actionFailures: [],
     failureCode: null,
   };
 }

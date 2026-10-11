@@ -77,6 +77,8 @@ export interface MockOptions {
   readonly isAlive?: boolean;
   readonly time?: { timeOfDay: number; day: number; isDay: boolean } | null;
   readonly regenerate?: boolean;
+  /** Delay the server-side berry/inventory update after `activateBlock` resolves. */
+  readonly berryHarvestDelayMs?: number;
   /**
    * Per-block line-of-sight outcome, shaped like Mineflayer's `canSeeBlock`, which ends with
    * `raycastHit && raycastHit.position.equals(block.position)`:
@@ -162,11 +164,15 @@ export function createLiveMock(options: MockOptions = {}) {
       return verdict === "clear" ? true : verdict === "blocked" ? false : null;
     },
     activateBlock: async (block: { name: string; position: Vec }) => {
-      const stored = blocks.get(key(block.position.x, block.position.y, block.position.z));
-      if (stored?.name === "sweet_berry_bush" && (stored.age ?? 0) >= 2) {
-        addItem("sweet_berries", 2);
-        stored.age = 1;
-      }
+      const harvest = () => {
+        const stored = blocks.get(key(block.position.x, block.position.y, block.position.z));
+        if (stored?.name === "sweet_berry_bush" && (stored.age ?? 0) >= 2) {
+          addItem("sweet_berries", 2);
+          stored.age = 1;
+        }
+      };
+      if ((options.berryHarvestDelayMs ?? 0) > 0) setTimeout(harvest, options.berryHarvestDelayMs);
+      else harvest();
     },
     pathfinder: {
       // Mineflayer-faithful: when planning fails, goto() RESOLVES, and the planner reports the failure as a

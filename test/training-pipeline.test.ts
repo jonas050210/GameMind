@@ -33,6 +33,7 @@ function fakeRun(success: boolean, actions = 4): EvaluationRun {
     worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0 },
     actionGoals: [],
     actionChoices: [],
+    actionFailures: [],
     failureCode: success ? null : "CONSECUTIVE_ACTION_FAILURES",
   };
 }

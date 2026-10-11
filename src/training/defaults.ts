@@ -1,6 +1,6 @@
 /**
- * The saved default for training: how many workers run episodes at once and which exploration rate to use. The
- * benchmark writes it when it finishes; the trainer and the Control Center read it when a run does not say otherwise.
+ * Saved training defaults: worker count, exploration rate and benchmark-selected curriculum stages. The trainer and
+ * Control Center use these when a new run does not explicitly choose otherwise.
  * It sits next to the training folders, so it is shared by all of them. Earlier versions are archived, never deleted.
  */
 import { mkdir, readFile, readdir, rename, stat } from "node:fs/promises";
@@ -25,6 +25,8 @@ export const trainingDefaultsSchema = z.object({
   schemaVersion: z.literal(1),
   workers: z.number().int().min(1).max(8),
   explorationRate: z.number().min(0).max(1),
+  /** Recommended stages from the headless environment sweep; absent in older defaults. */
+  stageIds: z.array(z.string().regex(/^[a-z0-9-]{1,80}$/)).min(1).max(8).optional(),
   savedAt: z.string(),
   /** Benchmark that produced this default, or null when it was set by hand. */
   benchmark: z.string().nullable(),

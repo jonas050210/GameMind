@@ -125,6 +125,7 @@ function createMockBot(
   };
   const botLike = Object.assign(emitter, {
     __blocks: blocks,
+    __inventoryItems: inventoryItems,
     username: "GameMind",
     version: "1.20.4",
     entity: playerEntity,
@@ -182,7 +183,11 @@ function createMockBot(
     },
     oxygenLevel: 300,
     inventory: {
-      items: () => inventoryItems,
+      // Match Mineflayer's Window.items(): hotbar stacks remain inventory items while equipped in hand.
+      items: () => [
+        ...inventoryItems,
+        ...(inventorySlots.slice(36, 45).filter((slot) => slot !== null) as typeof inventoryItems),
+      ],
       slots: inventorySlots,
     },
     getEquipmentDestSlot: (destination: string) => destinationSlots[destination] ?? 0,
@@ -268,14 +273,14 @@ function createMockBot(
 }
 
 function seedInventory(bot: Bot, name: string, count: number, type = 1_000): void {
-  const inventory = bot.inventory.items() as unknown as Array<{
+  const inventory = (bot as unknown as { __inventoryItems: Array<{
     slot: number;
     name: string;
     type: number;
     count: number;
     metadata: number | null;
     durabilityUsed: number | null;
-  }>;
+  }> }).__inventoryItems;
   inventory.push({
     slot: inventory.reduce((max, item) => Math.max(max, item.slot), 8) + 1,
     name,
@@ -421,6 +426,8 @@ test("Minecraft crafting, eating, and crafting-table placement require and confi
   const eaten = await skills.run("minecraft.eat-food", { item: "apple" });
   assert.equal(eaten.action.status, "succeeded");
   assert.equal(eaten.action.confirmed, true);
+  assert.equal(eaten.action.details?.foodCountBefore, 1);
+  assert.equal(eaten.action.details?.foodCountAfter, 0);
   assert.equal(eaten.observationAfter?.state.player.food, 9);
   assert.equal(eaten.observationAfter?.state.inventory.some((item) => item.name === "apple"), false);
 
@@ -436,6 +443,63 @@ test("Minecraft crafting, eating, and crafting-table placement require and confi
   assert.equal(placed.observationAfter?.state.inventory.some((item) => item.name === "crafting_table"), false);
 
   await runtime.shutdown("craft/eat/place action test finished");
+});
+
+test("crafting-table reach is measured to the block center, matching the planner and vanilla interaction target", async () => {
+  const logger = pino({ level: "silent" });
+  const trace = new TraceRecorder(new MemoryTraceSink(), logger);
+  const bot = createMockBot(true);
+  (bot.entity as unknown as { position: MockVector }).position = new MockVector(2.5, 64, 2.5);
+  seedInventory(bot, "oak_planks", 3, 5);
+  seedInventory(bot, "stick", 2, 280);
+  (bot as unknown as { __blocks: Map<string, { name: string; type: number; boundingBox: string }> }).__blocks
+    .set("-1,64,-1", { name: "crafting_table", type: 58, boundingBox: "block" });
+  const adapter = createTestAdapter(logger, () => bot);
+  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  await runtime.connect();
+
+  const crafted = await skills.run("minecraft.craft-item", {
+    item: "wooden_pickaxe",
+    count: 1,
+    craftingTable: { x: -1, y: 64, z: -1 },
+  });
+  assert.equal(crafted.action.status, "succeeded");
+  assert.equal(crafted.action.confirmed, true);
+  assert.equal(crafted.observationAfter?.state.inventory.find((item) => item.name === "wooden_pickaxe")?.count, 1);
+  await runtime.shutdown("crafting-table reach test finished");
+});
+
+test("eating waits for a delayed server hunger update after Mineflayer confirms consumption", async () => {
+  const logger = pino({ level: "silent" });
+  const trace = new TraceRecorder(new MemoryTraceSink(), logger);
+  const bot = createMockBot(true, 5);
+  seedInventory(bot, "apple", 1, 1_009);
+  let serverFood = 5;
+  Object.defineProperty(bot, "food", { configurable: true, get: () => serverFood });
+  const liveBot = bot as unknown as {
+    inventory: { slots: unknown[] };
+    consume: () => Promise<void>;
+  };
+  liveBot.consume = async () => {
+    const held = liveBot.inventory.slots[36] as { name?: string; count?: number } | null;
+    if (!held || held.name !== "apple") throw new Error("Mock held item is not edible.");
+    liveBot.inventory.slots[36] = (held.count ?? 0) > 1 ? { ...held, count: held.count! - 1 } : null;
+    // Mineflayer resolves on the consume-complete packet; update_health may arrive on a later tick.
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    setTimeout(() => { serverFood = Math.min(20, serverFood + 4); }, 120);
+  };
+
+  const adapter = createTestAdapter(logger, () => bot);
+  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  await runtime.connect();
+  const eaten = await skills.run("minecraft.eat-food", { item: "apple" });
+
+  assert.equal(eaten.action.status, "succeeded");
+  assert.equal(eaten.action.confirmed, true);
+  assert.equal(eaten.action.details?.hungerAfter, 9);
+  assert.equal(eaten.action.details?.foodCountAfter, 0);
+  assert.ok(Number(eaten.action.details?.confirmationWaitMs) >= 100);
+  await runtime.shutdown("delayed food confirmation test finished");
 });
 
 test("live adapter rechecks visible hostile proximity immediately before collection and placement", async () => {

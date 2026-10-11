@@ -11,6 +11,7 @@ import type {
 } from "../../core/types.js";
 import {
   minecraftCapabilities,
+  MINECRAFT_CRAFTING_TABLE_REACH,
   MINECRAFT_COLLECT_BLOCK_CAPABILITY,
   MINECRAFT_CRAFT_CAPABILITY,
   MINECRAFT_EAT_CAPABILITY,
@@ -75,7 +76,7 @@ const MAX_OBSERVED_BLOCKS = 256;
 const MAX_RESOURCE_SCAN_BLOCKS = 192;
 const MAX_NAVIGATION_DISTANCE = 48;
 const MAX_RESOURCE_GATHER_DISTANCE = 24;
-const MAX_CRAFTING_TABLE_DISTANCE = 4.5;
+const MAX_CRAFTING_TABLE_DISTANCE = MINECRAFT_CRAFTING_TABLE_REACH;
 const MAX_PLACEMENT_DISTANCE = 4.5;
 
 function cardinalSolidCount(world: { playerX: number; playerY: number; playerZ: number; blockAt(x: number, y: number, z: number): { boundingBox: string } | null }): number {
@@ -310,7 +311,7 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         // Air is only meaningful when the sim puts the player under water, which it never does.
         oxygenLevel: null,
         onGround: true,
-        inventoryFull: world.inventory.length >= world.maxInventoryStacks,
+        inventoryFull: world.isInventoryFull(),
         // The facts a live adapter reads out of Mineflayer are simply known here, so they are marked with
         // their real origin instead of pretending to be a session read.
         session: {
@@ -480,15 +481,24 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     this.walkPath(path, check);
     check();
     this.world.advance(600, check);
-    // The block may have been removed while walking; like collectBlock, nothing is gained then.
-    if (this.world.blockAt(x, y, z)?.name === blockName) {
-      this.world.setBlock(x, y, z, null);
-      this.world.addToInventory(blockName, 1);
+    // The target can change while walking. Never collect from the initial block snapshot after arrival.
+    const refreshedBlock = this.world.blockAt(x, y, z);
+    if (!refreshedBlock || refreshedBlock.name !== blockName) {
+      throw new SimulatedActionError(
+        `The ${blockName} resource target changed during navigation.`,
+        "RESOURCE_TARGET_CHANGED",
+      );
     }
+    this.world.setBlock(x, y, z, null);
+    this.world.addToInventory(blockName, 1);
     const after = this.world.countItem(blockName);
+    const confirmed = after > before;
     return {
-      confirmed: after > before,
+      confirmed,
       confirmation: "simulated_collection_inventory_delta_checked",
+      ...(!confirmed
+        ? { failure: { code: "DIG_FAILED", message: `The ${blockName} block was removed without an inventory gain.` } }
+        : {}),
       details: { blockName, coordinates: { x, y, z }, inventoryBefore: before, inventoryAfter: after },
     };
   }
@@ -527,7 +537,10 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         throw new SimulatedActionError("The observed crafting table is no longer present.", "CRAFTING_TABLE_CHANGED");
       }
       const player = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
-      if (distance3(player, craftingTable) > MAX_CRAFTING_TABLE_DISTANCE) {
+      if (
+        distance3(player, { x: craftingTable.x + 0.5, y: craftingTable.y + 0.5, z: craftingTable.z + 0.5 }) >
+        MAX_CRAFTING_TABLE_DISTANCE
+      ) {
         throw new SimulatedActionError("Crafting table is out of reach.", "CRAFTING_TABLE_TOO_FAR");
       }
     }

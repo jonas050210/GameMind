@@ -37,6 +37,7 @@ function fakeRun(success: boolean, choices: string[] = []): EvaluationRun {
     worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0 },
     actionGoals: [],
     actionChoices: choices,
+    actionFailures: [],
     failureCode: success ? null : "CONSECUTIVE_ACTION_FAILURES",
   };
 }
@@ -280,7 +281,7 @@ test("the manager explains a fresh start before it happens, and refuses it witho
   });
 });
 
-test("a start without its own settings uses the saved benchmark default for workers and exploration", async () => {
+test("a start without its own settings uses the saved benchmark defaults for workers, exploration and stages", async () => {
   await withRoot(async (root) => {
     const entry = join(root, "record-args.mjs");
     await writeFile(entry, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(root, "args.json"))}, JSON.stringify(process.argv.slice(2)));\n`);
@@ -289,6 +290,7 @@ test("a start without its own settings uses the saved benchmark default for work
       schemaVersion: 1,
       workers: 3,
       explorationRate: 0.3,
+      stageIds: ["basics"],
       savedAt: "2026-10-10T10:00:00.000Z",
       benchmark: "gui-test",
       decision: "test",
@@ -297,7 +299,7 @@ test("a start without its own settings uses the saved benchmark default for work
     });
     try {
       const manager = new TrainingManager({ root, entry, defaultsFile });
-      const started = await manager.start({ fresh: true, confirmFresh: true, maxEpisodes: 30, stageIds: ["basics"] });
+      const started = await manager.start({ fresh: true, confirmFresh: true, maxEpisodes: 30 });
       assert.equal(started.ok, true, started.message);
       const deadline = Date.now() + 8_000;
       let recorded: string[] | null = null;
@@ -308,6 +310,7 @@ test("a start without its own settings uses the saved benchmark default for work
       assert.ok(recorded, "the child ran");
       assert.deepEqual(recorded!.slice(recorded!.indexOf("--explore"), recorded!.indexOf("--explore") + 2), ["--explore", "0.3"]);
       assert.deepEqual(recorded!.slice(recorded!.indexOf("--workers"), recorded!.indexOf("--workers") + 2), ["--workers", "3"]);
+      assert.deepEqual(recorded!.slice(recorded!.indexOf("--stages"), recorded!.indexOf("--stages") + 2), ["--stages", "basics"]);
     } finally {
       await rm(defaultsFile, { force: true });
     }

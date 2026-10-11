@@ -21,15 +21,20 @@
           </div>
         </div>
 
-        <nav id="tabs" class="tabs" role="tablist" aria-label="Sections">
-          <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">Overview</button>
-          <button type="button" role="tab" id="tab-training" data-tab="training" aria-controls="panel-training">Training</button>
-          <button type="button" role="tab" id="tab-bots" data-tab="bots" aria-controls="panel-bots">Bots</button>
-          <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="panel-tasks">Tasks</button>
-          <button type="button" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Tests &amp; Evaluation</button>
-          <button type="button" role="tab" id="tab-learning" data-tab="learning" aria-controls="panel-learning">Learning &amp; Policy</button>
-          <button type="button" role="tab" id="tab-memory" data-tab="memory" aria-controls="panel-memory">World Memory &amp; Events</button>
-        </nav>
+        <details id="tools-navigation" class="tools-navigation">
+          <summary id="tools-navigation-summary">
+            <span id="tools-current-tab">Overview</span><span class="tools-chevron" aria-hidden="true">⌄</span>
+          </summary>
+          <nav id="tabs" class="tabs" role="tablist" aria-label="Sections">
+            <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">Overview</button>
+            <button type="button" role="tab" id="tab-training" data-tab="training" aria-controls="panel-training">Training</button>
+            <button type="button" role="tab" id="tab-bots" data-tab="bots" aria-controls="panel-bots">Bots</button>
+            <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="panel-tasks">Tasks</button>
+            <button type="button" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Tests &amp; Evaluation</button>
+            <button type="button" role="tab" id="tab-learning" data-tab="learning" aria-controls="panel-learning">Learning &amp; Policy</button>
+            <button type="button" role="tab" id="tab-memory" data-tab="memory" aria-controls="panel-memory">World Memory &amp; Events</button>
+          </nav>
+        </details>
 
         <div class="status-cluster" aria-label="Status">
           <div class="status-pill" id="session-pill" data-tone="neutral" title="Session state">
@@ -60,22 +65,25 @@
       <div id="render-error" role="alert"></div>
 
       <section id="panel-overview" class="panel" role="tabpanel" aria-labelledby="tab-overview" hidden>
-        <div class="grid two">
+        <div class="grid two operator-primary">
           <div id="ov-session" aria-live="polite"></div>
+          <div id="ov-task"></div>
+        </div>
+        <div class="grid two operator-primary">
+          <div id="ov-vitals"></div>
           <div id="ov-controls"></div>
         </div>
-        <div class="grid three">
-          <div id="ov-vitals"></div>
-          <div id="ov-task"></div>
-          <div id="ov-legend"></div>
-        </div>
-        <div class="grid two">
-          <div id="ov-activity"></div>
-          <div class="stack">
-            <div id="ov-training"></div>
-            <div id="ov-evaluation"></div>
+        <details id="overview-details" class="overview-details">
+          <summary id="overview-details-summary">More operational detail</summary>
+          <div class="grid two">
+            <div id="ov-activity"></div>
+            <div class="stack">
+              <div id="ov-training"></div>
+              <div id="ov-evaluation"></div>
+              <div id="ov-legend"></div>
+            </div>
           </div>
-        </div>
+        </details>
       </section>
 
       <!-- B. TRAINING -->

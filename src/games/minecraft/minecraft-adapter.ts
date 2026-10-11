@@ -11,6 +11,7 @@ import type { Movements as PathfinderMovements } from "mineflayer-pathfinder";
 import type { Logger } from "pino";
 import {
   minecraftCapabilities,
+  MINECRAFT_CRAFTING_TABLE_REACH,
   MINECRAFT_COLLECT_BLOCK_CAPABILITY,
   MINECRAFT_CRAFT_CAPABILITY,
   MINECRAFT_EAT_CAPABILITY,
@@ -153,6 +154,9 @@ function hasLineOfSight(bot: Bot, target: { position: BotPosition }): boolean {
 
 /** Swim budget: enough to cross a few blocks of water, short enough that a stuck swim is reported, not endured. */
 const SWIM_TIMEOUT_MS = 12_000;
+/** The consume animation can finish before the server's health/inventory packets arrive. */
+const FOOD_CONFIRMATION_SETTLE_MS = 2_000;
+const ACTION_CONFIRMATION_POLL_MS = 100;
 
 /**
  * Nearest cell the agent could stand on: solid ground below, and air or non-water above, within `maxDistance` blocks
@@ -220,7 +224,7 @@ export interface MinecraftAdapterConfig {
    * the safety broker allows. Combat is opt-in at three independent layers on purpose.
    */
   readonly allowCombat: boolean;
-  /** How long a mined drop may take to appear in the inventory after the block breaks. */
+  /** How long a mined, picked-up, or harvested item may take to appear in inventory after its world action. */
   readonly dropSettleMs: number;
   /** Extra seconds a dig may take over Mineflayer's own estimate before the action is cancelled. */
   readonly digTimeoutSlackMs: number;
@@ -252,7 +256,7 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   entityRadius: 24,
   maxNavigationDistance: 48,
   maxResourceGatherDistance: 24,
-  maxCraftingTableDistance: 4.5,
+  maxCraftingTableDistance: MINECRAFT_CRAFTING_TABLE_REACH,
   maxPlacementDistance: 4.5,
   allowCombat: false,
   dropSettleMs: 2_000,
@@ -1664,20 +1668,33 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         signal,
       );
     }
-    if (block.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(block)) {
+    // Pathing can take several seconds in a live world. Never dig the pre-walk Block object: another player or
+    // server-side event may have changed it while we moved. Re-read the exact cell, then validate reach and harvest
+    // against the fresh block state before starting the irreversible dig.
+    const refreshedBlock = this.blockAtCoordinates(bot, x, y, z);
+    if (!refreshedBlock) {
+      throw new MinecraftAdapterError("The resource target is not currently observable after navigation.", "BLOCK_UNKNOWN");
+    }
+    if (refreshedBlock.name !== itemName) {
+      throw new MinecraftAdapterError(
+        `The resource target changed during navigation (expected ${itemName}, observed ${refreshedBlock.name}).`,
+        "RESOURCE_TARGET_CHANGED",
+      );
+    }
+    if (refreshedBlock.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(refreshedBlock)) {
       throw new MinecraftAdapterError("The log is still out of reach after navigation.", "BLOCK_OUT_OF_REACH");
     }
     // The walk can take many seconds. A hostile that closed in during it stops the dig, as it would have before the walk.
-    if (hasVisibleHostileNear(bot, block.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+    if (hasVisibleHostileNear(bot, refreshedBlock.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
       throw new MinecraftAdapterError(
         `A currently visible hostile is within ${dangerRadius} blocks of the resource target.`,
         "RESOURCE_TARGET_THREATENED",
       );
     }
-    if (!block.canHarvest(bot.heldItem?.type ?? null)) {
+    if (!refreshedBlock.canHarvest(bot.heldItem?.type ?? null)) {
       throw new MinecraftAdapterError("Minecraft client reports that this block cannot be harvested.", "BLOCK_NOT_HARVESTABLE");
     }
-    const digDeadline = await this.digWithDeadline(bot, block, itemName, signal);
+    const digDeadline = await this.digWithDeadline(bot, refreshedBlock, itemName, signal);
     // The drop can lag the block change, and must be walked onto. Then require both independent postconditions: the
     // exact target changed and the requested item entered inventory. A block that broke without its item is not a log.
     const remainingBlock = this.blockAtCoordinates(bot, x, y, z);
@@ -1693,6 +1710,13 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     return {
       confirmed,
       confirmation: "target_block_removed_and_inventory_delta_checked",
+      ...(!confirmed
+        ? {
+            failure: blockRemoved
+              ? { code: "ITEM_DROP_NOT_FOUND", message: `The ${itemName} block was removed, but its drop was not observed in inventory.` }
+              : { code: "DIG_FAILED", message: `The ${itemName} block remained after the dig attempt.` },
+          }
+        : {}),
       details: {
         itemName,
         coordinates: { x, y, z },
@@ -1767,7 +1791,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       if (!craftingTable || craftingTable.name !== "crafting_table") {
         throw new MinecraftAdapterError("The observed crafting table is no longer present.", "CRAFTING_TABLE_CHANGED");
       }
-      const distance = craftingTable.position.distanceTo(bot.entity.position);
+      const distance = craftingTable.position.offset(0.5, 0.5, 0.5).distanceTo(bot.entity.position);
       if (distance > this.config.maxCraftingTableDistance) {
         throw new MinecraftAdapterError(
           `Crafting table is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxCraftingTableDistance}.`,
@@ -1826,8 +1850,19 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const countBefore = inventoryCount(bot, parsed.data.item);
     await raceWithAbort(bot.equip(item, "hand"), signal);
     await raceWithAbort(bot.consume(), signal);
-    const hungerAfter = finiteOrNull(bot.food);
-    const countAfter = inventoryCount(bot, parsed.data.item);
+    const confirmationStartedAt = Date.now();
+    const confirmationDeadline = confirmationStartedAt + FOOD_CONFIRMATION_SETTLE_MS;
+    let hungerAfter = finiteOrNull(bot.food);
+    let countAfter = inventoryCount(bot, parsed.data.item);
+    while (
+      !(hungerAfter !== null && hungerAfter > hungerBefore && countAfter < countBefore) &&
+      Date.now() < confirmationDeadline
+    ) {
+      const remainingMs = confirmationDeadline - Date.now();
+      await delayWithAbort(Math.min(ACTION_CONFIRMATION_POLL_MS, remainingMs), signal);
+      hungerAfter = finiteOrNull(bot.food);
+      countAfter = inventoryCount(bot, parsed.data.item);
+    }
     const confirmed = hungerAfter !== null && hungerAfter > hungerBefore && countAfter < countBefore;
     return {
       confirmed,
@@ -1838,8 +1873,10 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         hungerAfter,
         foodCountBefore: countBefore,
         foodCountAfter: countAfter,
+        confirmationWaitMs: Date.now() - confirmationStartedAt,
+        confirmationSettleTimeoutMs: FOOD_CONFIRMATION_SETTLE_MS,
         evidence:
-          "Mineflayer consume promise completed; confirmation requires both a server-observed hunger increase and a decrease in the selected inventory stack.",
+          "Mineflayer consume completed; confirmation waited up to the settle deadline for both a server-observed hunger increase and a decrease in the selected inventory stack.",
       },
     };
   }
@@ -1884,7 +1921,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       signal,
       MINECRAFT_PICKUP_ITEM_CAPABILITY,
     );
-    const after = await this.waitForInventoryGain(bot, itemName, before, 1_500, signal);
+    const after = await this.waitForInventoryGain(bot, itemName, before, this.config.dropSettleMs, signal);
     return {
       confirmed: after > before,
       confirmation: "dropped_item_entered_inventory_delta_checked",
@@ -1957,7 +1994,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       throw new MinecraftAdapterError("The berry bush is outside reach after navigation.", "BERRY_OUT_OF_REACH");
     }
     await raceWithAbort(bot.activateBlock(refreshed), signal);
-    const after = await this.waitForInventoryGain(bot, "sweet_berries", before, 1_000, signal);
+    const after = await this.waitForInventoryGain(bot, "sweet_berries", before, this.config.dropSettleMs, signal);
     const ageAfter = blockProperties(this.blockAtCoordinates(bot, x, y, z)).age ?? null;
     return {
       confirmed: after > before,
@@ -2115,7 +2152,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     ) {
       throw new MinecraftAdapterError("Crafting-table destination has no visible safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
     }
-    const distance = destination.position.distanceTo(bot.entity.position);
+    const distance = destination.position.offset(0.5, 0.5, 0.5).distanceTo(bot.entity.position);
     if (distance > this.config.maxCraftingTableDistance) {
       throw new MinecraftAdapterError(
         `Crafting-table placement is ${distance.toFixed(1)} blocks away; limit is ${this.config.maxCraftingTableDistance}.`,
@@ -2259,12 +2296,43 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         signal,
       );
     }
-    if (block.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(block)) {
+
+    // The target may be mined or replaced by another player while pathing. Use a fresh block read for the final
+    // reach/tool/safety checks so we never dig from a stale observation.
+    const refreshedBlock = this.blockAtCoordinates(bot, x, y, z);
+    if (!refreshedBlock) {
+      throw new MinecraftAdapterError("The mining target is not currently observable after navigation.", "BLOCK_UNKNOWN");
+    }
+    if (refreshedBlock.name !== blockName) {
+      throw new MinecraftAdapterError(
+        `The mining target changed during navigation (expected ${blockName}, observed ${refreshedBlock.name}).`,
+        "RESOURCE_TARGET_CHANGED",
+      );
+    }
+    if (!refreshedBlock.diggable) {
+      throw new MinecraftAdapterError("The client reports this block cannot be dug.", "BLOCK_NOT_DIGGABLE");
+    }
+    if (!refreshedBlock.canHarvest(bot.heldItem?.type ?? null)) {
+      throw new MinecraftAdapterError(
+        `The currently held tool can no longer harvest ${blockName}.`,
+        "TOOL_TIER_INSUFFICIENT",
+      );
+    }
+    if (!this.canAcceptItem(bot, drop)) {
+      throw new MinecraftAdapterError("The inventory has no room for the mined drop; free a slot before mining.", "INVENTORY_FULL");
+    }
+    if (hasVisibleHostileNear(bot, refreshedBlock.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the mining target.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
+    if (refreshedBlock.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(refreshedBlock)) {
       throw new MinecraftAdapterError("The block is still out of reach after navigation.", "BLOCK_OUT_OF_REACH");
     }
 
     const inventoryBefore = inventoryCount(bot, drop);
-    const digDeadline = await this.digWithDeadline(bot, block, blockName, signal);
+    const digDeadline = await this.digWithDeadline(bot, refreshedBlock, blockName, signal);
     await this.pickUpNearbyDrops(bot, { x: x + 0.5, y: y + 0.5, z: z + 0.5 }, drop, inventoryBefore, signal);
 
     const inventoryAfter = await this.waitForInventoryGain(bot, drop, inventoryBefore, this.config.dropSettleMs, signal);
@@ -2277,9 +2345,17 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         await bot.equip(restore, "hand").catch(() => undefined);
       }
     }
+    const confirmed = inventoryAfter > inventoryBefore && blockRemoved;
     return {
-      confirmed: inventoryAfter > inventoryBefore && blockRemoved,
+      confirmed,
       confirmation: "dig_completed_and_drop_inventory_delta_checked",
+      ...(!confirmed
+        ? {
+            failure: blockRemoved
+              ? { code: "ITEM_DROP_NOT_FOUND", message: `The ${blockName} block was removed, but its drop was not observed in inventory.` }
+              : { code: "DIG_FAILED", message: `The ${blockName} block remained after the dig attempt.` },
+          }
+        : {}),
       details: {
         blockName,
         drop,

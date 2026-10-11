@@ -5,6 +5,7 @@ import type { SafetyWorldContext } from "../src/core/safety-broker.js";
 
 function worldContext(overrides: Partial<SafetyWorldContext> = {}): SafetyWorldContext {
   return {
+    sessionId: "session-1",
     sequence: 1,
     observedAtMs: 1_000,
     health: 20,
@@ -60,16 +61,15 @@ test("an unavailable observation fails closed, a stale one is refused, read-only
   assert.equal(readOnly.allowed, true, "looking around never depends on a fresh observation");
 });
 
-test("run and per-capability budgets bound a runaway planner", () => {
-  const broker = new SafetyBroker({ maxActionsPerRun: 2, perCapabilityMaxPerRun: { "minecraft.navigate": 5 } });
+test("there is no global action ceiling, while per-capability limits still apply", () => {
+  const broker = new SafetyBroker({ perCapabilityMaxPerRun: { "minecraft.navigate": 12 } });
   broker.beginRun("run-budget");
   broker.updateWorld(worldContext());
   const request = { capability: "minecraft.navigate", risk: "low" as const, nowMs: 1_000 };
-  assert.equal(broker.evaluate(request).allowed, true);
-  assert.equal(broker.evaluate(request).allowed, true);
-  const third = broker.evaluate(request);
-  assert.equal(third.allowed, false);
-  assert.equal(third.code, "RUN_ACTION_BUDGET");
+  for (let action = 0; action < 10; action += 1) {
+    assert.equal(broker.evaluate(request).allowed, true, `action ${action + 1} is not blocked by a global count`);
+  }
+  assert.equal(broker.snapshot().actionsApproved, 10, "the counter remains telemetry, not a limit");
 
   const perCapability = new SafetyBroker({ perCapabilityMaxPerRun: { "minecraft.eat_food": 1 } });
   perCapability.beginRun("run-cap");
@@ -250,36 +250,47 @@ test("a running-out-of-air check denies stationary work and the void dimension d
   assert.equal(voidBroker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 }).code, "VOID");
 });
 
-test("the snapshot reports policy, counters and the most recent verdicts for the UI", () => {
-  const broker = new SafetyBroker({ maxActionsPerRun: 1 });
+test("the snapshot reports cumulative telemetry without imposing a global action ceiling", () => {
+  const broker = new SafetyBroker();
   broker.beginRun("run-snapshot");
   broker.updateWorld(worldContext());
   broker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 });
   broker.evaluate({ capability: "minecraft.navigate", risk: "medium", nowMs: 1_000 });
   const snapshot = broker.snapshot();
   assert.equal(snapshot.runId, "run-snapshot");
-  assert.equal(snapshot.actionsApproved, 1);
-  assert.equal(snapshot.actionsDenied, 1);
-  assert.equal(snapshot.approvedByCapability["minecraft.navigate"], 1);
-  assert.equal(snapshot.deniedByCode["RUN_ACTION_BUDGET"], 1);
+  assert.equal(snapshot.actionsApproved, 2);
+  assert.equal(snapshot.actionsDenied, 0);
+  assert.equal(snapshot.approvedByCapability["minecraft.navigate"], 2);
   assert.equal(snapshot.world?.health, 20);
-  assert.equal(snapshot.recentVerdicts[0]?.code, "RUN_ACTION_BUDGET");
-  assert.equal(snapshot.policy.maxActionsPerRun, 1);
+  assert.equal(snapshot.recentVerdicts[0]?.code, "ALLOWED");
+  assert.equal("maxActionsPerRun" in snapshot.policy, false);
 });
 
-test("configure() validates the policy instead of accepting nonsense", () => {
+test("configure() validates the remaining policy instead of accepting nonsense", () => {
   const broker = new SafetyBroker();
-  assert.throws(() => broker.configure({ maxActionsPerRun: 0 }), /positive integer/);
   assert.throws(() => broker.configure({ maxObservationAgeMs: 10 }), /at least 1000 ms/);
 });
 
-test("an older sequence from a finished run cannot overwrite the live world context", () => {
+test("session identity fences stale contexts and disconnects fail closed", () => {
   const broker = new SafetyBroker();
-  broker.beginRun("run-order");
-  broker.updateWorld(worldContext({ sequence: 9, health: 12 }));
-  broker.updateWorld(worldContext({ sequence: 4, health: 3 }));
-  assert.equal(broker.world?.health, 12);
-  broker.endRun();
-  broker.updateWorld(worldContext({ sequence: 4, health: 3 }));
-  assert.equal(broker.world?.health, 3, "outside a run the newest write wins, e.g. a fresh session");
+  broker.beginSession("session-1");
+  broker.startRun("run-order");
+  broker.updateWorld(worldContext({ sessionId: "session-1", sequence: 9, health: 12 }));
+  broker.updateWorld(worldContext({ sessionId: "session-1", sequence: 4, health: 3 }));
+  assert.equal(broker.world?.health, 12, "an older sequence in the same session is ignored");
+
+  broker.beginSession("session-2");
+  assert.equal(broker.world, null, "a new session cannot inherit the previous world's observation");
+  assert.equal(broker.snapshot().runId, null, "the previous run is closed when its session changes");
+  broker.updateWorld(worldContext({ sessionId: "session-1", sequence: 50, health: 1 }));
+  broker.updateWorld(worldContext({ sessionId: "session-2", sequence: 1, health: 18 }));
+  broker.endSession("session-1");
+  assert.equal(broker.snapshot().world?.health, 18, "a late disconnect from an old session cannot clear the current one");
+
+  broker.endSession("session-2");
+  broker.updateWorld(worldContext({ sessionId: "session-2", sequence: 100, health: 1 }));
+  assert.equal(broker.snapshot().world, null, "late observations after disconnect stay rejected");
+  const denied = broker.evaluate({ capability: "minecraft.navigate", risk: "low", nowMs: 1_000 });
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.code, "NO_OBSERVATION");
 });

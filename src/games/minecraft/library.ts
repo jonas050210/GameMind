@@ -974,7 +974,7 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
     "gather.pickup",
     "Gathering & Food",
     "Pick up dropped item",
-    "Walks to one observed dropped food/log item and confirms it entered inventory. Only allowlisted food and logs; never arbitrary items.",
+    "Walks to one observed dropped food, log, mining drop, or known-useful craftable and confirms it entered inventory. A finite allowlist rejects arbitrary items.",
     "minecraft.pickup-item",
     "minecraft.pickup_item",
     [...xyzFields, selectField("itemName", "Item", minecraftPickupNames), dangerField],

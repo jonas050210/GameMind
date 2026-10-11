@@ -27,6 +27,15 @@ export interface BenchmarkProbeRow {
   readonly reason: string | null;
 }
 
+export interface BenchmarkEnvironmentScore {
+  readonly stageId: string;
+  readonly cases: number;
+  readonly completedCases: number;
+  readonly episodes: number;
+  readonly meanLearningSignal: number | null;
+  readonly recommended: boolean;
+}
+
 export interface BenchmarkSummary {
   readonly name: string;
   readonly file: string;
@@ -36,6 +45,10 @@ export interface BenchmarkSummary {
   /** Worker count every candidate ran with; null for reports written before the probe existed. */
   readonly workers: number | null;
   readonly probe: readonly BenchmarkProbeRow[] | null;
+  readonly environmentCases: number | null;
+  readonly environmentSecondsPerCase: number | null;
+  readonly environmentScores: readonly BenchmarkEnvironmentScore[];
+  readonly recommendedStageIds: readonly string[];
   readonly rows: readonly BenchmarkRow[];
   readonly unreadable: boolean;
 }
@@ -46,6 +59,7 @@ export interface SavedDefaultView {
   readonly savedAt: string;
   readonly benchmark: string | null;
   readonly decision: string;
+  readonly stageIds: readonly string[] | null;
 }
 
 export interface BenchmarkListing {
@@ -71,6 +85,22 @@ export function summarizeBenchmark(file: string, raw: unknown): BenchmarkSummary
     winner: text(data.winner),
     decision: text(data.decision),
     workers: num(data.workers),
+    environmentCases: num((data.config as Record<string, unknown> | undefined)?.environmentCases),
+    environmentSecondsPerCase: num((data.config as Record<string, unknown> | undefined)?.environmentSecondsPerCase),
+    environmentScores: Array.isArray(data.environmentScores)
+      ? data.environmentScores.map((entry): BenchmarkEnvironmentScore => {
+          const score = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
+          return {
+            stageId: text(score.stageId) ?? "unknown",
+            cases: num(score.cases) ?? 0,
+            completedCases: num(score.completedCases) ?? 0,
+            episodes: num(score.episodes) ?? 0,
+            meanLearningSignal: num(score.meanLearningSignal),
+            recommended: bool(score.recommended),
+          };
+        })
+      : [],
+    recommendedStageIds: Array.isArray(data.recommendedStageIds) ? data.recommendedStageIds.filter((id): id is string => typeof id === "string") : [],
     probe: probeEntries
       ? probeEntries.map((entry): BenchmarkProbeRow => {
           const p = (typeof entry === "object" && entry !== null ? entry : {}) as Record<string, unknown>;
@@ -112,6 +142,7 @@ function savedDefaultView(defaults: TrainingDefaults | null): SavedDefaultView |
     savedAt: defaults.savedAt,
     benchmark: defaults.benchmark,
     decision: defaults.decision,
+    stageIds: defaults.stageIds ?? null,
   };
 }
 
@@ -138,7 +169,7 @@ export async function readBenchmarkListing(experimentsDirectory: string, limit =
     try {
       reports.push(summarizeBenchmark(item.full, JSON.parse(await readFile(item.full, "utf8"))));
     } catch {
-      reports.push({ name: path.basename(item.full, ".json"), file: path.basename(item.full), createdAt: null, winner: null, decision: null, workers: null, probe: null, rows: [], unreadable: true });
+      reports.push({ name: path.basename(item.full, ".json"), file: path.basename(item.full), createdAt: null, winner: null, decision: null, workers: null, probe: null, environmentCases: null, environmentSecondsPerCase: null, environmentScores: [], recommendedStageIds: [], rows: [], unreadable: true });
     }
   }
   return { directory, reports, savedDefault };

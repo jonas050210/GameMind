@@ -37,6 +37,8 @@ export interface TrainingRunOptions {
   /** Probability that an eligible progress decision tries an alternative (0 = greedy, the default). Seeded per episode. */
   readonly explorationRate?: number;
   readonly stages?: readonly CurriculumStage[];
+  /** First seed used by a fresh run. Probe runs use disjoint ranges; a resumed run keeps its saved base. */
+  readonly seedBase?: number;
   readonly episodeRunner?: EpisodeRunner;
   /** How often a paused trainer re-reads its control file. */
   readonly pollMs?: number;
@@ -105,7 +107,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function initialState(
-  options: Required<Pick<TrainingRunOptions, "episodesPerStage" | "maxEpisodes">> & { maxMinutes: number | null },
+  options: Required<Pick<TrainingRunOptions, "episodesPerStage" | "maxEpisodes">> & { maxMinutes: number | null; seedBase: number },
   now: string,
 ): TrainingState {
   return {
@@ -118,7 +120,7 @@ function initialState(
     totalEpisodes: 0,
     episodesPerStage: options.episodesPerStage,
     maxEpisodes: options.maxEpisodes,
-    seedBase: TRAINING_SEED_BASE,
+    seedBase: options.seedBase,
     startedAt: now,
     updatedAt: now,
     pid: process.pid,
@@ -207,10 +209,10 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
         stopReason: null,
         updatedAt: now().toISOString(),
       }
-    : initialState({ episodesPerStage, maxEpisodes, maxMinutes }, now().toISOString());
+    : initialState({ episodesPerStage, maxEpisodes, maxMinutes, seedBase: options.seedBase ?? TRAINING_SEED_BASE }, now().toISOString());
   state.stageIds = stages.map((stage) => stage.id);
   state.explorationRate = options.explorationRate ?? 0;
-  if (options.evaluationSeedCount !== undefined) assertSeedSplit(options.evaluationSeedCount, maxEpisodes);
+  if (options.evaluationSeedCount !== undefined) assertSeedSplit(options.evaluationSeedCount, maxEpisodes, state.seedBase);
   await writeControlCommand(paths, "run");
   await persist(paths, state, now);
 
@@ -324,7 +326,7 @@ async function runTrainingLocked(options: TrainingRunOptions): Promise<TrainingS
       for (let offset = 0; offset < size; offset += 1) {
         const index = state.totalEpisodes + offset;
         const scenarioId = stage.scenarioIds[(state.stageEpisodes + offset) % stage.scenarioIds.length]!;
-        const seed = trainingSeed(index);
+        const seed = trainingSeed(index, state.seedBase);
         jobs.push({
           index,
           stageId: stage.id,

@@ -323,7 +323,11 @@ export class TrainingManager implements TrainingControl {
     // Priority: what this start asks for, then the rate the run was collecting with, then the saved benchmark default.
     args.push("--explore", String(options.explorationRate ?? (options.fresh ? undefined : current?.explorationRate) ?? saved?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE));
     args.push("--workers", String(saved?.workers ?? 1));
-    if (options.stageIds !== undefined) args.push("--stages", options.stageIds.join(","));
+    const defaultStageIds = !options.fresh && current
+      ? (current.stageIds ?? TRAINING_STAGES.map((stage) => stage.id))
+      : saved?.stageIds;
+    const selectedStageIds = options.stageIds ?? defaultStageIds;
+    if (selectedStageIds?.length) args.push("--stages", selectedStageIds.join(","));
     await writeControlCommand(this.paths, "run");
     this.launchError = null;
     const child = this.spawnCli(args, this.paths.log);
@@ -492,7 +496,10 @@ export class TrainingManager implements TrainingControl {
   }
 
   async snapshot(): Promise<ControlCenterTraining> {
-    const state = await this.readState();
+    const [state, savedDefaults] = await Promise.all([
+      this.readState(),
+      this.options.defaultsFile ? readTrainingDefaults(this.options.defaultsFile).catch(() => null) : Promise.resolve(null),
+    ]);
     const processAlive = state ? this.isTrainingActive(state) : false;
     const evaluating = this.evaluator !== null && this.evaluator.exitCode === null;
     let status: ControlCenterTraining["status"] = "idle";
@@ -566,7 +573,8 @@ export class TrainingManager implements TrainingControl {
       availableStages: TRAINING_STAGES.map((entry) => ({ id: entry.id, label: entry.label, scenarioCount: entry.scenarioIds.length, minEpisodes: entry.minEpisodes })),
       stageIds: state?.stageIds ?? null,
       explorationRate: state?.explorationRate ?? null,
-      defaultExplorationRate: DEFAULT_TRAINING_EXPLORATION_RATE,
+      defaultExplorationRate: savedDefaults?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE,
+      defaultStageIds: savedDefaults?.stageIds ?? null,
       lock: (() => {
         const holder = readTrainingLock(this.options.root);
         return holder && holder.alive ? { pid: holder.pid, kind: holder.kind, startedAt: holder.startedAt, alive: holder.alive } : null;

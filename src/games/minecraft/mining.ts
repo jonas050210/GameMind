@@ -58,6 +58,21 @@ export const minecraftMiningRequirements: Readonly<Record<MineableMinecraftBlock
   deepslate_iron_ore: { drop: "raw_iron", minPickaxeTier: 2, requiresPickaxe: true, baseSeconds: 16, usefulFor: ["tools", "armor"] },
 };
 
+/** Unique, explicit item drops produced by the mining allowlist; pickup remains finite and never accepts arbitrary names. */
+export const minecraftMiningDropNames = [
+  "dirt",
+  "sand",
+  "gravel",
+  "cobblestone",
+  "granite",
+  "andesite",
+  "diorite",
+  "cobbled_deepslate",
+  "coal",
+  "raw_copper",
+  "raw_iron",
+] as const;
+
 /** Blocks that may be placed from inventory by the shelter skill. */
 export const minecraftPlaceableBlockNames = [
   "dirt",

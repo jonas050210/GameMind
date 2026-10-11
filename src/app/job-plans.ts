@@ -1,3 +1,4 @@
+import { TRAINING_STAGES } from "../training/curriculum.js";
 import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { parseTapSummary, readLiveReportSummary, type JobSpec } from "./jobs.js";
@@ -90,26 +91,48 @@ export function planOfflineEval(context: PlanContext, options: EvalPlanOptions =
 export interface BenchmarkPlanOptions {
   /** Report name; letters, digits, dot, underscore and dash. Defaults to a timestamp. */
   readonly name?: string;
+  /** Number of environment training cases, 1–256. */
+  readonly environmentCases?: number;
+  /** Active seconds spent training in each isolated environment case. */
+  readonly environmentSecondsPerCase?: number;
+  /** Probe worker counts 1..N, where N is 1..8. */
+  readonly workerLimit?: number;
+  /** Curriculum stages used for the environment sweep and candidate comparisons. */
+  readonly stageIds?: readonly string[];
   readonly now?: Date;
 }
 
 /**
- * The exploration-rate benchmark on the offline simulator (`npm run train:benchmark`), started from the Control Center.
- * It writes into the data directory the Training tab reads from, and never overwrites an earlier report: the CLI refuses
- * an existing name, so an invalid or taken name is reported before anything starts.
+ * Headless worker/environment/exploration benchmark on the offline simulator, started only by an explicit operator
+ * command. It writes into the data directory the Training tab reads and never overwrites an earlier report.
  */
 export function planBenchmark(context: PlanContext, options: BenchmarkPlanOptions = {}): JobSpec {
   const cli = tsxCli(context.root);
   const stamp = (options.now ?? new Date()).toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "-");
   const name = options.name ?? `gui-${stamp}`;
   if (!/^[A-Za-z0-9._-]{1,60}$/.test(name)) throw new JobPlanError("INVALID_OPTION", "The benchmark name may only contain letters, digits, dots, underscores and dashes (max 60).");
+  const environmentCases = options.environmentCases ?? TRAINING_STAGES.reduce((sum, stage) => sum + stage.scenarioIds.length, 0);
+  if (!Number.isInteger(environmentCases) || environmentCases < 1 || environmentCases > 256) throw new JobPlanError("INVALID_OPTION", "Environment cases must be a whole number from 1 through 256.");
+  const environmentSecondsPerCase = options.environmentSecondsPerCase ?? 20;
+  if (!Number.isFinite(environmentSecondsPerCase) || environmentSecondsPerCase < 1 || environmentSecondsPerCase > 600) throw new JobPlanError("INVALID_OPTION", "Seconds per environment case must be a number from 1 through 600.");
+  const workerLimit = options.workerLimit ?? 4;
+  if (!Number.isInteger(workerLimit) || workerLimit < 1 || workerLimit > 8) throw new JobPlanError("INVALID_OPTION", "The worker probe limit must be a whole number from 1 through 8.");
+  const stageIds = options.stageIds ?? TRAINING_STAGES.map((stage) => stage.id);
+  const knownStages = new Set(TRAINING_STAGES.map((stage) => stage.id));
+  const unknown = stageIds.filter((id) => !knownStages.has(id));
+  if (stageIds.length === 0 || unknown.length > 0 || new Set(stageIds).size !== stageIds.length) {
+    throw new JobPlanError("INVALID_OPTION", stageIds.length === 0 ? "Choose at least one curriculum stage." : `Curriculum stage selection is invalid${unknown.length ? `: ${unknown.join(", ")}` : "."}`);
+  }
   const experiments = path.join(context.dataDirectory, "experiments");
   if (existsSync(path.join(experiments, "benchmarks", `${name}.json`))) {
     throw new JobPlanError("INVALID_OPTION", `A benchmark named '${name}' already exists. Choose another name; earlier benchmarks are never overwritten.`);
   }
+  const workerCounts = Array.from({ length: workerLimit }, (_, index) => String(index + 1)).join(",");
+  const minimumTimeoutMs = 6 * 60 * 60_000;
+  const timeoutMs = Math.max(minimumTimeoutMs, environmentCases * environmentSecondsPerCase * 1000 + 4 * 60 * 60_000);
   return {
     kind: "benchmark",
-    label: `Exploration-rate benchmark (${name})`,
+    label: `Offline worker/environment benchmark (${environmentCases} cases, ${environmentSecondsPerCase} s each)`,
     source: "offline",
     command: process.execPath,
     args: [
@@ -121,12 +144,20 @@ export function planBenchmark(context: PlanContext, options: BenchmarkPlanOption
       experiments,
       "--defaults-file",
       path.join(context.dataDirectory, "training-defaults.json"),
+      "--environment-cases",
+      String(environmentCases),
+      "--environment-seconds",
+      String(environmentSecondsPerCase),
+      "--probe-workers",
+      workerCounts,
+      "--stages",
+      stageIds.join(","),
     ],
     cwd: context.root,
-    // Four candidates, each a full training run plus its held-out evaluation: allow several hours.
-    timeoutMs: 6 * 60 * 60_000,
-    display: `tsx src/training/benchmark-cli.ts --name ${name}`,
-    meta: { name, world: "simulated" },
+    // Give long environment sweeps enough room plus four hours for worker probing, candidate training and held-out evaluation.
+    timeoutMs,
+    display: `tsx src/training/benchmark-cli.ts --name ${name} --environment-cases ${environmentCases} --environment-seconds ${environmentSecondsPerCase} --probe-workers ${workerCounts}`,
+    meta: { name, world: "simulated", environmentCases, environmentSecondsPerCase, workerLimit, stageIds: stageIds.join(",") },
     summarise: () => ({ kind: "benchmark", reportPath: relative(context.root, path.join(experiments, "benchmarks", `${name}.json`)) }),
   };
 }

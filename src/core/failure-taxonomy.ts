@@ -54,7 +54,6 @@ const NOT_RETRYABLE_CODES: ReadonlySet<string> = new Set([
   "TASK_BLOCKED_DIMENSION",
   "TASK_BLOCKED_CAPABILITY",
   "TASK_BLOCKED_TOOL",
-  "RUN_ACTION_BUDGET",
   "TASK_ACTION_BUDGET",
   "TASK_DEADLINE",
   "MAX_ACTIONS",
@@ -76,7 +75,6 @@ export const FAILURE_KIND_LABELS: Readonly<Record<FailureKind, string>> = {
 const SAFETY_CODES = new Set([
   "RUN_PAUSED",
   "RUN_TRIPPED",
-  "RUN_ACTION_BUDGET",
   "PROTECTED_STATE",
   "POLICY_DISABLED",
   "CAPABILITY_BUDGET",
@@ -88,6 +86,7 @@ const SAFETY_CODES = new Set([
   "DROWNING_RISK",
   "VOID",
   "STALE_OBSERVATION",
+  "SESSION_MISMATCH",
   "CRITICAL_STATE_NO_RECOVERY_SKILL",
   "COMBAT_DISABLED",
   "OBSERVATION_STALE",
@@ -270,7 +269,6 @@ const OWNERS: Readonly<Record<FailureKind, string>> = {
 const LABELS: Readonly<Record<string, string>> = {
   RUN_PAUSED: "paused by an operator",
   RUN_TRIPPED: "safety tripped",
-  RUN_ACTION_BUDGET: "per-run action budget spent",
   STALE_OBSERVATION: "observation too old to act on",
   PRE_ACTION_OBSERVATION_FAILED: "no observation before the action",
   POST_ACTION_OBSERVATION_FAILED: "no observation after the action",
@@ -309,6 +307,7 @@ const LABELS: Readonly<Record<string, string>> = {
   DIMENSION_UNKNOWN: "dimension not reported by the session",
   GAME_MODE_UNKNOWN: "game mode not reported by the session",
   NO_ACTIVE_OBSERVATION: "no observation from the current session yet",
+  SESSION_MISMATCH: "observation belongs to a different session",
 };
 
 /**

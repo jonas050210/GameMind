@@ -46,10 +46,17 @@ export interface AdapterAction {
   readonly input: unknown;
 }
 
+export interface ActionFailure {
+  readonly code: string;
+  readonly message: string;
+}
+
 export interface AdapterActionOutcome {
   readonly confirmed: boolean;
   /** Describes the evidence level, e.g. client-side state or an observed world update. */
   readonly confirmation: string;
+  /** A precise reason when the adapter completed but could not confirm the requested effect. */
+  readonly failure?: ActionFailure;
   readonly details?: Readonly<Record<string, unknown>>;
 }
 
@@ -74,11 +81,6 @@ export interface ActionRequest {
   readonly input: unknown;
   readonly timeoutMs?: number;
   readonly source?: string;
-}
-
-export interface ActionFailure {
-  readonly code: string;
-  readonly message: string;
 }
 
 export interface ActionResult {

@@ -397,8 +397,8 @@ test("operator commands move the safety broker and the adapter, not just the UI"
     assert.equal(fixture.adapter.combatAllowed, false);
     assert.deepEqual((await fixture.snapshots()).safety?.optedInCapabilities, []);
 
-    // The per-run action cap was removed from the product: the command no longer exists, and the snapshot
-    // carries no action ceiling. Safety comes from per-action timeouts, stuck detection and the emergency stop.
+    // The global action cap was removed from the product: the command no longer exists, and the broker policy
+    // carries no cumulative ceiling. Task-specific action/time/stuck limits remain enforced by the runner.
     const budget = await fixture.command("setActionBudget", { maxActions: 40 });
     assert.notEqual(budget.status, 200);
     assert.equal("maxActionsPerRun" in ((await fixture.snapshots()).safety ?? {}), false);
@@ -490,7 +490,7 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
       /POLL_HIDDEN_MS|document\.hidden/.test(bundle.app),
       "polling must back off while the tab is hidden, so an unwatched page costs the agent nothing",
     );
-    assert.ok(clientScript.includes("aria-valuenow"), "the action-budget progress bar must expose its live value");
+    assert.ok(clientScript.includes("aria-valuenow"), "the measurable task progress bar must expose its live value");
     const assets = ["styles.css", "index.html", ...Object.keys(bundle.modules)];
     for (const asset of assets) {
       const response = await fetch(`${base}/${asset}`);
@@ -506,7 +506,11 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     // Every element id the page controller looks up must exist in the served page: the dashboard has no type
     // checker over its DOM, so a control that is renamed in the HTML fails silently at runtime in the browser.
     const declared = new Set([...bundle.html.matchAll(/id="([^"]+)"/g)].map((match) => match[1] ?? ""));
-    const OPTIONAL_IDS = new Set(["theme-toggle"]);
+    const OPTIONAL_IDS = new Set([
+      "theme-toggle",
+      // These controls are generated with the Training manager's curriculum snapshot, not static HTML.
+      "benchmark-start", "benchmark-start-hint", "benchmark-environment-cases", "benchmark-environment-seconds", "benchmark-worker-limit", "benchmark-estimate",
+    ]);
     const lookedUp = [...new Set([...bundle.app.matchAll(/\bel\("([^"]+)"\)/g)].map((match) => match[1] ?? ""))];
     assert.ok(lookedUp.length > 30, "the controller looks its elements up through el(\"id\"), which this check can read");
     assert.deepEqual(

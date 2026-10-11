@@ -438,7 +438,7 @@ export class ActionExecutor<TState = unknown> {
         startedClock,
         failure: raced.value.confirmed
           ? null
-          : {
+          : raced.value.failure ?? {
               code: "ACTION_NOT_CONFIRMED",
               message: "The adapter completed the action but could not confirm its effect.",
             },

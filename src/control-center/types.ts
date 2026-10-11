@@ -571,6 +571,8 @@ export interface ControlCenterTraining {
   readonly explorationRate: number | null;
   /** The default exploration rate offered for a new run. */
   readonly defaultExplorationRate: number;
+  /** Curriculum stages recommended by the most recent environment benchmark, or null (all stages). */
+  readonly defaultStageIds?: readonly string[] | null;
   /** Who holds this directory's lock, if anyone. */
   readonly lock: { readonly pid: number; readonly kind: "train" | "evaluate"; readonly startedAt: string; readonly alive: boolean } | null;
   readonly lastError: string | null;
@@ -751,7 +753,13 @@ export interface ControlCenterCommands {
   panic?(): ControlCommandResult | Promise<ControlCommandResult>;
   /** Starts the offline Docker test server in the background; poll the `testServer` query for its state. */
   /** Runs the exploration-rate benchmark as a cancellable job; results appear in the Training tab. */
-  runBenchmark?(payload?: { readonly name?: string }): ControlCommandResult | Promise<ControlCommandResult>;
+  runBenchmark?(payload?: {
+    readonly name?: string;
+    readonly environmentCases?: number;
+    readonly environmentSecondsPerCase?: number;
+    readonly workerLimit?: number;
+    readonly stageIds?: readonly string[];
+  }): ControlCommandResult | Promise<ControlCommandResult>;
   startTestServer?(): ControlCommandResult | Promise<ControlCommandResult>;
   stopTestServer?(): ControlCommandResult | Promise<ControlCommandResult>;
   /** A plain TCP check that host:port accepts connections. Read-only; it does not connect the bot. */

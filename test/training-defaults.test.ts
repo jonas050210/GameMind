@@ -29,6 +29,9 @@ test("no saved default reads as null; a saved one reads back unchanged", async (
     assert.equal(await readTrainingDefaults(path), null);
     await saveTrainingDefaults(path, defaults());
     assert.deepEqual(await readTrainingDefaults(path), defaults());
+    const benchmarkDefault = defaults({ stageIds: ["food", "tools-and-shelter"] });
+    await saveTrainingDefaults(path, benchmarkDefault);
+    assert.deepEqual(await readTrainingDefaults(path), benchmarkDefault, "benchmark-selected curriculum stages round-trip alongside worker and exploration defaults");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

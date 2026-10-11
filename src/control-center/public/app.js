@@ -280,6 +280,8 @@ export function boot(env = {}) {
       setAttr(tab, "aria-selected", String(selected));
       tab.tabIndex = selected ? 0 : -1;
     }
+    const currentTab = document.getElementById("tools-current-tab");
+    if (currentTab) setText(currentTab, el(`tab-${ui.tab}`).textContent?.trim() ?? "Overview");
     setAttr(el("roadmap-toggle-closed"), "aria-pressed", String(ui.roadmapShowClosed));
     setText(el("roadmap-toggle-closed"), ui.roadmapShowClosed ? "Hide closed items" : "Show closed items");
   }
@@ -422,7 +424,8 @@ export function boot(env = {}) {
     // Curriculum stages: offered exactly as the runner defines them.
     const stages = training?.availableStages ?? [];
     const box = el("training-stages");
-    const stageKey = JSON.stringify(stages.map((stage) => stage.id));
+    const defaultStageIds = training?.defaultStageIds ?? null;
+    const stageKey = JSON.stringify({ ids: stages.map((stage) => stage.id), defaults: defaultStageIds });
     if (box.__stageKey !== stageKey) {
       while (box.firstChild) box.removeChild(box.firstChild);
       for (const stage of stages) {
@@ -431,7 +434,7 @@ export function boot(env = {}) {
         const input = document.createElement("input");
         input.type = "checkbox";
         input.value = stage.id;
-        input.checked = true;
+        input.checked = defaultStageIds ? defaultStageIds.includes(stage.id) : true;
         input.id = `training-stage-${stage.id}`;
         const text = document.createElement("span");
         text.textContent = `${stage.label} (${fmtNumber(stage.scenarioCount)} scenarios, at least ${fmtNumber(stage.minEpisodes)} episodes)`;
@@ -537,12 +540,43 @@ export function boot(env = {}) {
     box.__built = true;
   }
 
+  function syncBenchmarkForm(ctx) {
+    const form = document.getElementById("benchmark-form");
+    if (!form) return;
+    const training = ctx.snapshot?.training;
+    const activeJob = (ctx.snapshot?.jobs?.items ?? []).some((job) => job.state === "running");
+    const trainingBusy = training?.processAlive === true || ["running", "paused", "evaluating"].includes(training?.status ?? "");
+    const disabled = ctx.lost || !training || trainingBusy || activeJob;
+    const reason = ctx.lost
+      ? "GameMind is out of contact."
+      : !training
+        ? "Offline training is unavailable in this run."
+        : trainingBusy
+          ? "Wait for training or evaluation to finish before benchmarking."
+          : activeJob
+            ? "Another offline job is running. Wait for it to finish before benchmarking."
+            : "No Minecraft server is used; only the built-in simulator runs, without rendering.";
+    for (const control of [...form.querySelectorAll("input"), ...form.querySelectorAll("select")]) control.disabled = disabled;
+    el("benchmark-start").disabled = disabled;
+    setText(el("benchmark-start-hint"), reason);
+    const cases = Number(el("benchmark-environment-cases").value || 0);
+    const seconds = Number(el("benchmark-environment-seconds").value || 0);
+    const workerLimit = Number(el("benchmark-worker-limit").value || 1);
+    const environmentSeconds = Math.max(0, cases * seconds);
+    const workerSeconds = Math.max(0, workerLimit * 20);
+    setText(
+      el("benchmark-estimate"),
+      `${cases} environment case(s) × ${seconds} s ≈ ${fmtDuration(environmentSeconds * 1000)}; worker probe up to ${workerLimit} × 20 s ≈ ${fmtDuration(workerSeconds * 1000)}. Candidate training and held-out comparisons add more time. 256 × 20 s is about 85 minutes.`,
+    );
+  }
+
   function syncForms(ctx) {
     syncEventForm();
     if (!ctx.snapshot) return;
     syncConnectForm(ctx);
     syncTaskForm(ctx);
     syncTrainingForm(ctx);
+    syncBenchmarkForm(ctx);
     syncEvalForm(ctx);
     syncLiveForm(ctx);
     syncSeedForm(ctx);
@@ -596,6 +630,8 @@ export function boot(env = {}) {
     if (!TABS.includes(id)) return;
     const changed = ui.tab !== id;
     ui.tab = id;
+    const navigation = document.getElementById("tools-navigation");
+    if (navigation && !focus) navigation.open = false;
     if (updateHash && win.location && win.location.hash !== `#/${id}`) win.location.hash = `#/${id}`;
     render();
     if (focus) el(`tab-${id}`).focus?.();
@@ -739,6 +775,7 @@ export function boot(env = {}) {
   }
 
   function trainingPayload() {
+    const training = store.state.snapshot?.training;
     const fresh = el("training-mode-fresh").checked;
     const folder = trainingFolder();
     const payload = { directory: folder, fresh, confirmFresh: fresh && el("training-confirm-fresh").checked };
@@ -761,9 +798,23 @@ export function boot(env = {}) {
     const editable = stages.length > 0 && !el(`training-stage-${stages[0].id}`).disabled;
     if (editable) {
       if (chosen.length === 0) return { error: "Choose at least one curriculum stage." };
-      if (chosen.length !== stages.length) payload.stageIds = chosen;
+      const defaultIds = training?.defaultStageIds ?? stages.map((stage) => stage.id);
+      if (chosen.length !== defaultIds.length || chosen.some((id, index) => id !== defaultIds[index])) payload.stageIds = chosen;
     }
     return payload;
+  }
+
+  function benchmarkPayload() {
+    const cases = numberOrUndefined("benchmark-environment-cases");
+    const seconds = numberOrUndefined("benchmark-environment-seconds");
+    const workerLimit = numberOrUndefined("benchmark-worker-limit");
+    if (cases === undefined || !Number.isInteger(cases) || cases < 1 || cases > 256) return { error: "Environment cases must be a whole number from 1 through 256." };
+    if (seconds === undefined || !Number.isInteger(seconds) || seconds < 1 || seconds > 600) return { error: "Seconds per environment must be a whole number from 1 through 600." };
+    if (workerLimit === undefined || !Number.isInteger(workerLimit) || workerLimit < 1 || workerLimit > 8) return { error: "Probe workers must be a whole number from 1 through 8." };
+    const stages = store.state.snapshot?.training?.availableStages ?? [];
+    const stageIds = stages.filter((stage) => el(`benchmark-stage-${stage.id}`).checked).map((stage) => stage.id);
+    if (stageIds.length === 0) return { error: "Choose at least one curriculum stage to probe." };
+    return { environmentCases: cases, environmentSecondsPerCase: seconds, workerLimit, stageIds };
   }
 
   function livePayload() {
@@ -833,6 +884,16 @@ export function boot(env = {}) {
         if (!payload.error && (payload.allowDig || payload.allowCombat) && !ask(`This lets a verification bot ${[payload.allowDig ? "dig a block" : null, payload.allowCombat ? "attack a hostile mob" : null].filter(Boolean).join(" and ")} on ${liveTarget()}. This changes the world on that server. Continue?`)) return;
         return send("runLiveVerification", payload);
       }
+      case "benchmark-form": {
+        const payload = benchmarkPayload();
+        if (payload.error) return send("runBenchmark", { error: payload.error });
+        const environmentSeconds = payload.environmentCases * payload.environmentSecondsPerCase;
+        const workerSeconds = payload.workerLimit * 20;
+        const estimate = fmtDuration((environmentSeconds + workerSeconds) * 1000);
+        const confirmation = `Start this headless offline benchmark? The environment sweep is about ${estimate} for ${payload.environmentCases} case(s) at ${payload.environmentSecondsPerCase} seconds each, plus candidate training and held-out comparisons. It uses only the built-in simulator, does not start automatically after training, and never changes the live policy.`;
+        if (!ask(confirmation)) return;
+        return send("runBenchmark", payload);
+      }
       case "seed-form":
         el("seed-input").__edited = false;
         return send("setWorldSeed", el("seed-input").value.trim() === "" ? null : el("seed-input").value.trim());
@@ -869,7 +930,8 @@ export function boot(env = {}) {
     } else if (id === "training-mode-resume" || id === "training-mode-fresh") {
       ui.trainingMode = el("training-mode-fresh").checked ? "fresh" : "resume";
       render();
-    } else if (id.startsWith("event-") && id !== "event-q") void refreshEvents();
+    } else if (id.startsWith("benchmark-")) render();
+    else if (id.startsWith("event-") && id !== "event-q") void refreshEvents();
   }
 
   function onInput(event) {
@@ -888,6 +950,7 @@ export function boot(env = {}) {
       }, 300);
       render();
     } else if (id === "seed-input") event.target.__edited = true;
+    else if (id.startsWith("benchmark-")) render();
     else if (id.startsWith("live-")) render();
   }
 

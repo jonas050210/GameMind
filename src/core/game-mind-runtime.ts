@@ -7,7 +7,7 @@ import { WorldModel } from "./world-model.js";
 
 export type SafetyWorldContextInput = Omit<
   import("./safety-broker.js").SafetyWorldContext,
-  "sequence"
+  "sequence" | "sessionId"
 >;
 
 export interface SafetyObservationMeta {
@@ -80,8 +80,14 @@ export class GameMindRuntime<TState = unknown> {
     });
     this.unsubscribeStatus = adapter.onStatusChange((change) => {
       if (change.status === "disconnected" || change.status === "failed") {
-        this.sessionValue = null;
-        this.worldModel.clear();
+        const activeSessionId = this.sessionValue?.id ?? null;
+        const appliesToCurrentSession =
+          activeSessionId === null || change.sessionId === null || change.sessionId === activeSessionId;
+        if (appliesToCurrentSession) {
+          this.sessionValue = null;
+          this.worldModel.clear();
+          this.safety?.endSession(change.sessionId ?? activeSessionId);
+        }
       }
       void this.trace
         .record({
@@ -120,6 +126,7 @@ export class GameMindRuntime<TState = unknown> {
     const session = await this.adapter.connect();
     this.sessionValue = session;
     this.worldModel.beginSession(session);
+    this.safety?.beginSession(session.id);
     await this.trace.record({
       eventType: "session.started",
       gameId: session.gameId,
@@ -149,20 +156,26 @@ export class GameMindRuntime<TState = unknown> {
   }
 
   /**
-   * Returns the world the runtime already holds when it is young enough to act on, and observes only when
-   * it is not. Read-only surfaces use this so a viewer refresh never triggers a game interaction, while a
-   * stale world is still repaired rather than shown as if it were current.
+   * Returns the current session's world when young enough, otherwise attempts a fresh observation. A failed
+   * refresh returns null (the last value remains available through `currentWorldState` for stale UI display),
+   * so a decision loop cannot mistake a cached observation for fresh action input.
    */
   async observeIfStale(maxAgeMs: number): Promise<WorldState<TState> | null> {
     const current = this.worldModel.current;
-    const freshEnough = current !== null && Date.now() - (Date.parse(current.observedAt) || 0) <= maxAgeMs;
-    if (freshEnough && this.adapter.status === "connected") return current;
-    if (this.adapter.status !== "connected" || !this.sessionValue) return current;
+    const session = this.sessionValue;
+    if (this.adapter.status !== "connected" || !session) return null;
+    const observedAtMs = current ? Date.parse(current.observedAt) : Number.NaN;
+    const freshEnough =
+      current !== null &&
+      current.sessionId === session.id &&
+      Number.isFinite(observedAtMs) &&
+      Date.now() - observedAtMs <= maxAgeMs;
+    if (freshEnough) return current;
     try {
       return await this.observe();
     } catch (error) {
-      this.logger.warn({ err: error }, "Refresh observation failed; the runtime keeps its last world state");
-      return this.worldModel.current;
+      this.logger.warn({ err: error }, "Refresh observation failed; the cached world remains stale");
+      return null;
     }
   }
 
@@ -216,6 +229,7 @@ export class GameMindRuntime<TState = unknown> {
           sequence: state.sequence,
           observedAtMs: Date.parse(state.observedAt) || Date.now(),
         }),
+        sessionId: state.sessionId,
         sequence: state.sequence,
       });
     } catch (error) {
@@ -267,6 +281,7 @@ export class GameMindRuntime<TState = unknown> {
     try {
       await this.adapter.disconnect(reason);
     } finally {
+      this.safety?.endSession(session?.id ?? this.adapter.session?.id ?? undefined);
       this.sessionValue = null;
       this.worldModel.clear();
       this.unsubscribeStatus();

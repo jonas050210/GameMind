@@ -78,15 +78,15 @@ export function curriculumScenarios(stages: readonly CurriculumStage[] = TRAININ
 }
 
 /** Deterministic training seed for the n-th training episode. Monotonic, so a resumed run never repeats one. */
-export function trainingSeed(episodeIndex: number): number {
-  return TRAINING_SEED_BASE + episodeIndex;
+export function trainingSeed(episodeIndex: number, seedBase = TRAINING_SEED_BASE): number {
+  return seedBase + episodeIndex;
 }
 
 /** Throws when any training seed in the first `episodes` episodes collides with an evaluation seed. */
-export function assertSeedSplit(evaluationSeedCount: number, episodes: number): void {
+export function assertSeedSplit(evaluationSeedCount: number, episodes: number, seedBase = TRAINING_SEED_BASE): void {
   const evaluation = new Set(evaluationSeeds(evaluationSeedCount));
   for (let index = 0; index < episodes; index += 1) {
-    const seed = trainingSeed(index);
+    const seed = trainingSeed(index, seedBase);
     if (evaluation.has(seed)) throw new Error(`Training seed ${seed} collides with an evaluation seed.`);
   }
 }

@@ -404,9 +404,12 @@ export class CompanionController {
     }
     this.executing = true;
     try {
-      await this.options.runtime.observeIfStale(1_000);
-      const world = this.options.runtime.currentWorldState;
-      if (!world || world.state.player.alive === false) {
+      const world = await this.options.runtime.observeIfStale(1_000);
+      if (!world) {
+        this.lastOutcome = "Waiting: no fresh world observation is available, so companion actions are paused.";
+        return;
+      }
+      if (world.state.player.alive === false) {
         this.lastOutcome = "Waiting for a confirmed live player state after death or respawn.";
         return;
       }
@@ -515,8 +518,7 @@ export class CompanionController {
           const result = await this.options.skills.run("minecraft.navigate", { x: destination.x, y: destination.y, z: destination.z, range: 1 }, { source: `companion:${this.mode}${this.activeHomepoint ? `:${this.activeHomepoint}` : ""}` });
           this.lastOutcome = `Return ${result.action.status}; ${result.action.confirmation ?? result.action.failure?.message ?? "unverified"}.`;
           if (this.mode === "return" && result.action.status === "succeeded" && result.action.confirmed) {
-            await this.options.runtime.observeIfStale(0);
-            const verifiedWorld = this.options.runtime.currentWorldState;
+            const verifiedWorld = await this.options.runtime.observeIfStale(0);
             const verifiedDistance = verifiedWorld ? measuredDistance(verifiedWorld.state.player.position, destination) : Number.POSITIVE_INFINITY;
             if (verifiedWorld && verifiedDistance <= 2.5 && (!destination.dimension || verifiedWorld.state.player.dimension === destination.dimension)) {
               const name = this.activeHomepoint ?? "default";

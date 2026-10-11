@@ -234,12 +234,12 @@ export function evaluationScenarios(): EvaluationScenario[] {
     {
       id: "replanning-removed-log",
       family: "replanning",
-      description: "The nearest log is removed by another player while the agent walks to it. The agent must replan to the farther tree.",
+      description: "The nearest log is removed by another player while the agent walks to it. A farther log is already within the wide scan, so the agent must replan directly rather than spend exploration legs.",
       expectation: "success",
-      minSuccessRate: 0.85,
+      minSuccessRate: 0.95,
       world: (seed) => {
         const near = ringPoint(seed, 10, 8, 10);
-        const far = ringPoint(seed, 11, 20, 24);
+        const far = ringPoint(seed, 11, 18, 20);
         return simulatedWorld({
           seed,
           placements: [logAt(near.x, near.z), logAt(far.x, far.z)],
@@ -516,9 +516,9 @@ export function evaluationScenarios(): EvaluationScenario[] {
     {
       id: "crafting-chain-stone-pickaxe",
       family: "crafting",
-      description: "Agent has no tools in a world with trees and stone. Must chain gather wood → craft pickaxe → mine stone, demonstrating multi-step progression.",
-      expectation: "safe",
-      minSuccessRate: 0,
+      description: "Agent has no tools in a world with trees and stone. Must chain gather wood → craft a table and pickaxe → mine stone; success is gated by the task target, not safety alone.",
+      expectation: "success",
+      minSuccessRate: 0.95,
       world: (seed) =>
         simulatedWorld({
           seed,
