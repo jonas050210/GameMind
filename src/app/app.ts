@@ -758,17 +758,24 @@ export class GameMindApp {
       raw = null;
     }
     if (raw !== null) {
-      let existing: { pid?: unknown; url?: unknown } | null = null;
+      let existing: { pid?: unknown; url?: unknown; platform?: unknown } | null = null;
       try {
         const parsed = JSON.parse(raw) as unknown;
         if (parsed && typeof parsed === "object" && typeof (parsed as { pid?: unknown }).pid === "number") {
-          existing = parsed as { pid: number; url?: unknown };
+          existing = parsed as { pid: number; url?: unknown; platform?: unknown };
         }
       } catch {
         existing = null;
       }
       if (!existing) throw new InstanceLockUnreadableError(this.lockFile, "it is not the expected JSON object");
       const pid = existing.pid as number;
+      const foreign = typeof existing.platform === "string" && existing.platform !== "" && existing.platform !== process.platform;
+      if (foreign && pid !== process.pid) {
+        // The lock was written on the other side of the WSL/Windows boundary; its pid lives in a different
+        // process table, so this process can neither confirm nor deny it. Refusing to start is the only answer
+        // that cannot end in two bots on one account.
+        throw new InstanceLockUnreadableError(this.lockFile, `it was written on '${String(existing.platform)}'`);
+      }
       const alive = pid === process.pid ? HELD_LOCKS.has(this.lockFile) : isProcessAlive(pid);
       if (alive) throw new AppAlreadyRunningError(typeof existing.url === "string" ? existing.url : null, pid);
     }
@@ -789,7 +796,9 @@ export class GameMindApp {
   private writeInstanceLockFile(body: Record<string, unknown>): void {
     if (!this.lockFile) return;
     const temporary = `${this.lockFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-    writeFileSync(temporary, `${JSON.stringify(body)}\n`, "utf8");
+    // The platform travels with the lock: a project folder shared between WSL and Windows (a OneDrive desktop,
+    // for instance) can hold a pid from the other process table, where no check on this side means anything.
+    writeFileSync(temporary, `${JSON.stringify({ ...body, platform: process.platform })}\n`, "utf8");
     renameSync(temporary, this.lockFile);
   }
 

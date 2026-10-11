@@ -36,6 +36,8 @@ test("python3 main.py --check validates the environment without starting anythin
 
 test("python3 main.py starts the TypeScript agent and Control Center, relays the READY banner, and stops cleanly on SIGINT", { skip: python === null || process.platform === "win32" ? "needs python3 and POSIX signals" : false, timeout: 90_000 }, async () => {
   const data = await mkdtemp(path.join(tmpdir(), "gamemind-launcher-"));
+  // `--data-dir` also moves the lock the launcher looks for, so this start cannot be confused with a GameMind
+  // that happens to be running in the repository itself (which is exactly what `python3 main.py` does).
   const child = spawn(python!, ["main.py", "--simulated", "--no-browser", "--control-port", "0", "--", "--data-dir", data, "--learning-dir", path.join(data, "learning"), "--no-instance-lock"], {
     cwd: root,
     env: { ...process.env, LOG_LEVEL: "error" },

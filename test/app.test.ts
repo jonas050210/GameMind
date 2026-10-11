@@ -250,6 +250,39 @@ test("a second app in the same project is refused with the first one's address; 
   }
 });
 
+test("a lock written on the other operating system is reported, never judged, and the platform travels with it", async () => {
+  // A project folder shared between WSL and Windows (a OneDrive desktop, for instance) can hold the lock of a
+  // run on the other side. Its pid belongs to a different process table, so "is that pid alive here?" decides
+  // nothing; the answer that cannot end in two bots on one account is to stop and name the file.
+  const directory = await mkdtemp(path.join(tmpdir(), "gamemind-app-lock-foreign-"));
+  const lockFile = path.join(directory, "data", "run", "gamemind.lock.json");
+  await mkdir(path.dirname(lockFile), { recursive: true });
+  try {
+    const other = process.platform === "win32" ? "linux" : "win32";
+    await writeFile(lockFile, JSON.stringify({ pid: 2_147_000_000, url: null, platform: other }));
+    await assert.rejects(
+      startApp({ instanceLock: true, directory }),
+      (error: unknown) => {
+        assert.ok(error instanceof InstanceLockUnreadableError);
+        assert.match(error.message, new RegExp(`written on '${other}'`));
+        assert.match(error.message, /delete that file/);
+        return true;
+      },
+    );
+    assert.ok((await readFile(lockFile, "utf8")).includes(other), "the foreign lock is left alone for the operator");
+
+    // The same lock written by this platform is judged by its pid as before.
+    await writeFile(lockFile, JSON.stringify({ pid: 2_147_000_000, url: null, platform: process.platform }));
+    const app = await startApp({ instanceLock: true, directory });
+    const written = JSON.parse(await readFile(lockFile, "utf8")) as { pid: number; platform: string };
+    assert.equal(written.pid, process.pid);
+    assert.equal(written.platform, process.platform, "the lock says which process table its pid belongs to");
+    await app.app.shutdown("test complete");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a rejected or impossible connection request leaves no session behind and says why", async () => {
   const fixture = await startApp();
   try {
