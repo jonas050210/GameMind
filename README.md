@@ -269,7 +269,7 @@ The Control Center is the operator surface of a running GameMind. It is served b
 python3 main.py                                   # persistent session + Control Center + browser
 python3 main.py --simulated                       # the same, against the offline simulator
 npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
-npm run ui:demo                                   # simulator + Control Center on all interfaces (sandbox previews)
+npm run ui:demo                                   # simulator + Control Center on all interfaces (sandbox previews; anyone who reaches the port can drive the agent)
 ```
 
 The compact header keeps session state, data source, last-update age, an emergency stop, a language switch (EN/DE) and the theme switch in view. Seven tabs share one polling store:
