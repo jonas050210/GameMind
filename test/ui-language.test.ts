@@ -99,6 +99,45 @@ test("an unknown stored value falls back to English", async () => {
   );
 });
 
+test("the notes the running app writes into the panels are German as well", async () => {
+  // These sentences do not live in the page: the host process writes them (learning explanations, the
+  // training state, world memory). The source scan above cannot see them, so they are pinned here.
+  interface DomNode {
+    readonly nodeType?: number;
+    readonly data?: string;
+    readonly childNodes?: readonly DomNode[];
+  }
+  const allText = (node: DomNode): string => {
+    if (node.nodeType === 3) return node.data ?? "";
+    return (node.childNodes ?? []).map(allText).join(" ");
+  };
+  await withPage(
+    server((snapshot) => {
+      snapshot.session.state = "idle";
+    }),
+    async ({ page }) => {
+      page.click("lang-de");
+      const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const openTab = async (tab: string): Promise<string> => {
+        if (!page.byId("tools-navigation").open) page.click("tools-navigation-summary");
+        page.click(`tab-${tab}`);
+        await settle();
+        await settle();
+        return allText(page.byId(`panel-${tab}`) as unknown as DomNode);
+      };
+      const learning = await openTab("learning");
+      assert.match(learning, /Ein Erfolg ist eine Aktion, die der Adapter bestätigt hat/, "the success definition is German");
+      assert.match(learning, /Der Planer verweigerte die Aktion und nannte den Grund/, "the failure explanation is German");
+      assert.match(learning, /kein gangbares Ziel/, "the failure detail is German");
+      assert.doesNotMatch(learning, /A success is an action the adapter confirmed/);
+      assert.match(await openTab("training"), /Hier ist kein Lauf gespeichert; ein Start beginnt also einen neuen bei Episode 0\./);
+      assert.match(await openTab("memory"), /Das Weltgedächtnis ist das, woran sich der Agent aus Beobachtungen erinnert/);
+      assert.match(await openTab("tasks"), /Die Autonomie hat noch kein Teilziel gewählt\./);
+    },
+    { storedLanguage: "de" },
+  );
+});
+
 // ---- the catalog ---------------------------------------------------------------------------------------------
 
 /** Words German writes the same way; they are deliberately not in the catalog. */
@@ -114,6 +153,7 @@ const IDENTICAL_IN_GERMAN = new Set([
   "Status",
   "Training",
   "Version",
+  "neutral (×1)",
   // filter values that name runtime ids, not interface words
   "any",
   "default",
@@ -123,14 +163,37 @@ const IDENTICAL_IN_GERMAN = new Set([
   "system",
 ]);
 
-/** Interface prose in a module: a letter, four characters or more, and none of the code punctuation. */
-function looksLikeText(value: string): boolean {
-  return value.length >= 4 && /[A-Za-zÄÖÜäöüß]/.test(value) && /^[A-ZÄÖÜ0-9–-]/.test(value) && !/[<>{}\[\]/\\_=;|`~^$*#@%&]/.test(value);
+/** Every string the page can render: a few letters, a space, and none of the code punctuation. */
+function looksLikeProse(value: string): boolean {
+  return value.length >= 6 && value.includes(" ") && /[A-Za-zÄÖÜäöüß]{3}/.test(value) && !/[<>{}\[\]_=|`~^$*#@%&]/.test(value);
 }
 
-/** The same for text nodes in the page itself: a label may start lowercase (`info and above`). */
-function looksLikeLabel(value: string): boolean {
-  return value.length >= 4 && /[A-Za-zÄÖÜäöüß]{2}/.test(value) && !/[<>{}\[\]/\\_=;|`~^$*#@%&]/.test(value);
+/** CSS classes are strings too: `h("p", { class: "muted small" })` must not count as interface text. */
+const NON_TEXT_PROPERTIES = new Set([
+  "class",
+  "className",
+  "id",
+  "payload",
+  "command",
+  "name",
+  "value",
+  "key",
+  "kind",
+  "tone",
+  "role",
+  "type",
+  "href",
+  "src",
+  "rel",
+  "method",
+  "target",
+  "action",
+]);
+
+/** The property or attribute a literal is assigned to (`class: "…"`, `payload="…"`), or null. */
+function assignedTo(context: string): string | null {
+  const match = /([A-Za-z-]+)\s*[:=]\s*["']?$/.exec(context);
+  return match?.[1] ?? null;
 }
 
 function decodeEntities(text: string): string {
@@ -142,8 +205,8 @@ function decodeEntities(text: string): string {
 }
 
 /** Every quoted string in a module, skipping comments, template literals and regex literals. */
-function stringLiterals(source: string): string[] {
-  const out: string[] = [];
+function stringLiterals(source: string): { text: string; before: string }[] {
+  const out: { text: string; before: string }[] = [];
   let previous = "";
   let i = 0;
   while (i < source.length) {
@@ -173,6 +236,7 @@ function stringLiterals(source: string): string[] {
     }
     if (char === '"' || char === "'") {
       const quote = char;
+      const start = i;
       let buffer = "";
       i += 1;
       while (i < source.length) {
@@ -185,7 +249,7 @@ function stringLiterals(source: string): string[] {
         buffer += source[i] ?? "";
         i += 1;
       }
-      out.push(buffer);
+      out.push({ text: buffer, before: source.slice(Math.max(0, start - 48), start) });
       i += 1;
       continue;
     }
@@ -215,19 +279,38 @@ async function catalogGaps(catalog: Record<string, string>): Promise<string[]> {
   const candidates = new Set<string>();
   for (const match of withoutCode.matchAll(/>([^<>]+)</g)) {
     const text = decodeEntities(match[1] ?? "").trim();
-    if (looksLikeLabel(text)) candidates.add(text);
+    if (looksLikeProse(text)) candidates.add(text);
   }
   for (const match of withoutCode.matchAll(/\b(title|aria-label|placeholder|alt)="([^"]*)"/g)) {
     const text = decodeEntities(match[2] ?? "").trim();
-    if (looksLikeLabel(text)) candidates.add(text);
+    if (looksLikeProse(text)) candidates.add(text);
   }
-  const modules = await readdir(PUBLIC_DIRECTORY, { recursive: true });
-  for (const relative of modules.filter((name) => name.endsWith(".js") && !name.includes("i18n"))) {
-    const source = await readFile(path.join(PUBLIC_DIRECTORY, relative), "utf8");
-    for (const text of stringLiterals(source)) {
+  const modules = (await readdir(PUBLIC_DIRECTORY, { recursive: true })).filter((name) => name.endsWith(".js") && !name.includes("i18n"));
+  const perModule = new Map<string, { text: string; before: string }[]>();
+  for (const relative of modules) {
+    perModule.set(relative, stringLiterals(await readFile(path.join(PUBLIC_DIRECTORY, relative), "utf8")));
+  }
+  // Words that only ever appear in a `class` binding are CSS, not text: a ternary that picks a class out
+  // of them (`{ class: "muted small" }` / `"small"`) must not be taken for an interface label.
+  const classWords = new Set<string>();
+  for (const entries of perModule.values()) {
+    for (const { text, before } of entries) {
+      const key = assignedTo(before);
+      if (key !== "class" && key !== "className") continue;
+      for (const word of text.split(/\s+/)) if (word !== "") classWords.add(word);
+    }
+  }
+  for (const entries of perModule.values()) {
+    for (const { text, before } of entries) {
       // The lookup trims, so the catalog is keyed by the trimmed text.
       const trimmed = text.trim();
-      if (trimmed.includes(" ") && looksLikeText(trimmed)) candidates.add(trimmed);
+      if (!looksLikeProse(trimmed)) continue;
+      const key = assignedTo(before);
+      if (key !== null && NON_TEXT_PROPERTIES.has(key)) continue;
+      // `matchMedia("(prefers-color-scheme: dark)")` is a media query, not text.
+      if (/matchMedia[^(]*\(\s*$/.test(before)) continue;
+      if (trimmed.split(/\s+/).every((word) => classWords.has(word)) && !/[^\w\s-]/.test(trimmed)) continue;
+      candidates.add(trimmed);
     }
   }
   return [...candidates].filter((text) => !(text in catalog) && !IDENTICAL_IN_GERMAN.has(text)).sort();

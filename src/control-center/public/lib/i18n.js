@@ -6,12 +6,17 @@
 // translation calls for plain labels.
 //
 // Sentences built from values (`Updated 3s ago`, `12 seeds, disjoint from training: yes`) cannot be looked up
-// after they were put together, so the call site composes them through `t(template, values)` with the English
-// template and its values. `test/ui-language.test.ts` checks that every template a call site uses has a German
-// entry and that no interface string is left without one.
+// after they were put together, so `PATTERNS` matches the rendered sentence and puts the captured values back
+// in; a captured value that is itself a known sentence is matched once more, never deeper.
 //
-// What is *not* translated, on purpose: anything the runtime produced — skill ids, failure codes, server
-// messages, names, numbers — and code samples. Those are not in the catalog, so they pass through untouched.
+// The catalog also carries the short notes the host process writes into the panels (learning and failure
+// explanations, the training state, world memory), because a reader cannot tell them apart from the page's own
+// text. What is *not* translated, on purpose: the runtime's own catalog (action, skill, scenario and task
+// descriptions and their labels), event-log lines, ids, codes, names and numbers, and code samples. Those are
+// not in the catalog, so they pass through untouched.
+//
+// `test/ui-language.test.ts` fails when an interface string has no German entry, when a pattern is not
+// anchored or would rewrite runtime text, and when a note the host writes stops being German.
 import { GERMAN, PATTERNS } from "./i18n-de.js";
 
 export const LANGUAGES = ["en", "de"];
