@@ -67,15 +67,17 @@ test("collection re-checks the block after walking and gains nothing if it was r
     placements: [logAt(8, 0)],
     schedule: [{ atMs: 500, type: "remove_block", x: 8, y: 64, z: 0 }],
   });
-  const outcome = await act(adapter, "minecraft.collect_block", {
-    x: 8,
-    y: 64,
-    z: 0,
-    blockName: "oak_log",
-    dangerRadius: 6,
-  });
-  assert.equal(outcome.confirmed, false, "a removed log must not be credited");
-  assert.equal(adapter.world.countItem("oak_log"), 0);
+  await assert.rejects(
+    act(adapter, "minecraft.collect_block", {
+      x: 8,
+      y: 64,
+      z: 0,
+      blockName: "oak_log",
+      dangerRadius: 6,
+    }),
+    (error: unknown) => (error as { code?: string }).code === "RESOURCE_TARGET_CHANGED",
+  );
+  assert.equal(adapter.world.countItem("oak_log"), 0, "a removed log must not be credited");
   await adapter.disconnect("test");
 });
 
@@ -89,6 +91,74 @@ test("pickup confirms an inventory gain only when the observed drop exists", asy
   assert.equal(picked.confirmed, true);
   assert.equal(adapter.world.countItem("bread"), 1);
   await adapter.disconnect("test");
+
+  const miningDrop = await connected({ seed: 51, items: [dropAt("cobblestone", 1, 2, 0)] });
+  const cobble = await act(miningDrop, "minecraft.pickup_item", {
+    x: 2,
+    y: 64,
+    z: 0,
+    itemName: "cobblestone",
+    dangerRadius: 6,
+  });
+  assert.equal(cobble.confirmed, true, "task-specific mining drops are valid pickup targets");
+  assert.equal(miningDrop.world.countItem("cobblestone"), 1);
+  await miningDrop.disconnect("test");
+});
+
+test("crafting accepts a nearby table using center-based reach like the planner", async () => {
+  const adapter = await connected({
+    seed: 52,
+    placements: [{ x: -1, y: 64, z: -1, name: "crafting_table" }],
+    player: {
+      x: 2,
+      z: 2,
+      inventory: [
+        { name: "oak_planks", count: 3 },
+        { name: "stick", count: 2 },
+      ],
+    },
+  });
+  const result = await act(adapter, "minecraft.craft_item", {
+    item: "wooden_pickaxe",
+    count: 1,
+    craftingTable: { x: -1, y: 64, z: -1 },
+  });
+  assert.equal(result.confirmed, true, "the table center is within the planner's 4.5-block reach");
+  assert.equal(adapter.world.countItem("wooden_pickaxe"), 1);
+  await adapter.disconnect("test");
+});
+
+test("simulated inventory enforces its stack cap when seeding a world", () => {
+  const definition = simulatedWorld({
+    seed: 100,
+    maxInventoryStacks: 2,
+    player: {
+      inventory: [
+        { name: "dirt", count: 1 },
+        { name: "sand", count: 1 },
+        { name: "gravel", count: 1 },
+      ],
+    },
+  });
+  assert.throws(
+    () => new SimulatedMinecraftWorld(definition),
+    (error: unknown) => (error as { code?: string }).code === "INVENTORY_FULL",
+  );
+});
+
+test("simulated inventory reuses a freed slot instead of assigning duplicate slot 44", () => {
+  const inventory = Array.from({ length: 36 }, (_, index) => ({ name: `test_item_${index}`, count: 1 }));
+  const world = new SimulatedMinecraftWorld(
+    simulatedWorld({ seed: 101, player: { inventory } }),
+  );
+  assert.equal(world.inventory.length, 36);
+  world.removeFromInventory("test_item_0", 1);
+  world.addToInventory("replacement_item", 1);
+
+  const slots = world.inventory.map((stack) => stack.slot);
+  assert.equal(new Set(slots).size, 36, "every occupied inventory stack must have a unique slot");
+  assert.equal(world.inventory.find((stack) => stack.name === "replacement_item")?.slot, 9);
+  assert.equal(world.isInventoryFull(), true);
 });
 
 test("berry harvesting refuses unripe bushes and resets a ripe bush to age 1", async () => {

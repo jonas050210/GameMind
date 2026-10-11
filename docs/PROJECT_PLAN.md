@@ -1,10 +1,10 @@
 # GameMind – Technical Project Plan
 
 - **Status:** Architecture and implementation document. `src/` implements a bounded Minecraft agent loop, a multi-stage decision model, world and experience memory, a safety layer and the browser-based Control Center. There is still no RL and no gradient or model training; live behaviour with Minecraft Java 1.20.4 is untested.
-- **As of:** 10 October 2026 (the fourth-phase status below was added on that date; the earlier phase statuses are kept as they were written, translated from German)
+- **As of:** 11 October 2026 (the original phase statuses are historical; the latest verified corrections are recorded after the fourth phase)
 - **Purpose of this document:** Provide a solid basis for the MVP, for architecture decisions and for later extensions.
 
-> **Scope note:** This document records the target architecture, the safety principles and the phase roadmap; it is not a complete product manual. The current implementation now also includes hierarchical goal selection, recovery and offline evaluation, persistent world memory, learning statistics with a strict promotion gate, and the operations Control Center. The concrete feature set and the measured offline results are also in `README.md`; live behaviour remains unconfirmed.
+> **Scope note:** This document records the target architecture, the safety principles and the phase roadmap; it is not a complete product manual. The current implementation now also includes hierarchical goal selection, recovery and offline evaluation, persistent world memory, learning statistics with a strict promotion gate, the operations Control Center, and a headless worker/environment learning benchmark. The concrete feature set and the measured offline results are also in `README.md`; live behaviour remains unconfirmed.
 
 ### Implementation status of the first phase
 
@@ -52,6 +52,13 @@ Added on 10 October 2026. Everything below was verified **offline only**: unit a
 - **Learning evidence.** One rule decides what an episode says (success, failure or *excluded*); excluded outcomes (a dropped connection, a safety refusal, a game-mode refusal) are never held against a skill. A context needs 8 evidence-bearing attempts before it gets a weight. Simulator and live episodes are kept in separate stores. The state is schema v2 with backups. "Wasted actions" now follows `verified-world-progress.v2`, which counts revealed ground, a measurable approach, healing from a rest and a retreat from a hostile as verified effects; the definition is recorded in the evaluation reports.
 - **Measured, offline.** The offline evaluation is now 26 scenarios × 20 seeds (520 runs): 0 unsafe actions, 0 deaths, 0 contradicted confirmations, every gate passed. On the 260-run held-out set the baseline succeeds in 191 runs (73.46%); an earlier figure of 192 was not reproduced and the reason is unknown. A 24-episode training run changed 10 of 260 choices and no outcome, so the conclusion is `behaviour-changed-no-gain`. **No improvement has been measured and none is claimed**, and the suite has no headroom to show one: the baseline already succeeds in every seed of the 15 success scenarios, and satisfies the 11 safety scenarios. The consecutive-failure limit was measured (2 to 5 give identical results) and stays at 2.
 - **Open.** Live verification of everything above; a look at the page in a real browser; real Windows/WSL behaviour; scenarios in which a choice decides the outcome, so that a learned policy could show a gain; and evidence from a live comparison. One bot per process remains the limit; the Bots tab is laid out as a list so more sessions can be added, but nothing pretends to run several.
+
+### Follow-up corrections (11 October 2026)
+
+- **Action limits:** Removed the global cumulative `maxActionsPerRun` safety cap and its command/error path. Individual task `maxActions`, deadlines, progress checks and stuck recovery remain enforced; action and capability metrics remain observable.
+- **Operator UI:** The Overview now prioritizes live session/task/vitals and essential controls, with connection/world/task detail and secondary activity summaries collapsed or placed behind the relevant tabs.
+- **Headless learning benchmark:** The Training tab exposes an explicit manual action for an offline environment/worker sweep (1–256 cases, 20 seconds per case by default). Environment probes use isolated training-only seed ranges; throughput and early/late reward/success signals inform worker and curriculum-stage recommendations, while held-out evaluation remains the quality gate for exploration-rate defaults. The benchmark never starts automatically after training and never changes the live policy. Training defaults remain backward-compatible and feed new runs.
+- **Verification:** The Control Center page harness covers manual benchmark submission and saved-stage defaults; the focused integration tests and full suite/build are run for this update. Live Minecraft behavior remains unverified.
 
 ## Summary
 

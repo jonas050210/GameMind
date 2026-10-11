@@ -99,7 +99,7 @@ export function compileSelector(selector: string): Predicate {
   return (element) => alternatives.some((predicate) => predicate(element));
 }
 
-const BOOLEAN_REFLECTED = ["hidden", "disabled", "required"] as const;
+const BOOLEAN_REFLECTED = ["hidden", "disabled", "required", "open"] as const;
 const STRING_REFLECTED = ["title", "name", "placeholder", "min", "max", "step", "href", "src", "lang", "role", "htmlFor"] as const;
 
 export class FakeElement {
@@ -622,10 +622,16 @@ export class Page {
         return;
       }
       const element = node as FakeElement;
-      if (element.hasAttribute("hidden")) return;
-      if (["script", "style"].includes(element.tagName.toLowerCase())) return;
+      if (this.isHidden(element)) return;
+      const tag = element.tagName.toLowerCase();
+      if (["script", "style"].includes(tag)) return;
+      if (tag === "details" && !element.hasAttribute("open")) {
+        const summary = element.children.find((child) => child.tagName.toLowerCase() === "summary");
+        if (summary) walk(summary);
+        return;
+      }
       for (const child of element.childNodes) walk(child);
-      if (["div", "p", "li", "section", "header", "tr", "h1", "h2", "h3", "h4", "h5", "dt", "dd", "button", "label", "option"].includes(element.tagName.toLowerCase())) parts.push(" ");
+      if (["div", "p", "li", "section", "header", "tr", "h1", "h2", "h3", "h4", "h5", "dt", "dd", "button", "label", "option"].includes(tag)) parts.push(" ");
     };
     walk(root);
     return parts.join("").replace(/\s+/g, " ").trim();
@@ -642,7 +648,19 @@ export class Page {
   }
 
   isHidden(element: FakeElement): boolean {
-    for (let node: FakeElement | null = element; node; node = node.parentNode) if (node.hasAttribute("hidden")) return true;
+    for (let node: FakeElement | null = element; node; node = node.parentNode) {
+      if (node.hasAttribute("hidden")) return true;
+      if (node === element || node.tagName.toLowerCase() !== "details" || node.hasAttribute("open")) continue;
+      const summaryElement: FakeElement | undefined = node.children.find((child: FakeElement) => child.tagName.toLowerCase() === "summary");
+      let insideSummary = false;
+      for (let child: FakeElement | null = element; child && child !== node; child = child.parentNode) {
+        if (child === summaryElement) {
+          insideSummary = true;
+          break;
+        }
+      }
+      if (!insideSummary) return true;
+    }
     return false;
   }
 
@@ -671,6 +689,10 @@ export class Page {
       return;
     }
     const event = this.document.dispatch(element, "click");
+    if (element.tagName.toLowerCase() === "summary" && !event.defaultPrevented) {
+      const details = element.closest("details");
+      if (details && details.children.find((child) => child.tagName.toLowerCase() === "summary") === element) details.open = !details.open;
+    }
     if (element.tagName.toLowerCase() === "button" && element.type === "submit" && !event.defaultPrevented) {
       const form = element.form;
       if (form) this.document.dispatch(form, "submit");

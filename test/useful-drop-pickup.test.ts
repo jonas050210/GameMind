@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MinecraftTaskDecisionModel } from "../src/games/minecraft/decision-model.js";
+import { minecraftLogNames, minecraftPickupItemInputSchema, minecraftUsefulDropNames } from "../src/games/minecraft/capabilities.js";
+import { minecraftMiningDropNames } from "../src/games/minecraft/mining.js";
 import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
 import { gatherResourceTaskSchema, mineResourceTaskSchema, craftItemTaskSchema } from "../src/games/minecraft/task.js";
+
+test("all planned drops and every mining drop pass pickup validation, while arbitrary items remain rejected", () => {
+  const allowed = new Set([...minecraftLogNames, ...minecraftUsefulDropNames, ...minecraftMiningDropNames]);
+  for (const itemName of allowed) {
+    const result = minecraftPickupItemInputSchema.safeParse({ x: 0, y: 64, z: 0, itemName, dangerRadius: 6 });
+    assert.equal(result.success, true, `${itemName} must be accepted by the pickup capability`);
+  }
+  assert.equal(
+    minecraftPickupItemInputSchema.safeParse({ x: 0, y: 64, z: 0, itemName: "diamond_block", dangerRadius: 6 }).success,
+    false,
+    "pickup stays finite and does not accept arbitrary item names",
+  );
+});
 
 function baseState(overrides: Partial<MinecraftObservation> = {}): MinecraftObservation {
   return {

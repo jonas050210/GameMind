@@ -113,6 +113,12 @@ async function main(): Promise<number> {
   switch (args.command) {
     case "train": {
       const saved = await readTrainingDefaults(args.defaultsFile);
+      const selectedStageIds = args.stages ?? saved?.stageIds;
+      if (selectedStageIds) {
+        const known = new Set(TRAINING_STAGES.map((stage) => stage.id));
+        const unknown = selectedStageIds.filter((id) => !known.has(id));
+        if (selectedStageIds.length === 0 || unknown.length > 0) throw new Error(`Saved curriculum stages are invalid${unknown.length ? `: ${unknown.join(", ")}` : "."} Run the benchmark again or choose --stages explicitly.`);
+      }
       const state = await runTraining({
         root: args.dir,
         ...(args.episodesPerStage !== undefined ? { episodesPerStage: args.episodesPerStage } : {}),
@@ -121,7 +127,7 @@ async function main(): Promise<number> {
         fresh: args.fresh,
         explorationRate: args.explore ?? saved?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE,
         workers: args.workers ?? saved?.workers ?? 1,
-        ...(args.stages ? { stages: TRAINING_STAGES.filter((stage) => args.stages!.includes(stage.id)) } : {}),
+        ...(selectedStageIds ? { stages: TRAINING_STAGES.filter((stage) => selectedStageIds.includes(stage.id)) } : {}),
         evaluationSeedCount: 10,
         logger,
       });

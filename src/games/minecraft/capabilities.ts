@@ -3,6 +3,7 @@ import type { CapabilityDefinition } from "../../core/types.js";
 import {
   minecraftDroppableJunkNames,
   minecraftMineableBlockNames,
+  minecraftMiningDropNames,
   minecraftPlaceableBlockNames,
 } from "./mining.js";
 
@@ -23,6 +24,8 @@ export const MINECRAFT_PLACE_BLOCK_CAPABILITY = "minecraft.place_block";
 export const MINECRAFT_BUILD_SHELTER_CAPABILITY = "minecraft.build_shelter";
 export const MINECRAFT_ATTACK_HOSTILE_CAPABILITY = "minecraft.attack_hostile";
 export const MINECRAFT_DROP_ITEM_CAPABILITY = "minecraft.drop_item";
+/** Shared center-to-center reach budget used by both the planner and Minecraft adapters. */
+export const MINECRAFT_CRAFTING_TABLE_REACH = 4.5;
 
 /**
  * Capabilities that exist but are denied by the default safety policy until an operator opts in.
@@ -171,8 +174,46 @@ export const minecraftFoodNames = [
   "sweet_berries",
 ] as const;
 
-/** Items a pickup may target: allowlisted food drops and logs (never arbitrary items). */
-export const minecraftPickupNames = [...minecraftFoodNames, ...minecraftLogNames] as const;
+/**
+ * Items the planner proactively treats as useful drops. This is a subset of the larger pickup allowlist; the
+ * decision model deliberately ignores ordinary terrain drops unless a task is specifically mining them.
+ */
+export const minecraftUsefulDropNames = [
+  ...minecraftLogNames,
+  "cobblestone",
+  "stone",
+  "coal",
+  "raw_iron",
+  "iron_ingot",
+  "oak_planks",
+  "birch_planks",
+  "spruce_planks",
+  "stick",
+  "crafting_table",
+  "furnace",
+  "wooden_pickaxe",
+  "stone_pickaxe",
+  "iron_pickaxe",
+  "wooden_sword",
+  "stone_sword",
+  "iron_sword",
+] as const;
+
+/**
+ * Finite pickup action allowlist: food, logs, drops from the mining allowlist, and known-useful craftables.
+ * Arbitrary item names remain rejected before any navigation or world interaction.
+ */
+export const minecraftPickupNames = [
+  ...minecraftFoodNames,
+  ...minecraftLogNames,
+  ...minecraftMiningDropNames,
+  ...minecraftCraftableItemNames,
+  "stone",
+  "iron_ingot",
+  "furnace",
+  "iron_pickaxe",
+  "iron_sword",
+] as const;
 
 export const minecraftPickupItemInputSchema = z
   .object({
@@ -371,7 +412,7 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
   {
     name: MINECRAFT_PICKUP_ITEM_CAPABILITY,
     description:
-      "Walk to one observed dropped food or log item and confirm that the matching item entered the inventory. Only allowlisted items are accepted; no entity is attacked.",
+      "Walk to one observed dropped food, log, mining drop, or known-useful craftable and confirm that the matching item entered the inventory. The finite item allowlist rejects arbitrary names; no entity is attacked.",
     inputSchema: minecraftPickupItemInputSchema,
     defaultTimeoutMs: 30_000,
     maxTimeoutMs: 60_000,

@@ -5,9 +5,14 @@ import type { ExplorationConfig } from "../../games/minecraft/training-explorati
 import type { EpisodeProvenance } from "../../core/learning/episode.js";
 import { createMinecraftAgent } from "../../games/minecraft/create-agent.js";
 import { MinecraftTaskDecisionModel } from "../../games/minecraft/decision-model.js";
-import { MinecraftTaskRunner, type MinecraftTaskResult } from "../../games/minecraft/task-runner.js";
+import { MinecraftTaskRunner, type MinecraftTaskResult, type TaskActionSummary } from "../../games/minecraft/task-runner.js";
 import { SimulatedMinecraftAdapter } from "../simulated-minecraft/adapter.js";
 import type { EvaluationScenario } from "./scenarios.js";
+
+export type EvaluationActionFailure = Pick<
+  TaskActionSummary,
+  "goalId" | "skillId" | "status" | "confirmed" | "durationMs" | "failureCode" | "targetKey" | "verification"
+>;
 
 export interface EvaluationRun {
   readonly scenarioId: string;
@@ -23,6 +28,8 @@ export interface EvaluationRun {
   readonly actionGoals: readonly string[];
   /** Goal and target of each action (`goalId@targetKey`): the finer choice the policy makes. */
   readonly actionChoices: readonly string[];
+  /** Failed or unverified actions, with the adapter's specific failure code where available. */
+  readonly actionFailures: readonly EvaluationActionFailure[];
   readonly failureCode: string | null;
 }
 
@@ -156,6 +163,18 @@ export async function runEvaluationOnce(
     },
     actionGoals: result.actions.map((action) => action.goalId),
     actionChoices: result.actions.map((action) => `${action.goalId}@${action.targetKey ?? ""}`),
+    actionFailures: result.actions
+      .filter((action) => action.status !== "succeeded" || !action.confirmed || action.verification === "unverified")
+      .map(({ goalId, skillId, status, confirmed, durationMs, failureCode, targetKey, verification }) => ({
+        goalId,
+        skillId,
+        status,
+        confirmed,
+        durationMs,
+        failureCode,
+        targetKey,
+        verification,
+      })),
     failureCode: result.failure?.code ?? null,
   };
 }

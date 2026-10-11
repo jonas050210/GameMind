@@ -529,9 +529,20 @@ export class GameMindApp {
         }));
       },
       runLiveVerification: (payload: unknown) => this.commandLive(payload),
-      runBenchmark: (payload: unknown) => {
-        const name = typeof payload === "object" && payload !== null && typeof (payload as { name?: unknown }).name === "string" ? (payload as { name: string }).name : undefined;
-        return this.commandJob(() => planBenchmark(this.planContext(), name ? { name } : {}));
+      runBenchmark: async (payload: unknown) => {
+        const [training, activeDirectory] = await Promise.all([this.training.snapshot(), this.training.activeDirectory()]);
+        if (activeDirectory !== null || training.processAlive || training.status === "running" || training.status === "paused" || training.status === "evaluating") {
+          return { ok: false, message: `Stop or wait for training/evaluation${activeDirectory ? ` in '${activeDirectory}'` : ""} to finish before benchmarking; the headless environment sweep is CPU-intensive and must not compete with it.` };
+        }
+        const raw = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
+        const options = {
+          ...(typeof raw.name === "string" ? { name: raw.name } : {}),
+          ...(typeof raw.environmentCases === "number" ? { environmentCases: raw.environmentCases } : {}),
+          ...(typeof raw.environmentSecondsPerCase === "number" ? { environmentSecondsPerCase: raw.environmentSecondsPerCase } : {}),
+          ...(typeof raw.workerLimit === "number" ? { workerLimit: raw.workerLimit } : {}),
+          ...(Array.isArray(raw.stageIds) ? { stageIds: raw.stageIds.filter((id): id is string => typeof id === "string") } : {}),
+        };
+        return this.commandJob(() => planBenchmark(this.planContext(), options));
       },
       startTestServer: () => this.testServer.start(),
       stopTestServer: () => this.testServer.stop(),

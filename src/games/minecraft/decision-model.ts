@@ -9,8 +9,10 @@ import { goalClassOf, distanceBandOf, vitalityBandOf } from "../../core/learning
 import type { PolicyAdvisor } from "../../core/learning/policy-advisor.js";
 import { BASELINE_ADVISOR } from "../../core/learning/policy-advisor.js";
 import {
+  MINECRAFT_CRAFTING_TABLE_REACH,
   minecraftLogNames,
   minecraftPlankNames,
+  minecraftUsefulDropNames,
 } from "./capabilities.js";
 import {
   distanceBetween,
@@ -64,7 +66,7 @@ const REST_TARGET_HEALTH = 18; // Raised from 16: heal to safer level
 const REST_CHUNK_MS = 10_000;
 const CRITICAL_HEALTH_THRESHOLD = 6;
 const POST_COMBAT_REST_HEALTH = 14; // Rest after combat if health below this
-const MAX_CRAFTING_TABLE_DISTANCE = 4.5;
+const MAX_CRAFTING_TABLE_DISTANCE = MINECRAFT_CRAFTING_TABLE_REACH;
 const HYSTERESIS_BONUS = 25;
 /** Axis-aligned recovery waypoints sit this many blocks away: far enough to change the shortest route. */
 const SIDESTEP_DISTANCE = 6;
@@ -1095,14 +1097,7 @@ const minecraftDroppableJunkList = [
  * Items worth picking up regardless of the current task: resources the agent will likely need soon.
  * Food is handled separately by foodSourceCandidates during survival-band evaluation.
  */
-const USEFUL_DROP_ITEMS = new Set([
-  "oak_log", "birch_log", "spruce_log", "jungle_log", "acacia_log", "dark_oak_log",
-  "cobblestone", "stone", "coal", "raw_iron", "iron_ingot",
-  "oak_planks", "birch_planks", "spruce_planks",
-  "stick", "crafting_table", "furnace",
-  "wooden_pickaxe", "stone_pickaxe", "iron_pickaxe",
-  "wooden_sword", "stone_sword", "iron_sword",
-]);
+const USEFUL_DROP_ITEMS = new Set<string>(minecraftUsefulDropNames);
 
 /**
  * Generates a pickup candidate for the nearest useful dropped item that isn't already the task target.

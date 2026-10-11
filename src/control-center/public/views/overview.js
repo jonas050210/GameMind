@@ -22,21 +22,24 @@ function session(snapshot, now) {
   const info = sessionInfo(view);
   const target = view?.target;
   return card(
-    { title: "Session", subtitle: "Lifecycle of the agent's connection to the game", class: `hero tone-${info.tone}` },
+    { title: "Session", subtitle: "Connection status", class: `hero tone-${info.tone}` },
     h("div", { class: "hero-state" }, h("span", { class: `state-dot tone-${info.tone}`, "aria-hidden": "true" }), h("div", null, h("p", { class: "hero-label" }, info.label), h("p", { class: "muted" }, info.meaning))),
     h("p", { class: "hero-now" }, nowSummary(snapshot)),
     view?.error ? notice("bad", view.error.summary, view.error.hints.length ? h("ul", null, view.error.hints.map((hint) => h("li", null, hint))) : null, h("p", { class: "small muted" }, `Error reported: ${view.error.detail || "none"}`)) : null,
     view?.reconnect ? notice("warn", `Reconnect attempt ${view.reconnect.attempt} of ${view.reconnect.maxAttempts}`, view.reconnect.nextAttemptAt ? `Next try ${fmtAgo(view.reconnect.nextAttemptAt, now).replace(" ago", "")} from the time shown: ${fmtTime(view.reconnect.nextAttemptAt)}.` : "Trying now.") : null,
-    kv([
-      ["State since", view?.since ? `${fmtTime(view.since)} (${fmtAgo(view.since, now)})` : null],
-      ["Mode", view?.mode ? (view.mode === "persistent" ? "Persistent — stays connected until you stop it" : "One-shot — ends with its task") : null],
-      ["Source", view?.source ? sourceBadge(view.source) : sourceBadge("unavailable")],
-      ["Server", target ? `${target.host}:${target.port}` : view?.source === "simulated" ? "built-in simulator" : null],
-      ["Minecraft version", target?.version ?? snapshot.connection?.gameVersion ?? null],
-      ["Bot name", target?.username ?? null],
-      ["Runtime", view?.runtimeMs !== null && view?.runtimeMs !== undefined ? fmtDuration(view.runtimeMs) : null],
-      ["World", view?.worldKey ?? null, "The identity world memory is filed under."],
-    ]),
+    h("details", { id: "session-details", class: "small" },
+      h("summary", { id: "session-details-summary" }, "Connection details"),
+      kv([
+        ["State since", view?.since ? `${fmtTime(view.since)} (${fmtAgo(view.since, now)})` : null],
+        ["Mode", view?.mode ? (view.mode === "persistent" ? "Persistent" : "One-shot") : null],
+        ["Source", view?.source ? sourceBadge(view.source) : sourceBadge("unavailable")],
+        ["Server", target ? `${target.host}:${target.port}` : view?.source === "simulated" ? "built-in simulator" : null],
+        ["Minecraft version", target?.version ?? snapshot.connection?.gameVersion ?? null],
+        ["Bot name", target?.username ?? null],
+        ["Runtime", view?.runtimeMs !== null && view?.runtimeMs !== undefined ? fmtDuration(view.runtimeMs) : null],
+        ["World", view?.worldKey ?? null, "The identity world memory is filed under."],
+      ]),
+    ),
   );
 }
 
@@ -47,7 +50,7 @@ function controls(snapshot) {
   const hold = snapshot.safety;
   const blocker = taskBlocker(snapshot);
   return card(
-    { title: "Controls", subtitle: "These act on the real session. Safety limits are never changed from here." },
+    { title: "Controls", subtitle: "Pause or disconnect the active session" },
     h(
       "div",
       { class: "button-row" },
@@ -55,13 +58,10 @@ function controls(snapshot) {
         ? button("Stop session", { command: "stopSession", payload: "stopped from the Overview", tone: "warn", data: { confirm: "Stop the session and disconnect the bot?" }, title: "Stops the running task and disconnects the bot. The Control Center stays open." })
         : button("Connect…", { action: "goto-tab", data: { tab: "bots" }, tone: "primary", title: "Opens the connection form" }),
       hold?.paused ? button("Resume", { command: "resume", tone: "primary" }) : button("Pause", { command: "pause", payload: "paused from the Overview", disabled: !active, title: "The Safety Broker refuses every world-changing action until you resume." }),
-      button("Stop task", { command: "stopTask", payload: "stopped from the Overview", disabled: !snapshot.scheduler?.active }),
-      button("⚠ Emergency stop", { command: "panic", tone: "danger", disabled: !active, title: "Trips safety, stops the task and disarms combat at once." }),
     ),
     hold?.tripped ? notice("bad", "Safety trip raised", hold.tripReason ?? "A trip is active; only read-only actions run.", button("Reset trip", { command: "resetTrip" })) : null,
     hold?.paused && !hold?.tripped ? notice("warn", "Paused", hold.pauseReason ?? "The Safety Broker is refusing world-changing actions.") : null,
     blocker && active ? h("p", { class: "muted small" }, blocker) : null,
-    h("p", { class: "muted small" }, "Quit the whole app with the button in the footer; closing this tab changes nothing."),
   );
 }
 
@@ -70,8 +70,11 @@ function vitals(snapshot, now) {
   const source = worldSource(snapshot);
   const live = source === "live" || source === "simulated";
   const position = world.position;
+  const shortPosition = position
+    ? `${fmtNumber(position.x, 1)}, ${fmtNumber(position.y, 1)}, ${fmtNumber(position.z, 1)}`
+    : null;
   return card(
-    { title: "Player and world", subtitle: world.freshness?.observedAt ? `Observation #${orUnknown(world.freshness.sequence)} · ${fmtAgo(world.freshness.observedAt, now)}${world.freshness.stale ? " · stale" : ""}` : "No observation yet", actions: sourceBadge(source) },
+    { title: "Player and world", subtitle: world.freshness?.observedAt ? `Observed ${fmtAgo(world.freshness.observedAt, now)}${world.freshness.stale ? " · stale" : ""}` : "No observation yet", actions: sourceBadge(source) },
     live
       ? staleNotice(world.freshness, now)
       : notice("neutral", "Nothing is being observed", world.provenance?.note ?? "Telemetry is unknown until a session is connected."),
@@ -82,14 +85,20 @@ function vitals(snapshot, now) {
       meter("Food", world.food, 20, live),
     ),
     kv([
+      ["Position", shortPosition],
       ["Dimension", world.dimension ?? null],
-      ["Game mode", world.gameMode ?? null],
-      ["Alive", world.alive === null || world.alive === undefined ? null : world.alive ? "yes" : "no — respawning"],
-      ["Time of day", world.time ? `${world.time.isNight ? "night" : "day"}${world.time.day !== null && world.time.day !== undefined ? ` (day ${world.time.day})` : ""}` : null],
-      ["Inventory", world.inventory?.length ? `${fmtNumber(world.inventory.reduce((sum, item) => sum + item.count, 0))} items in ${world.inventory.length} slots` : live ? "empty" : null],
     ]),
-    // Exact coordinates are for debugging, not for watching the agent: they stay one click away.
-    h("details", { class: "small" }, h("summary", null, "Exact position"), kv([["Position", position ? `${position.x}, ${position.y}, ${position.z}` : null]])),
+    h("details", { id: "world-details", class: "small" },
+      h("summary", { id: "world-details-summary" }, "World details"),
+      kv([
+        ["Observation", world.freshness?.sequence !== null && world.freshness?.sequence !== undefined ? `#${orUnknown(world.freshness.sequence)}` : null],
+        ["Game mode", world.gameMode ?? null],
+        ["Alive", world.alive === null || world.alive === undefined ? null : world.alive ? "yes" : "no — respawning"],
+        ["Time of day", world.time ? `${world.time.isNight ? "night" : "day"}${world.time.day !== null && world.time.day !== undefined ? ` (day ${world.time.day})` : ""}` : null],
+        ["Inventory", world.inventory?.length ? `${fmtNumber(world.inventory.reduce((sum, item) => sum + item.count, 0))} items in ${world.inventory.length} slots` : live ? "empty" : null],
+        ["Exact position", position ? `${position.x}, ${position.y}, ${position.z}` : null],
+      ]),
+    ),
   );
 }
 
@@ -131,13 +140,15 @@ function currentTask(snapshot, now) {
   return card(
     { title: "Current task", actions: statusBadge(agent?.state === "stopping" ? "aborted" : "running") },
     h("p", { class: "task-title" }, active.label),
-    kv([
-      ["Started by", active.origin],
-      ["Running for", active.startedAt ? fmtDuration(Math.max(0, now - Date.parse(active.startedAt))) : null],
-      ["Actions so far", agent ? fmtNumber(agent.actionsUsed) : null],
-      ["Goal", snapshot.goal?.rationale ?? null],
-    ]),
     progressInfo ? h("div", null, progress(progressInfo.have, progressInfo.of, `${progressInfo.unit} progress`), h("p", { class: "small muted" }, `${fmtNumber(progressInfo.have)} of ${fmtNumber(progressInfo.of)} ${progressInfo.unit}`)) : h("p", { class: "small muted" }, "Progress is not measurable for this task right now."),
+    kv([
+      ["Running for", active.startedAt ? fmtDuration(Math.max(0, now - Date.parse(active.startedAt))) : null],
+      ["Actions", agent ? fmtNumber(agent.actionsUsed) : null],
+    ]),
+    h("details", { id: "task-details", class: "small" }, h("summary", { id: "task-details-summary" }, "Task details"), kv([
+      ["Started by", active.origin],
+      ["Goal", snapshot.goal?.rationale ?? null],
+    ])),
     button("Stop task", { command: "stopTask", payload: "stopped from the Overview", tone: "warn" }),
   );
 }

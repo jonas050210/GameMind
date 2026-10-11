@@ -56,6 +56,7 @@ async function until(booted: BootedPage, condition: () => boolean, message: stri
 }
 
 async function openTab(booted: BootedPage, tab: string): Promise<void> {
+  if (!booted.page.byId("tools-navigation").open) booted.page.click("tools-navigation-summary");
   booted.page.click(`tab-${tab}`);
   await booted.settle();
   await booted.settle();
@@ -153,6 +154,7 @@ test("every tab of a real session draws without error, and the regions each view
     const tabs = ["overview", "training", "bots", "tasks", "evaluation", "learning", "memory"] as const;
     for (const tab of tabs) {
       await openTab(booted, tab);
+      if (tab === "overview") page.click("overview-details-summary");
       assert.equal(page.visibleText("render-error"), "", `${tab} drew without an error`);
       const ctx = {
         snapshot: booted.app.store.state.snapshot,

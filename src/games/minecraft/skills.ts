@@ -87,7 +87,7 @@ export const minecraftSkills: readonly SkillDefinition[] = [
   },
   {
     id: "minecraft.pickup-item",
-    description: "Walk to an observed dropped food or log item and confirm that the item entered the inventory.",
+    description: "Walk to an observed dropped food, log, mining drop, or known-useful craftable and confirm that the item entered the inventory.",
     capability: MINECRAFT_PICKUP_ITEM_CAPABILITY,
     inputSchema: minecraftPickupItemInputSchema,
   },

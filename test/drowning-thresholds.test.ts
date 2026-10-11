@@ -39,17 +39,22 @@ const hasDrowning = (state: MinecraftObservation) => assessReflex(state, null, {
 
 function brokerRefusesStationary(air: number): boolean {
   const broker = new SafetyBroker({ drowningBlockedCapabilities: ["minecraft.rest"] });
+  broker.beginSession(`session-drown-${air}`);
   broker.beginRun(`drown-${air}`);
   broker.updateWorld({
+    sessionId: `session-drown-${air}`,
     sequence: 1,
     observedAtMs: 1_000,
     health: 20,
     food: 20,
     gameMode: "survival",
+    visibleHostiles: 0,
+    nearestHostileDistance: null,
+    isNight: false,
     dimension: "minecraft:overworld",
     oxygenTicks: air,
     isBurning: false,
-  } as never);
+  });
   return broker.evaluate({ capability: "minecraft.rest", risk: "low", nowMs: 1_000 }).code === "DROWNING_RISK";
 }
 

@@ -70,6 +70,30 @@ test("adapter failures are visible and do not turn into false success", async ()
   await runtime.shutdown("test complete");
 });
 
+test("a specific adapter postcondition failure is preserved instead of reduced to ACTION_NOT_CONFIRMED", async () => {
+  const { runtime, skills, adapter } = makeAgent();
+  await runtime.connect();
+  const original = adapter.executeAction.bind(adapter);
+  adapter.executeAction = async (action, signal) => {
+    if (action.capability === "minecraft.look") {
+      return {
+        confirmed: false,
+        confirmation: "target_changed_before_effect",
+        failure: { code: "RESOURCE_TARGET_CHANGED", message: "The target vanished while the player was walking." },
+        details: { target: "5,64,0" },
+      };
+    }
+    return original(action, signal);
+  };
+
+  const result = await skills.run("minecraft.orient", { yaw: 0.25, pitch: 0 });
+  assert.equal(result.action.status, "failed");
+  assert.equal(result.action.failure?.code, "RESOURCE_TARGET_CHANGED");
+  assert.match(result.action.failure?.message ?? "", /vanished while the player was walking/);
+  assert.equal(result.action.details?.target, "5,64,0");
+  await runtime.shutdown("test complete");
+});
+
 test("disconnection rejects new actions instead of attempting stale-session commands", async () => {
   const { runtime, skills, adapter, sink } = makeAgent();
   await runtime.connect();

@@ -325,7 +325,8 @@ async function evaluateCheckpointLocked(options: EvaluateCheckpointOptions): Pro
   const checkpoint = await loadCheckpoint(paths, options.checkpointId);
   const seedCount = options.seeds ?? DEFAULT_TRAINING_EVAL_SEEDS;
   const seeds = evaluationSeeds(seedCount);
-  assertSeedSplit(seedCount, state?.maxEpisodes ?? 0);
+  const trainingSeedBase = state?.seedBase ?? TRAINING_SEED_BASE;
+  assertSeedSplit(seedCount, state?.maxEpisodes ?? 0, trainingSeedBase);
   const scenarios = options.scenarios ?? evaluationScenarios();
   const runner = options.episodeRunner ?? runEvaluationOnce;
 
@@ -354,9 +355,9 @@ async function evaluateCheckpointLocked(options: EvaluateCheckpointOptions): Pro
     weightsId: checkpoint.weights.id,
     heldOut: {
       evaluationSeeds: seeds,
-      trainingSeedBase: TRAINING_SEED_BASE,
+      trainingSeedBase,
       disjointSeeds: true,
-      note: "Training used seeds from the training base upward; these evaluation seeds never overlap them. Scenario families are shared with the training curriculum, so this measures held-out worlds, not new task types.",
+      note: `Training used seeds from ${trainingSeedBase} upward; these evaluation seeds never overlap them. Scenario families are shared with the training curriculum, so this measures held-out worlds, not new task types.`,
     },
     scenarioIds: scenarios.map((scenario) => scenario.id),
     baseline,

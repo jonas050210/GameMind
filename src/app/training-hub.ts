@@ -114,9 +114,12 @@ export class TrainingHub implements TrainingControl {
 
   /** The name of a directory whose run is active, if any. */
   async activeDirectory(): Promise<string | null> {
-    for (const [name, manager] of this.managers) {
-      const view = await manager.snapshot();
-      if (view.processAlive || view.status === "evaluating") return name;
+    // Include persisted run folders that have not yet been selected in this process, so a second training run or a
+    // headless benchmark cannot compete with a trainer/evaluator that survived an app restart or was launched elsewhere.
+    const names = new Set([...this.managers.keys(), ...this.directories()]);
+    for (const name of names) {
+      const view = await this.manager(name).snapshot();
+      if (view.processAlive || view.status === "evaluating" || view.lock?.alive) return name;
     }
     return null;
   }

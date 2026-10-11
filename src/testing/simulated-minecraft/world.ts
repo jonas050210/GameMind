@@ -197,7 +197,6 @@ export class SimulatedMinecraftWorld {
   private clockMs = 0;
   private berryGrowthAccumulatorMs = 0;
   private itemCounter = 0;
-  private nextInventorySlot = 9;
   private readonly dayTicksStart: number;
   private readonly dayTicksPerSecond: number;
   readonly maxInventoryStacks: number;
@@ -231,11 +230,11 @@ export class SimulatedMinecraftWorld {
     this.playerZ = definition.player.z + 0.5;
     this.health = definition.player.health;
     this.food = definition.player.food;
+    this.maxInventoryStacks = definition.maxInventoryStacks ?? 36;
     for (const stack of definition.player.inventory) this.addToInventory(stack.name, stack.count);
     this.stats.minHealth = this.health;
     this.dayTicksStart = definition.dayTicks ?? 6_000;
     this.dayTicksPerSecond = definition.dayTicksPerSecond ?? 0;
-    this.maxInventoryStacks = definition.maxInventoryStacks ?? 36;
   }
 
   /** Ticks into the day cycle; `isNight` follows the Java Edition night window. */
@@ -608,7 +607,15 @@ export class SimulatedMinecraftWorld {
   /** True when no new stack can be added: every allowed slot already holds a different item. */
   isInventoryFull(name?: string): boolean {
     if (name !== undefined && this.inventory.some((stack) => stack.name === name)) return false;
-    return this.inventory.length >= this.maxInventoryStacks;
+    return this.inventory.length >= this.maxInventoryStacks || this.nextAvailableInventorySlot() === null;
+  }
+
+  private nextAvailableInventorySlot(): number | null {
+    const occupied = new Set(this.inventory.map((stack) => stack.slot));
+    for (let slot = 9; slot <= 44; slot += 1) {
+      if (!occupied.has(slot)) return slot;
+    }
+    return null;
   }
 
   addToInventory(name: string, count: number): void {
@@ -617,21 +624,21 @@ export class SimulatedMinecraftWorld {
       existing.count += count;
       return;
     }
-    if (this.inventory.length >= this.maxInventoryStacks) {
+    const slot = this.nextAvailableInventorySlot();
+    if (this.inventory.length >= this.maxInventoryStacks || slot === null) {
       throw new SimulatedActionError(
         `Inventory holds ${this.inventory.length} stacks and cannot accept ${name}.`,
         "INVENTORY_FULL",
       );
     }
     this.inventory.push({
-      slot: this.nextInventorySlot,
+      slot,
       name,
       type: simItemType(name),
       count,
       metadata: null,
       durabilityUsed: null,
     });
-    this.nextInventorySlot = Math.min(44, this.nextInventorySlot + 1);
   }
 
   removeFromInventory(name: string, count: number): void {

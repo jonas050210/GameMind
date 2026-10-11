@@ -18,7 +18,7 @@ import { BASELINE_POLICY_WEIGHTS, type PolicyWeights } from "../core/learning/po
 import { evaluationSeeds, runEvaluationOnce } from "../testing/eval/harness.js";
 import { evaluationScenarios } from "../testing/eval/scenarios.js";
 import { evaluateCheckpoint, loadCheckpoint } from "./evaluate.js";
-import { TRAINING_SEED_BASE } from "./curriculum.js";
+import { TRAINING_SEED_BASE, type CurriculumStage } from "./curriculum.js";
 import { trainingPaths, writeJsonAtomic } from "./state.js";
 import { runTraining } from "./trainer.js";
 
@@ -32,6 +32,8 @@ export interface HeadlessExperimentOptions {
   readonly evaluationSeeds: number;
   /** Episodes that run at the same time (one worker process each). Default 1. */
   readonly workers?: number;
+  /** The curriculum selected by the benchmark; omitted for the standard full curriculum. */
+  readonly stages?: readonly CurriculumStage[];
   readonly logger?: { info(obj: unknown, msg?: string): void };
 }
 
@@ -151,6 +153,7 @@ export async function runHeadlessExperiment(options: HeadlessExperimentOptions):
     maxEpisodes: options.maxEpisodes,
     explorationRate: options.explorationRate,
     workers: options.workers ?? 1,
+    ...(options.stages ? { stages: options.stages } : {}),
     evaluationSeedCount: options.evaluationSeeds,
     onEpisode: (event) => {
       const { record, run, reward, runId } = event;

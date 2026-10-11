@@ -18,12 +18,12 @@ export type SafetyCode =
   | "CAPABILITY_DENIED"
   | "CAPABILITY_NOT_ALLOWLISTED"
   | "RISK_ABOVE_CEILING"
-  | "RUN_ACTION_BUDGET"
   | "CAPABILITY_BUDGET"
   | "CAPABILITY_COOLDOWN"
   | "PROTECTED_STATE"
   | "STALE_OBSERVATION"
   | "NO_OBSERVATION"
+  | "SESSION_MISMATCH"
   | "CRITICAL_STATE_NO_RECOVERY_SKILL"
   | "HAZARD_NEARBY"
   | "DROWNING_RISK"
@@ -57,7 +57,6 @@ export interface SafetyPolicy {
   readonly denylist: readonly string[];
   /** High-risk capabilities unlocked by explicit operator opt-in (e.g. combat). */
   readonly optedInCapabilities: readonly string[];
-  readonly maxActionsPerRun: number;
   readonly perCapabilityMaxPerRun: Readonly<Record<string, number>>;
   readonly cooldownMsByCapability: Readonly<Record<string, number>>;
   /** Below this health only these skills run; everything else is denied. Null disables the check. */
@@ -98,8 +97,6 @@ export const DEFAULT_SAFETY_POLICY: SafetyPolicy = {
   allowlist: [],
   denylist: [],
   optedInCapabilities: [],
-  // Runaway guard only, not a task budget: tasks end by completion, timeout, stuck detection or stop.
-  maxActionsPerRun: 5000,
   perCapabilityMaxPerRun: {},
   cooldownMsByCapability: {},
   protectedHealthFloor: null,
@@ -112,6 +109,8 @@ export const DEFAULT_SAFETY_POLICY: SafetyPolicy = {
 };
 
 export interface SafetyWorldContext {
+  /** Session that produced this observation; sequences are only ordered within this identity. */
+  readonly sessionId: string;
   readonly sequence: number;
   readonly observedAtMs: number;
   readonly health: number | null;
@@ -160,9 +159,6 @@ export interface SafetySnapshot {
 
 export function safetyPolicyFromInput(input: Partial<SafetyPolicy> = {}): SafetyPolicy {
   const policy: SafetyPolicy = { ...DEFAULT_SAFETY_POLICY, ...input };
-  if (!Number.isInteger(policy.maxActionsPerRun) || policy.maxActionsPerRun < 1) {
-    throw new Error("Safety policy maxActionsPerRun must be a positive integer.");
-  }
   if (!Number.isInteger(policy.maxObservationAgeMs) || policy.maxObservationAgeMs < 1_000) {
     throw new Error("Safety policy maxObservationAgeMs must be at least 1000 ms.");
   }
@@ -194,6 +190,9 @@ export class SafetyBroker {
   private pausedByTrip = false;
   private tripReason: string | null = null;
   private runId: string | null = null;
+  private activeSessionId: string | null = null;
+  /** Distinguishes an unbound standalone broker from a runtime that has explicitly disconnected. */
+  private sessionLifecycleStarted = false;
   private actionsApproved = 0;
   private actionsDenied = 0;
   private worldValue: SafetyWorldContext | null = null;
@@ -248,6 +247,25 @@ export class SafetyBroker {
     this.lastCapabilityRunAt.clear();
   }
 
+  /** Binds safety observations to one live adapter session and drops any context from its predecessor. */
+  beginSession(sessionId: string): void {
+    if (sessionId.trim().length === 0) throw new Error("Safety session id must not be empty.");
+    this.sessionLifecycleStarted = true;
+    if (this.activeSessionId === sessionId) return;
+    this.activeSessionId = sessionId;
+    this.worldValue = null;
+    this.endRun();
+  }
+
+  /** Invalidates the session's observation; a late disconnect from an older session cannot clear a newer one. */
+  endSession(sessionId?: string | null): void {
+    this.sessionLifecycleStarted = true;
+    if (sessionId && this.activeSessionId && sessionId !== this.activeSessionId) return;
+    this.activeSessionId = null;
+    this.worldValue = null;
+    this.endRun();
+  }
+
   pause(reason = "paused by operator"): void {
     this.paused = true;
     this.pauseReason = reason;
@@ -290,8 +308,16 @@ export class SafetyBroker {
   }
 
   updateWorld(context: SafetyWorldContext): void {
-    // Sequence numbers only increase within a session; a lower sequence means a newer session.
-    if (this.worldValue && context.sequence < this.worldValue.sequence && this.runId) return;
+    if (context.sessionId.trim().length === 0) return;
+    // A standalone broker can bind itself on first use. A runtime explicitly binds/unbinds sessions, so
+    // a late context from an ended session cannot silently become current again.
+    if (!this.sessionLifecycleStarted && this.activeSessionId === null) this.activeSessionId = context.sessionId;
+    if (context.sessionId !== this.activeSessionId) return;
+    // Sequence numbers are ordered only within their session.
+    if (
+      this.worldValue?.sessionId === context.sessionId &&
+      context.sequence < this.worldValue.sequence
+    ) return;
     this.worldValue = context;
   }
 
@@ -385,13 +411,6 @@ export class SafetyBroker {
       );
     }
 
-    const runBudget = policy.maxActionsPerRun;
-    const runUsed = this.actionsApproved;
-    check("run-budget", readOnly || runUsed < runBudget, `${runUsed}/${runBudget} actions used`);
-    if (!readOnly && runUsed >= runBudget) {
-      return deny("RUN_ACTION_BUDGET", `The run reached its safety budget of ${runBudget} actions.`);
-    }
-
     const capLimit = policy.perCapabilityMaxPerRun[request.capability];
     if (capLimit !== undefined) {
       const used = this.runCapabilityCount.get(request.capability) ?? 0;
@@ -414,10 +433,19 @@ export class SafetyBroker {
     const world = this.worldValue;
     if (readOnly) {
       check("observation", true, "read-only action does not need a fresh observation");
-    } else if (!world) {
-      check("observation", false, "no observation recorded");
-      return deny("NO_OBSERVATION", "No world observation is available; the broker fails closed instead of acting blind.");
     } else {
+      if (!this.activeSessionId) {
+        check("observation", false, "no active session");
+        return deny("NO_OBSERVATION", "There is no active game session; the broker refuses to act outside a live session.");
+      }
+      if (!world) {
+        check("observation", false, "no observation recorded for the active session");
+        return deny("NO_OBSERVATION", "No world observation is available for the active session; the broker fails closed instead of acting blind.");
+      }
+      if (world.sessionId !== this.activeSessionId) {
+        check("observation", false, "observation belongs to a different session");
+        return deny("SESSION_MISMATCH", "The latest world observation belongs to a different game session; refresh it before acting.");
+      }
       const age = nowMs - world.observedAtMs;
       const fresh = age <= policy.maxObservationAgeMs;
       check("observation", fresh, `observation sequence ${world.sequence} is ${Math.max(0, Math.round(age))} ms old`);

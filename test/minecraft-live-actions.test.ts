@@ -120,6 +120,19 @@ test("berry harvesting refuses unripe bushes and confirms a ripe harvest through
   await adapter.disconnect("test");
 });
 
+test("berry harvest waits for a delayed server-side inventory update", async () => {
+  const mock = createLiveMock({ berryHarvestDelayMs: 1_200 });
+  mock.blocks.set("3,64,0", { name: "sweet_berry_bush", type: 2, boundingBox: "block", age: 3 });
+  const adapter = await connectAdapter(mock);
+  const startedAt = Date.now();
+  const harvested = await run(adapter, MINECRAFT_HARVEST_BERRIES_CAPABILITY, { x: 3, y: 64, z: 0, dangerRadius: 6 });
+
+  assert.equal(harvested.confirmed, true);
+  assert.equal(mock.countItem("sweet_berries"), 2);
+  assert.ok(Date.now() - startedAt >= 1_100, "the result waited for the late server update");
+  await adapter.disconnect("test");
+});
+
 test("rest confirms a health increase observed during the rest window", async () => {
   const mock = createLiveMock({ health: 8, food: 20, regenerate: true });
   const adapter = await connectAdapter(mock);
@@ -562,6 +575,47 @@ test("collecting a log 18 blocks away walks there, digs it, and confirms the ite
   await adapter.disconnect("test");
 });
 
+test("collection re-reads the target after navigation and refuses to dig a vanished log", async () => {
+  const mock = createLiveMock();
+  mock.setPlayer(12.5, 64, 18.5);
+  mock.blocks.set("12,64,0", { name: "oak_log", type: 1, boundingBox: "block" });
+  const { digs } = bindReachAndDig(mock);
+  const originalGoto = mock.bot.pathfinder.goto as unknown as (goal: unknown) => Promise<void>;
+  (mock.bot.pathfinder as { goto: unknown }).goto = async (goal: unknown) => {
+    await originalGoto(goal);
+    mock.blocks.delete("12,64,0");
+  };
+  const adapter = await connectAdapter(mock);
+
+  await assert.rejects(
+    run(adapter, MINECRAFT_COLLECT_BLOCK_CAPABILITY, { x: 12, y: 64, z: 0, blockName: "oak_log", dangerRadius: 6 }),
+    (error: unknown) => (error as { code?: string }).code === "RESOURCE_TARGET_CHANGED",
+  );
+  assert.deepEqual(digs, [], "a stale pre-walk block reference must never be dug");
+  assert.equal(mock.countItem("oak_log"), 0);
+  await adapter.disconnect("target-change test complete");
+});
+
+test("mining re-reads the target after navigation and refuses to dig a replaced block", async () => {
+  const mock = createLiveMock();
+  mock.setPlayer(12.5, 64, 18.5);
+  mock.blocks.set("12,64,0", { name: "dirt", type: 3, boundingBox: "block" });
+  const { digs } = bindReachAndDig(mock);
+  const originalGoto = mock.bot.pathfinder.goto as unknown as (goal: unknown) => Promise<void>;
+  (mock.bot.pathfinder as { goto: unknown }).goto = async (goal: unknown) => {
+    await originalGoto(goal);
+    mock.blocks.set("12,64,0", { name: "sand", type: 12, boundingBox: "block" });
+  };
+  const adapter = await connectAdapter(mock);
+
+  await assert.rejects(
+    run(adapter, MINECRAFT_MINE_BLOCK_CAPABILITY, { x: 12, y: 64, z: 0, blockName: "dirt", dangerRadius: 6 }),
+    (error: unknown) => (error as { code?: string }).code === "RESOURCE_TARGET_CHANGED",
+  );
+  assert.deepEqual(digs, [], "the dig may only use a freshly observed block with the requested name");
+  await adapter.disconnect("target-change test complete");
+});
+
 test("a collected block whose drop is never picked up is not reported as a gathered log", async () => {
   const mock = createLiveMock();
   mock.setPlayer(12.5, 64, 2.5);
@@ -570,6 +624,7 @@ test("a collected block whose drop is never picked up is not reported as a gathe
   const adapter = await connectAdapter(mock);
   const outcome = await run(adapter, MINECRAFT_COLLECT_BLOCK_CAPABILITY, { x: 12, y: 64, z: 0, blockName: "oak_log", dangerRadius: 6 });
   assert.equal(outcome.confirmed, false);
+  assert.equal(outcome.failure?.code, "ITEM_DROP_NOT_FOUND");
   assert.equal(outcome.details?.blockRemoved, true);
   assert.equal(outcome.details?.inventoryGained, false);
   await adapter.disconnect("test");

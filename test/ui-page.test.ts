@@ -30,6 +30,7 @@ function server(change?: (snapshot: Snapshot) => void, queries: Record<string, u
 }
 
 async function openTab(booted: BootedPage, tab: string): Promise<void> {
+  if (!booted.page.byId("tools-navigation").open) booted.page.click("tools-navigation-summary");
   booted.page.click(`tab-${tab}`);
   await booted.settle();
   await booted.settle();
@@ -102,20 +103,26 @@ test("reloading the page only reads: booting sends no command, however many time
   assert.deepEqual(stub.commands(), []);
 });
 
-test("tabs: the hash picks the tab, clicks and arrow keys move between them, and an unknown hash falls back to the overview", async () => {
+test("tabs: the dropdown starts closed, the hash picks a tab, clicks and arrow keys move between them", async () => {
   await withPage(server(), async ({ page, settle }) => {
     assert.equal(page.byId("tab-overview").getAttribute("aria-selected"), "true");
+    assert.equal(page.byId("tools-navigation").open, false, "the navigation is compact until requested");
+    assert.equal(page.isHidden(page.byId("tab-training")), true, "closed navigation is not keyboard or click accessible");
     assert.equal(page.byId("panel-overview").hasAttribute("hidden"), false);
     assert.equal(page.byId("panel-bots").hasAttribute("hidden"), true);
+    page.click("tools-navigation-summary");
+    assert.equal(page.byId("tools-navigation").open, true);
     page.click("tab-bots");
     await settle();
     assert.equal(page.window.location.hash, "#/bots");
+    assert.equal(page.byId("tools-navigation").open, false, "choosing a section closes the dropdown");
     assert.equal(page.byId("tab-bots").getAttribute("aria-selected"), "true");
     assert.equal(page.byId("tab-overview").getAttribute("aria-selected"), "false");
     assert.equal(page.byId("tab-overview").tabIndex, -1, "only the selected tab is in the tab order");
     assert.equal(page.byId("panel-bots").hasAttribute("hidden"), false);
     assert.equal(page.byId("panel-overview").hasAttribute("hidden"), true);
 
+    page.click("tools-navigation-summary");
     page.press("tab-bots", "ArrowRight");
     assert.equal(page.byId("tab-tasks").getAttribute("aria-selected"), "true");
     page.press("tab-tasks", "End");
@@ -128,6 +135,7 @@ test("tabs: the hash picks the tab, clicks and arrow keys move between them, and
     page.window.location.hash = "#/learning";
     page.window.fire("hashchange");
     assert.equal(page.byId("tab-learning").getAttribute("aria-selected"), "true");
+    assert.equal(page.byId("tools-navigation").open, false, "hash navigation closes the dropdown");
     page.window.location.hash = "#/not-a-tab";
     page.window.fire("hashchange");
     assert.equal(page.byId("tab-learning").getAttribute("aria-selected"), "true", "a bad hash changes nothing");
@@ -218,13 +226,13 @@ test("a section that cannot be drawn says so on the page and the rest keeps work
   });
   await withPage(
     stub,
-    async ({ page, settle }) => {
+    async (booted) => {
+      const { page } = booted;
       assert.match(page.visibleText("render-error"), /could not be drawn/);
       assert.equal(page.visibleText("session-pill-text").length > 0, true, "the header still updates");
       assert.equal(page.window.console.errors.length > 0, true, "the failure is also reported to the console for debugging");
       page.window.console.errors.length = 0;
-      page.click("tab-bots");
-      await settle();
+      await openTab(booted, "bots");
       assert.equal(page.visibleText("render-error"), "", "another tab draws fine");
       assert.match(page.visibleText("bots-list"), /Simulated bot/);
     },
@@ -242,6 +250,28 @@ test("a simulated session is announced on every tab and never reads as a real Mi
   });
 });
 
+test("the Overview is an operator summary with navigation and secondary detail collapsed", async () => {
+  await withPage(server(idleSession), async ({ page }) => {
+    const overview = page.visibleText("panel-overview");
+    assert.equal(page.byId("overview-details").open, false);
+    assert.equal(page.byId("session-details").open, false);
+    assert.equal(page.byId("world-details").open, false);
+    assert.doesNotMatch(overview, /Recent activity|Tests and evaluation|Minecraft version|Exact position|Observation #41/);
+    assert.match(overview, /Connection details/);
+    assert.match(overview, /World details/);
+    assert.match(overview, /Session/);
+    assert.match(overview, /Current task/);
+    assert.match(overview, /Player and world/);
+    assert.match(overview, /Controls/);
+
+    page.click("overview-details-summary");
+    assert.match(page.visibleText("panel-overview"), /Recent activity/);
+    assert.match(page.visibleText("panel-overview"), /Tests and evaluation/);
+    page.click("overview-details-summary");
+    assert.doesNotMatch(page.visibleText("panel-overview"), /Recent activity/);
+  });
+});
+
 test("a live session is labelled live and carries no simulated banner", async () => {
   const stub = server((snapshot) => {
     idleSession(snapshot);
@@ -252,6 +282,8 @@ test("a live session is labelled live and carries no simulated banner", async ()
   await withPage(stub, async ({ page }) => {
     assert.equal(page.byId("banner").hasAttribute("hidden"), true);
     assert.equal(page.visibleText("source-badge"), "LIVE");
+    assert.doesNotMatch(page.visibleText("ov-session"), /127\.0\.0\.1:25565|1\.20\.4/);
+    page.click("session-details-summary");
     assert.match(page.visibleText("ov-session"), /127\.0\.0\.1:25565/);
     assert.match(page.visibleText("ov-session"), /1\.20\.4/);
   });
@@ -277,7 +309,8 @@ test("a stale live observation is called out with its consequence, not shown as 
     assert.match(vitals, /read 5 min \d\d s ago/, "says how old the observation is");
     assert.match(vitals, /STALE_OBSERVATION/, "names the safety rule that applies");
     assert.match(vitals, /read-only actions still run/);
-    assert.match(vitals, /Observation #41 · 5 min \d\d s ago · stale/, "the card subtitle agrees");
+    assert.match(vitals, /Observed 5 min \d\d s ago · stale/, "the compact subtitle agrees");
+    assert.doesNotMatch(vitals, /Observation #41/, "the sequence number stays in the collapsed detail");
     assert.match(vitals, /Health\s*14 \/ 20/, "the last known values stay visible next to the warning");
   });
 });
@@ -289,7 +322,7 @@ test("a fresh live observation carries no stale notice", async () => {
     const vitals = page.visibleText("ov-vitals");
     assert.doesNotMatch(vitals, /stale/i);
     assert.doesNotMatch(vitals, /STALE_OBSERVATION/);
-    assert.match(vitals, /Observation #42 · just now/);
+    assert.match(vitals, /Observed just now/);
   });
 });
 
@@ -380,7 +413,7 @@ test("a refused command is shown as a refusal with the server's reason", async (
   });
   stub.commandResults.stopTask = { status: 409, body: { ok: false, message: "The task already finished." } };
   await withPage(stub, async ({ page, settle }) => {
-    page.click(page.button("Stop task", "ov-controls"));
+    page.click(page.button("Stop task", "ov-task"));
     await settle();
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.match(page.visibleText("toasts"), /Not done.*The task already finished\./);
@@ -647,6 +680,9 @@ test("the Tasks tab explains the latest decision: what was chosen, what was reje
   const overtaken = data.rejected.find((entry) => entry.reason === "lower_band");
   assert.ok(overtaken, "the real record explains the goal it put aside");
   await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = [event]; }), async ({ page }) => {
+    const rejected = page.all("summary", "tasks-decision").find((summary) => page.visibleText(summary).includes("Rejected candidates"));
+    assert.ok(rejected);
+    page.click(rejected);
     const text = page.visibleText("tasks-decision");
     assert.match(text, /Latest decision/);
     assert.ok(text.includes(data.summary), "the model's own summary is shown");
@@ -668,6 +704,9 @@ test("a decision that stopped the task shows its blocking code and reason, and a
   assert.equal(data.selected, null);
   assert.equal(data.blockingCode, "TASK_BLOCKED_SHELTER");
   await openTasks(server((snapshot) => { idleSession(snapshot); snapshot.recentDecisions = [event]; }), async ({ page }) => {
+    const rejected = page.all("summary", "tasks-decision").find((summary) => page.visibleText(summary).includes("Rejected candidates"));
+    assert.ok(rejected);
+    page.click(rejected);
     const text = page.visibleText("tasks-decision");
     assert.ok(text.includes("TASK_BLOCKED_SHELTER"), "the blocking code is a badge on the card");
     assert.ok(text.includes(data.summary));
@@ -683,6 +722,97 @@ test("with no decision recorded the card says so instead of showing an empty tab
     const text = page.visibleText("tasks-decision");
     assert.match(text, /No decision recorded yet/);
     assert.ok(!/Alternatives considered|Rejected candidates/.test(text));
+  });
+});
+
+test("the headless benchmark is manual, shows the 256-case runtime, and sends its environment, worker and stage choices", async () => {
+  const stub = server(undefined, { "training-preflight": preflightWith({ resume: { possible: true, summary: "Resumes the saved run." } }, { hasRun: true }) });
+  await openTraining(stub, async ({ page, settle }) => {
+    assert.ok(page.byId("benchmark-form"), "the Training tab includes a dedicated manual benchmark form");
+    assert.equal(page.byId("benchmark-environment-cases").value, "13");
+    assert.equal(page.byId("benchmark-environment-seconds").value, "20");
+    assert.equal(page.byId("benchmark-worker-limit").value, "4");
+    const stages = page.all("input", "benchmark-form").filter((input) => input.type === "checkbox");
+    assert.equal(stages.length, 3);
+    assert.ok(stages.every((stage) => stage.checked));
+    assert.match(page.visibleText("benchmark-estimate"), /256 × 20 s is about 85 minutes/);
+    assert.match(page.visibleText("training-benchmarks"), /never starts automatically after training/);
+    assert.deepEqual(stub.commands(), [], "opening the page does not start a benchmark");
+
+    page.type("benchmark-environment-cases", "256");
+    page.type("benchmark-environment-seconds", "20");
+    page.choose("benchmark-worker-limit", "8");
+    page.check(stages[0] as FakeElement, false);
+    page.window.confirmAnswer = false;
+    page.submit("benchmark-form");
+    await settle();
+    await settle();
+    assert.deepEqual(stub.commands(), [], "declining the cost confirmation sends nothing");
+    assert.match(page.window.confirmations.at(-1) ?? "", /about 1 h 28 min/);
+
+    page.window.confirmAnswer = true;
+    page.submit("benchmark-form");
+    await settle();
+    await settle();
+    const command = stub.commands().find((item) => item.type === "runBenchmark");
+    assert.deepEqual(command?.payload, {
+      environmentCases: 256,
+      environmentSecondsPerCase: 20,
+      workerLimit: 8,
+      stageIds: [stages[1]?.value, stages[2]?.value],
+    });
+  });
+});
+
+test("benchmark reports explain when a selected stage is retained without a learning signal", async () => {
+  const listing = {
+    directory: "data/experiments/benchmarks",
+    reports: [{
+      name: "partial-sweep",
+      file: "partial-sweep.json",
+      createdAt: new Date().toISOString(),
+      winner: null,
+      decision: "Stages without a reliable signal are retained.",
+      workers: 1,
+      probe: null,
+      environmentCases: 1,
+      environmentSecondsPerCase: 20,
+      environmentScores: [
+        { stageId: "basics", cases: 1, completedCases: 1, episodes: 8, meanLearningSignal: 0.8, recommended: true },
+        { stageId: "food", cases: 0, completedCases: 0, episodes: 0, meanLearningSignal: null, recommended: true },
+      ],
+      recommendedStageIds: ["basics", "food"],
+      rows: [],
+      unreadable: false,
+    }],
+    savedDefault: null,
+  };
+  const stub = server(undefined, {
+    "training-preflight": preflightWith({ resume: { possible: true, summary: "Resumes the saved run." } }, { hasRun: true }),
+    benchmarks: listing,
+  });
+  await openTraining(stub, async ({ page }) => {
+    assert.match(page.visibleText("training-benchmarks"), /retained · unmeasured/);
+    assert.match(page.visibleText("training-benchmarks"), /Stages without a reliable signal are retained/);
+  });
+});
+
+test("benchmark and training stage selectors seed from the saved environment recommendation", async () => {
+  const stub = server((snapshot) => { snapshot.training.defaultStageIds = ["food"]; }, {
+    "training-preflight": preflightWith({ resume: { possible: false, summary: "No saved run." } }, { hasRun: false }),
+  });
+  await openTraining(stub, async ({ page, settle }) => {
+    const trainingStages = page.all("input", "training-stages");
+    const benchmarkStages = page.all("input", "benchmark-form").filter((input) => input.type === "checkbox");
+    assert.deepEqual(trainingStages.filter((stage) => stage.checked).map((stage) => stage.value), ["food"]);
+    assert.deepEqual(benchmarkStages.filter((stage) => stage.checked).map((stage) => stage.value), ["food"]);
+    page.click("training-start");
+    await settle();
+    assert.deepEqual(stub.commands().find((item) => item.type === "startTraining")?.payload, {
+      directory: "training",
+      fresh: false,
+      confirmFresh: false,
+    }, "the stage choice already matches the benchmark default, so no redundant override is sent");
   });
 });
 
@@ -997,6 +1127,7 @@ test("event text from the game or a server can never inject markup into the page
   });
   await withPage(stub, async (booted) => {
     const { page } = booted;
+    page.click("overview-details-summary");
     assert.equal(page.all("img").length, 0);
     assert.match(page.visibleText("ov-activity"), /<img src=x onerror="alert\(1\)">/, "shown as text");
     await openTab(booted, "memory");
@@ -1046,6 +1177,9 @@ test("a Library action with parameters gets an inline form that survives polling
     snapshot.library = { catalog: [entry], operations: [] };
   });
   await openBots(stub, async ({ page, settle, app }) => {
+    const showActions = page.all("summary", "bots-library").find((summary) => page.visibleText(summary) === "Show actions");
+    assert.ok(showActions);
+    page.click(showActions);
     const form = page.all("form[data-library-id]")[0];
     assert.ok(form, "the entry has its own form");
     page.type("lib-navigation.goto-x", "10");

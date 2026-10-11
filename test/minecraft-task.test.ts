@@ -35,6 +35,36 @@ function makeTaskRunner(
   };
 }
 
+
+test("a failed pre-decision refresh never uses the cached world to launch an action", async () => {
+  const { runtime, runner, sink } = makeTaskRunner();
+  runtime.observeIfStale = async () => null;
+  const result = await runner.run(DEFAULT_GATHER_LOG_TASK);
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.failure?.code, "PRE_ACTION_OBSERVATION_FAILED");
+  assert.equal(result.actions.length, 0, "the cached world was not used for an action");
+  assert.equal(runtime.currentWorldState !== null, true, "the last world remains available for stale display");
+  assert.equal(sink.events.some((event) => event.eventType === "task.action"), false);
+  await runtime.shutdown("failed observation regression complete");
+});
+
+test("runtime safety context is session-bound and a failed stale refresh is reported as unavailable", async () => {
+  const { runtime, adapter } = makeTaskRunner();
+  await runtime.connect();
+  const cached = runtime.currentWorldState;
+  assert.ok(cached);
+  assert.equal(runtime.safety?.snapshot().world?.sessionId, cached.sessionId);
+
+  adapter.observe = async () => { throw new Error("fixture observation failed"); };
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const refreshed = await runtime.observeIfStale(0);
+  assert.equal(refreshed, null, "callers must not treat the retained cached world as a successful refresh");
+  assert.equal(runtime.currentWorldState, cached, "the runtime retains the last value for a stale read-only view");
+  assert.equal(runtime.safety?.world?.sessionId, cached.sessionId);
+  await runtime.shutdown("observation refresh regression complete");
+});
+
 test("task loop waits through a confirmed death, recovers after respawn, and then replans", async () => {
   const fixture = createFakeMinecraftFixture(1337);
   const deadObservation: MinecraftObservation = {

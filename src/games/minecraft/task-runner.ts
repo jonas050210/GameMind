@@ -574,7 +574,18 @@ export class MinecraftTaskRunner {
         // A decision must rest on an observation that is still fresh. The fast loop normally keeps it so; if
         // it is not (a slow observation, a skipped tick), observe now instead of deciding on old facts.
         const refreshed = await this.runtime.observeIfStale(REFLEX_THRESHOLDS.staleAfterMs).catch(() => null);
-        if (refreshed && refreshed.sequence !== world.sequence) world = refreshed;
+        if (!refreshed || refreshed.sessionId !== this.runtime.session?.id) {
+          const disconnected = this.runtime.adapter.status !== "connected" || !this.runtime.session;
+          status = disconnected ? "disconnected" : "failed";
+          failure = {
+            code: disconnected ? "ADAPTER_DISCONNECTED" : "PRE_ACTION_OBSERVATION_FAILED",
+            message: disconnected
+              ? "The active game session ended before a fresh observation was available; no further actions were attempted."
+              : "A fresh observation could not be obtained before the next decision; the cached world was not used for another action.",
+          };
+          break;
+        }
+        world = refreshed;
         memory.observe(world.state, world.sequence);
         knownResourceBlocksPeak = Math.max(knownResourceBlocksPeak, memory.blockSightings().length);
 
