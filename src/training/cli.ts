@@ -1,19 +1,23 @@
 #!/usr/bin/env node
 import pino from "pino";
+import { cpus } from "node:os";
 import { evaluateCheckpoint } from "./evaluate.js";
 import { DEFAULT_TRAINING_EXPLORATION_RATE, TRAINING_STAGES } from "./curriculum.js";
 import { readControlCommand, readTrainingState, trainingPaths, writeControlCommand } from "./state.js";
 import { runTraining } from "./trainer.js";
 import { readTrainingDefaults } from "./defaults.js";
 
-const USAGE = `GameMind training
+const MAX_WORKERS = 8;
 
-  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh] [--explore RATE] [--stages A,B] [--workers N] [--defaults-file FILE]
+  const USAGE = `GameMind training
+
+  npm run train -- train [--dir DIR] [--episodes-per-stage N] [--max-episodes N] [--max-minutes M] [--fresh] [--explore RATE] [--stages A,B] [--workers N] [--defaults-file FILE] [--quiet]
       Runs the curriculum on the offline simulator. Resumes from DIR/state.json unless --fresh is given; --fresh
       archives (never deletes) the existing run first. --explore defaults to ${DEFAULT_TRAINING_EXPLORATION_RATE} (0 = greedy).
       --stages picks curriculum stages by id (${TRAINING_STAGES.map((stage) => stage.id).join(", ")}). One run per directory at a time.
-      --workers runs that many episodes at once (1-8). Without --workers and --explore, the saved default from
+      --workers runs that many episodes at once (1-8, defaults to CPU cores). Without --workers and --explore, the saved default from
       the benchmark (--defaults-file, default data/training-defaults.json) is used when there is one.
+      --quiet suppresses most logging for better performance.
   npm run train -- evaluate [--dir DIR] [--checkpoint ID] [--seeds N]
       Scores a checkpoint against the baseline on held-out evaluation seeds and writes a JSON report.
   npm run train -- status [--dir DIR]
@@ -35,6 +39,7 @@ interface ParsedArgs {
   readonly seeds?: number;
   readonly workers?: number;
   readonly defaultsFile: string;
+  readonly quiet: boolean;
 }
 
 function integerFlag(name: string, value: string | undefined, min: number, max: number): number {
@@ -47,7 +52,7 @@ function integerFlag(name: string, value: string | undefined, min: number, max: 
 
 export function parseTrainingArgs(argv: readonly string[]): ParsedArgs {
   const [command = "help", ...rest] = argv;
-  const parsed: { -readonly [K in keyof ParsedArgs]: ParsedArgs[K] } = { command, dir: "data/training", fresh: false, defaultsFile: "data/training-defaults.json" };
+  const parsed: { -readonly [K in keyof ParsedArgs]: ParsedArgs[K] } = { command, dir: "data/training", fresh: false, defaultsFile: "data/training-defaults.json", quiet: false };
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index]!;
     const value = () => {
@@ -93,10 +98,20 @@ export function parseTrainingArgs(argv: readonly string[]): ParsedArgs {
         parsed.seeds = integerFlag(flag, value(), 1, 200);
         break;
       case "--workers":
-        parsed.workers = integerFlag(flag, value(), 1, 8);
+        if (value() === "auto") {
+          parsed.workers = Math.min(8, cpus().length);
+        } else {
+          parsed.workers = integerFlag(flag, value(), 1, MAX_WORKERS);
+        }
         break;
       case "--defaults-file":
         parsed.defaultsFile = value();
+        break;
+      case "--quiet":
+        parsed.quiet = true;
+        break;
+      case "--quiet":
+        parsed.quiet = true;
         break;
       default:
         throw new Error(`Unknown option ${flag}.\n\n${USAGE}`);
@@ -126,7 +141,8 @@ async function main(): Promise<number> {
         ...(args.maxMinutes !== undefined ? { maxMinutes: args.maxMinutes } : {}),
         fresh: args.fresh,
         explorationRate: args.explore ?? saved?.explorationRate ?? DEFAULT_TRAINING_EXPLORATION_RATE,
-        workers: args.workers ?? saved?.workers ?? 1,
+        workers: args.workers ?? saved?.workers ?? Math.min(8, cpus().length),
+        quiet: args.quiet,
         ...(selectedStageIds ? { stages: TRAINING_STAGES.filter((stage) => selectedStageIds.includes(stage.id)) } : {}),
         evaluationSeedCount: 10,
         logger,

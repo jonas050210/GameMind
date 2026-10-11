@@ -1792,12 +1792,5 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
     "Stops training after the current episode. Same control as the Training panel.",
     (commands) => commands.stopTraining?.() ?? { ok: false, message: "Training is not available in this host." },
   );
-  trainingDelegate(
-    "learn.training-evaluate",
-    "Evaluate latest checkpoint",
-    "Evaluates the latest training checkpoint on held-out seeds. Same control as the Training panel.",
-    (commands) => commands.evaluateTraining?.() ?? { ok: false, message: "Training is not available in this host." },
-  );
-
   return registry;
 }

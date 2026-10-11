@@ -3,6 +3,11 @@ import path from "node:path";
 import { writeFileAtomic } from "../atomic-file.js";
 import { episodeSchema, type Episode } from "./episode.js";
 
+// Configuration constants
+const DEFAULT_MAX_EPISODES = 20_000;
+const DEFAULT_BUFFER_SIZE = 100;
+const FLUSH_TIMEOUT_MS = 1000;
+
 /**
  * Append-only JSONL experience log. Every line is one validated episode; malformed or unsupported
  * lines are counted and skipped rather than poisoning the learner, so a truncated write from a
@@ -13,6 +18,8 @@ export interface ExperienceStoreOptions {
   /** Episodes above this count trigger a compaction that keeps the most recent entries. */
   readonly maxEpisodes?: number;
   readonly fileName?: string;
+  /** Number of episodes to buffer before writing to disk. Larger values reduce I/O but increase memory usage. */
+  readonly bufferSize?: number;
 }
 
 export interface ExperienceStoreStats {
@@ -28,19 +35,21 @@ export interface LoadedEpisodes {
   readonly skippedLines: number;
 }
 
-const DEFAULT_MAX_EPISODES = 20_000;
-
 export class ExperienceStore {
   private readonly directory: string;
   private readonly fileName: string;
   private readonly maxEpisodes: number;
   private queue: Promise<void> = Promise.resolve();
   private cachedLines: number | null = null;
+  private buffer: Episode[] = [];
+  private readonly bufferSize: number;
+  private flushTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ExperienceStoreOptions) {
     this.directory = options.directory;
     this.fileName = options.fileName ?? "episodes.jsonl";
     this.maxEpisodes = options.maxEpisodes ?? DEFAULT_MAX_EPISODES;
+    this.bufferSize = options.bufferSize ?? DEFAULT_BUFFER_SIZE;
   }
 
   get filePath(): string {
@@ -48,7 +57,24 @@ export class ExperienceStore {
   }
 
   async append(episode: Episode): Promise<void> {
-    await this.appendMany([episode]);
+    this.buffer.push(episode);
+    if (this.buffer.length >= this.bufferSize) {
+      await this.flushBuffer();
+    } else if (this.flushTimeout === null) {
+      // Schedule flush after inactivity timeout
+      this.flushTimeout = setTimeout(() => this.flushBuffer(), FLUSH_TIMEOUT_MS);
+    }
+  }
+
+  /**
+   * Flushes the internal buffer to disk. Call this before shutdown to ensure all data is written.
+   */
+  async flush(): Promise<void> {
+    if (this.flushTimeout !== null) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+    await this.flushBuffer();
   }
 
   /**
@@ -57,7 +83,29 @@ export class ExperienceStore {
    */
   async appendMany(episodes: readonly Episode[]): Promise<void> {
     if (episodes.length === 0) return;
-    const parsed = episodes.map((episode) => episodeSchema.parse(episode));
+    this.buffer.push(...episodes);
+    if (this.buffer.length >= this.bufferSize) {
+      await this.flushBuffer();
+    } else if (this.flushTimeout === null) {
+      // Schedule flush after inactivity timeout
+      this.flushTimeout = setTimeout(() => this.flushBuffer(), FLUSH_TIMEOUT_MS);
+    }
+  }
+
+  /**
+   * Internal method to write buffered episodes to disk.
+   */
+  private async flushBuffer(): Promise<void> {
+    if (this.buffer.length === 0) return;
+    
+    if (this.flushTimeout !== null) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
+    
+    const episodesToWrite = this.buffer.splice(0, this.buffer.length);
+    const parsed = episodesToWrite.map((episode) => episodeSchema.parse(episode));
+    
     this.queue = this.queue.then(async () => {
       await mkdir(this.directory, { recursive: true });
       // The size *before* this batch, because the count is maintained incrementally from here on. It
@@ -92,6 +140,17 @@ export class ExperienceStore {
     const lines = raw.split("\n").filter((line) => line.trim().length > 0);
     const kept = lines.slice(drop).join("\n");
     await writeFileAtomic(this.filePath, kept.length > 0 ? `${kept}\n` : "");
+  }
+
+  /**
+   * Clean up resources and ensure all buffered data is written.
+   */
+  async close(): Promise<void> {
+    await this.flush();
+    if (this.flushTimeout !== null) {
+      clearTimeout(this.flushTimeout);
+      this.flushTimeout = null;
+    }
   }
 
   async load(limit?: number): Promise<LoadedEpisodes> {

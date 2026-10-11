@@ -17,8 +17,9 @@ export const TRAINING_SEED_BASE = 1_000_000;
  * Exploration offered to a new run. Greedy training (0) only ever records the top-ranked candidate of each decision, so
  * the learner never sees how an alternative would have gone and cannot learn to prefer one. A modest, seeded rate gives
  * it that counterfactual evidence; 0 is still available (`--explore 0`) and means exactly what it says.
+ * Increased from 0.15 to 0.3 for better exploration and learning.
  */
-export const DEFAULT_TRAINING_EXPLORATION_RATE = 0.15;
+export const DEFAULT_TRAINING_EXPLORATION_RATE = 0.3;
 
 export interface CurriculumStage {
   readonly id: string;

@@ -170,7 +170,6 @@ export const GERMAN = {
   "Error": "Fehler",
   "Evaluate a checkpoint from the Training tab.": "Bewerte einen Checkpoint im Tab „Training“.",
   "Evaluate a checkpoint to compare it with the baseline on held-out seeds.": "Bewerte einen Checkpoint, um ihn mit der Baseline auf zurückgehaltenen Seeds zu vergleichen.",
-  "Evaluate latest checkpoint": "Letzten Checkpoint bewerten",
   "Evaluation set": "Evaluationsset",
   "Evaluation started; the verdict appears here when it finishes.": "Die Auswertung startete; das Urteil erscheint hier, wenn sie fertig ist.",
   "Evaluations": "Evaluationen",

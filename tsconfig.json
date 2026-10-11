@@ -16,7 +16,7 @@
     "skipLibCheck": true,
     "declaration": true,
     "sourceMap": true,
-    "types": ["node"]
+    "types": ["node", "vitest/globals"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "dist"]

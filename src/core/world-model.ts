@@ -1,11 +1,23 @@
 import type { GameObservation, GameSession, WorldState } from "./types.js";
 
+export interface Position {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+}
+
 export class WorldModel<TState = unknown> {
   private currentValue: WorldState<TState> | null = null;
   private sessionValue: GameSession | null = null;
+  private currentPosition: Position | null = null;
 
   get current(): WorldState<TState> | null {
     return this.currentValue;
+  }
+
+  /** The player's current position, or null if no observation has been applied yet. */
+  get position(): Position | null {
+    return this.currentPosition;
   }
 
   beginSession(session: GameSession): void {
@@ -50,6 +62,16 @@ export class WorldModel<TState = unknown> {
       throw new Error(
         `Stale observation sequence ${observation.sequence}; current sequence is ${this.currentValue.sequence}.`,
       );
+    }
+
+    // Extract position from observation if available (Minecraft observations have player.position)
+    const obsState = observation.state as { player?: { position?: { x: number; y: number; z: number } } };
+    if (obsState?.player?.position) {
+      this.currentPosition = {
+        x: obsState.player.position.x,
+        y: obsState.player.position.y,
+        z: obsState.player.position.z,
+      };
     }
 
     const state: WorldState<TState> = {

@@ -364,8 +364,8 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     description:
       "Navigate to a nearby coordinate using conservative pathfinding; pathfinding is configured not to dig, build, parkour, sprint, or drop more than one block.",
     inputSchema: minecraftNavigateInputSchema,
-    defaultTimeoutMs: 30_000,
-    maxTimeoutMs: 60_000,
+    defaultTimeoutMs: 5_000,
+    maxTimeoutMs: 10_000,
     risk: "medium",
   },
   {
@@ -373,8 +373,8 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     description:
       "Pathfind to and collect one observed overworld log block after rechecking its identity, survival mode, range, harvestability, and fresh hostile proximity. Other block types are not permitted by this action.",
     inputSchema: minecraftCollectBlockInputSchema,
-    defaultTimeoutMs: 45_000,
-    maxTimeoutMs: 90_000,
+    defaultTimeoutMs: 5_000,
+    maxTimeoutMs: 10_000,
     risk: "medium",
   },
   {
@@ -389,8 +389,8 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     name: MINECRAFT_CRAFT_CAPABILITY,
     description: "Craft a small allowlisted set of wood/plank items using only available inventory and, when specified, a nearby observed crafting table.",
     inputSchema: minecraftCraftItemInputSchema,
-    defaultTimeoutMs: 30_000,
-    maxTimeoutMs: 60_000,
+    defaultTimeoutMs: 5_000,
+    maxTimeoutMs: 10_000,
     risk: "medium",
   },
   {
@@ -414,8 +414,8 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     description:
       "Walk to one observed dropped food, log, mining drop, or known-useful craftable and confirm that the matching item entered the inventory. The finite item allowlist rejects arbitrary names; no entity is attacked.",
     inputSchema: minecraftPickupItemInputSchema,
-    defaultTimeoutMs: 30_000,
-    maxTimeoutMs: 60_000,
+    defaultTimeoutMs: 5_000,
+    maxTimeoutMs: 10_000,
     risk: "medium",
   },
   {
@@ -423,8 +423,8 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     description:
       "Walk within reach of one observed sweet berry bush whose age is ripe (2 or 3), right-click it once, and confirm that sweet berries entered the inventory.",
     inputSchema: minecraftHarvestBerriesInputSchema,
-    defaultTimeoutMs: 30_000,
-    maxTimeoutMs: 60_000,
+    defaultTimeoutMs: 5_000,
+    maxTimeoutMs: 10_000,
     risk: "low",
   },
   {
@@ -450,8 +450,8 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     description:
       "Pathfind to one allowlisted stone-class or ore block, check the pickaxe tier the drop requires, dig it, and confirm the drop entered the inventory. Blocks outside the allowlist are refused.",
     inputSchema: minecraftMineBlockInputSchema,
-    defaultTimeoutMs: 60_000,
-    maxTimeoutMs: 120_000,
+    defaultTimeoutMs: 5_000,
+    maxTimeoutMs: 10_000,
     risk: "medium",
   },
   {

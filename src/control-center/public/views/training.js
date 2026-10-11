@@ -146,8 +146,10 @@ function lastEvaluation(training) {
 
 export function renderTraining(ctx) {
   const training = ctx.snapshot.training;
+  const jobs = ctx.snapshot.jobs?.items ?? [];
+  const benchmarkJob = jobs.find((job) => job.kind === "benchmark");
   if (!training) {
-    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null, "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null, null) };
+    return { "training-notice": notice("neutral", "Training is not available in this run"), "training-metrics": empty("Not available"), "training-reward": null, "training-preflight": null, "training-checkpoints": null, "training-episodes-table": null, "training-eval": null, "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null, null, jobs) };
   }
   return {
     "training-notice": notice("info", "Offline simulator training — not real-world training", "Training runs the agent's decision loop on the built-in simulator in a separate process, without rendering. What it learns is measured on held-out simulator seeds. It says nothing about a real Minecraft world until a live run is verified separately."),
@@ -157,18 +159,27 @@ export function renderTraining(ctx) {
     "training-checkpoints": checkpoints(training),
     "training-episodes-table": episodes(training),
     "training-eval": lastEvaluation(training),
-    "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null, training),
+    "training-benchmarks": benchmarksCard(ctx.data?.benchmarks?.value ?? null, training, jobs),
   };
 }
 
 const GATE_TEXT = { promotable: "promotable", "not-promotable": "not promotable" };
 
 /** Headless worker/environment/exploration benchmark. It is only started by the operator's explicit submit. */
-export function benchmarksCard(listing, training) {
+export function benchmarksCard(listing, training, jobs) {
   const stages = training?.availableStages ?? [];
   const savedStageIds = listing?.savedDefault?.stageIds ?? training?.defaultStageIds ?? null;
   const selectedStageIds = savedStageIds?.length ? savedStageIds : stages.map((stage) => stage.id);
   const stageKey = JSON.stringify({ ids: stages.map((stage) => stage.id), selected: selectedStageIds });
+  const runningBenchmark = jobs?.find((job) => job.kind === "benchmark" && job.state === "running");
+  
+  // Show running benchmark job status
+  const benchmarkJobStatus = runningBenchmark 
+    ? notice("info", "Benchmark is running", 
+        `Job ${runningBenchmark.id} started at ${fmtDateTime(runningBenchmark.startedAt)}. ` +
+        `Output: ${runningBenchmark.outputTail.length > 0 ? runningBenchmark.outputTail.join(" ") : "waiting for output..."}`)
+    : null;
+  
   const benchmarkForm = stages.length
     ? h.stat(`benchmark-form-${stageKey}`, h("form", { id: "benchmark-form", class: "form benchmark-controls" },
         h("fieldset", null,
@@ -200,6 +211,8 @@ export function benchmarksCard(listing, training) {
       )
     : notice("neutral", "No benchmark defaults saved", "Training uses one worker and the standard exploration rate until a benchmark produces a measured recommendation.");
   const subtitle = "Choose worker range and curriculum environments. The benchmark probes learning signals, then compares exploration rates with held-out evaluation.";
+  
+  // Build reports list
   const reports = !listing || !listing.reports?.length
     ? [empty("No benchmark yet", "Run the headless sweep explicitly to measure worker throughput, environment learning signals and held-out policy quality.")]
     : listing.reports.map((report) =>
@@ -270,7 +283,7 @@ export function benchmarksCard(listing, training) {
               ),
         ),
       );
-  return card({ title: "Headless learning benchmark", subtitle }, saved, benchmarkForm, ...reports);
+  return card({ title: "Headless learning benchmark", subtitle }, benchmarkJobStatus, saved, benchmarkForm, ...reports);
 }
 
 export { fmtSigned, unknown };

@@ -54,10 +54,12 @@ function offlineJobs(ctx) {
   const jobs = ctx.snapshot.jobs?.items ?? [];
   const tests = jobs.find((job) => job.kind === "unit-tests") ?? null;
   const run = jobs.find((job) => job.kind === "offline-eval") ?? null;
+  const benchmark = jobs.find((job) => job.kind === "benchmark") ?? null;
   return card(
-    { title: "Offline tests and evaluation", subtitle: "Run on this machine in the simulator and the unit-test suite", actions: sourceBadge("offline") },
+    { title: "Offline tests, evaluation and benchmark", subtitle: "Run on this machine in the simulator", actions: sourceBadge("offline") },
     jobCard(tests, "Unit and integration tests"),
     jobCard(run, "Offline evaluation run"),
+    jobCard(benchmark, "Benchmark"),
   );
 }
 
