@@ -3,7 +3,7 @@
 **Living source of agreed scope and decisions.** Update this file when the user makes or changes a product decision. Preserve the distinction between implemented, planned, deferred, and verified. Do not treat a plan in this document as permission to act in a live Minecraft world.
 
 **Last updated:** 12 October 2026  
-**Current mode:** autonomous implementation is authorized. Finish the in-scope coding first; the user has now explicitly authorized offline tests, builds, type checks, and bug-finding after implementation is complete. Do not connect to or modify a live Minecraft world; that still requires separate explicit approval. Report verified results and remaining risks honestly.
+**Current mode:** the implementation-end offline audit completed on 12 October 2026. Build, full test suites, public typecheck, launcher checks, safe preflight, and the 520-run offline evaluation passed; `/gamemind help` was explicitly tested and a slash-prefix parsing bug was fixed before rerunning validation. No live Minecraft connection or world change occurred. Any live use still requires separate explicit approval.
 
 ## 1. Product direction
 
@@ -15,7 +15,7 @@ The product should have its own deterministic orchestration, planning, validatio
 
 - Chat commands must be accepted only from the **exact configured Minecraft player name**. The code setting is `MINECRAFT_OPERATOR`; its value has not been supplied/configured here. Never trust arbitrary chat users.
 - The user wants a **small Ollama model under 1 billion parameters** for lightweight replies and command navigation, in **English and German only**. The chosen first candidate is `qwen3:0.6b`; the user has an NVIDIA RTX 4060 Ti with 8 GB VRAM. The Ollama service may be installed on Windows, WSL, or both; the active endpoint is not yet confirmed.
-- This session must remain **offline with respect to Minecraft**: do not connect to a live world, place blocks, gather materials, craft, excavate, or otherwise change it. The user has authorized offline validation once implementation is complete; do not run it before then.
+- This implementation and audit remained **offline with respect to Minecraft**: no live world was connected to, and no blocks, materials, inventory, or other live state were changed. Offline validation is complete; further live use still needs separate explicit approval.
 - The eventual goal may include building from a Litematica schematic, but only after a future explicit implementation/operation decision and operator confirmation.
 - If an eventual builder sees the active Litematica placement move or rotate, the previous approval must become invalid and the new placement must be confirmed before continuing. Confirm once per placement/transform, not once per block, unless the user later requests finer-grained approvals.
 - The eventual builder should work only inside the schematic's bounded area. Skip blocks that already match. Never silently break or replace an existing/unknown block; stop and ask when a target cell is blocked or unsafe.
@@ -27,18 +27,18 @@ The product should have its own deterministic orchestration, planning, validatio
 
 ## 3. Current scope and implementation snapshot
 
-The following implementation is present in the working tree, but the newest changes have not yet passed the authorized end-of-implementation offline audit. Nothing in this session has been connected to a live Minecraft world:
+The implementation-end offline audit completed on 12 October 2026: `npm test` passed (952 Node tests plus 1 Vitest integration test), `npm run build`, `npm run typecheck:public`, all 50 Python launcher tests, and `python3 main.py --check` passed. `npm run eval:offline` passed all scenario gates across 520 runs with zero unsafe actions, unverified confirmations, or deaths. Its policy-ranking check was skipped because no weighted candidate existed. Nothing in this session was connected to a live Minecraft world:
 
 - **Excavation:** bounded to at most 10×10×10 cells, with an approval step and safety checks. Explicit coordinates use the specified top face; “here” uses the captured position.
 - **House prototype and large-house plans:** the fixed 5×5 starter-house remains a separately confirmed prototype with a second material-gathering approval. Offline deterministic plans A/B/C now produce bounded relative block cells, room labels, material estimates, and per-layer counts; `plan house A|B|C` previews one in chat, `--house-plan A|B|C` prints a summary, and `--house-plan-json PATH` exports the complete block plan. These plans never inspect or modify a world and are not a build executor.
-- **Wheat planting:** at most 25×50 cells; requires enough seeds and existing hydrated farmland. It does not till soil or place irrigation. The adapter rechecks overworld/survival mode after internal approach navigation, as well as the target soil/crop and nearby hostile state, before planting; this change remains unverified.
+- **Wheat planting:** at most 25×50 cells; requires enough seeds and existing hydrated farmland. It does not till soil or place irrigation. The adapter rechecks overworld/survival mode after internal approach navigation, as well as the target soil/crop and nearby hostile state, before planting; these checks are covered offline, not live-verified.
 - **Chat path:** a finite English/German command grammar, exact-username filtering, short duplicate suppression, project confirmation, and an optional bounded Ollama conversation helper are in code. Chat is disabled unless `MINECRAFT_OPERATOR` is set to the exact in-game name. Ollama never chooses actions, coordinates, or approval outcomes.
 - **Controls:** status, stop, hold/stay, follow, and come commands are recognized. Priority controls bypass the serialized command/model queue. Stop during an atomic operation remains bounded by the underlying skill's cancellation support.
 - **House safety:** a generic “build house” request no longer silently selects the fixed 5×5 prototype. “Build starter house at X Y Z” names its lower corner; without coordinates the prototype is centered on the fresh position measured when chat arrives. It starts only after a project confirmation, followed by a separate yes/no permission for collecting up to 20 visible oak logs within the adapter's 24-block resource-gather limit. Declining collection restricts the run to carried materials; the runner fails before construction if they are insufficient. The larger-house planner now offers deterministic A/B/C previews and optional JSON export, but those plans are relative, planning-only, and do not authorize construction. See [`LARGE_HOUSE_CONCEPTS.md`](LARGE_HOUSE_CONCEPTS.md).
 - **Litematica P1:** `--litematic-plan PATH` imports a bounded `.litematic` offline and prints dimensions, regions, material totals, and a SHA-256; `--litematic-layer Y` optionally renders a selected normalized layer. A protocol-v1, loopback-by-default receiver and exact-placement review guard are implemented; `docs/LITEMATICA_BRIDGE_PROTOCOL.md` documents them. The terminal `confirm <fingerprint>` records review only and cannot build.
 - **Still missing or deferred:** no Fabric/Litematica client sender, live world diff, `.litematic` export from generated house plans, or Litematica build executor exists. The exact Modrinth/Fabric/Litematica/MaLiLib versions and Windows/WSL networking mode remain unknown, so client compatibility cannot yet be claimed. The large-house plans remain relative previews and do not authorize a build. The README and setup docs document these limits.
 
-**Important:** Presence of code is not proof that it works. The newest chat, importer, bridge, and launcher changes remain unvalidated; do not claim live compatibility or completion until the authorized end-of-implementation offline audit, and never imply live-world verification.
+**Important:** The offline audit passed, but this is not proof of live behavior. Do not claim Java 1.20.4, Fabric/Modrinth, Windows/WSL, real-browser, or Ollama-endpoint compatibility; no live Minecraft verification occurred.
 
 ## 4. Ollama recommendation
 
@@ -90,20 +90,20 @@ Do not silently select a style, add optional features, gather resources, terrafo
 ### P0 — planning foundation (current)
 
 - Keep this document current.
-- The optional small-model connector, exact-operator gate, and duplicate suppression are implemented but not yet validated. Confirm where Ollama runs; do not silently change the default endpoint.
+- The optional small-model connector, exact-operator gate, and duplicate suppression passed offline tests. Confirm where Ollama runs before use; do not silently change the default endpoint. The 520-run offline evaluator passed scenario gates, but skipped policy-ranking evaluation because no weighted candidate was present.
 - The Modrinth/Fabric/Litematica/MaLiLib profile is still unconfirmed.
-- README/setup reconciliation is complete. Large-house concepts A/B/C now generate offline relative block plans with material and layer summaries. Offline `.litematic` import/summary and the plan-only bridge receiver are implemented but remain unvalidated until the authorized end gate.
-- Keep all current Minecraft behavior non-destructive in this session. Run offline validation only at the implementation end gate; do not use a live world.
+- README/setup reconciliation is complete. Large-house concepts A/B/C now generate offline relative block plans with material and layer summaries. Offline `.litematic` import/summary and the plan-only bridge receiver passed offline tests; they are not live-verified.
+- No live Minecraft behavior was exercised. Any later connection or world-changing use needs separate explicit approval.
 
 ### P1 — Litematica plan import and preview (partial implementation)
 
-- **Implemented, unvalidated:** `--litematic-plan PATH` reads a bounded `.litematic`, normalizes signed/multi-region bounds, decodes the packed block-state palette, reports dimensions/material totals/source SHA-256, and rejects malformed or conflicting data.
+- **Implemented; offline-tested, not live-verified:** `--litematic-plan PATH` reads a bounded `.litematic`, normalizes signed/multi-region bounds, decodes the packed block-state palette, reports dimensions/material totals/source SHA-256, and rejects malformed or conflicting data.
 - **Partially implemented:** generated house plans include per-Y totals; imported `.litematic` files can render one selected Y layer as a bounded ASCII map. Generated house plans do not yet render a per-block map. No blueprint-to-world geometric diff or GameMind-to-Litematica export path exists.
 - Report intended origin/rotation explicitly in any future preview; no world changes.
 
 ### P2 — active placement tracking (receiver implemented; client integration pending)
 
-- **Implemented, unvalidated:** a versioned HMAC-authenticated receiver protocol, short heartbeat lease, sequence/replay checks, exact blueprint hash/regions/dimensions binding, and a review guard that invalidates on transform/world/client changes. It binds to loopback by default and has no action endpoint. See `docs/LITEMATICA_BRIDGE_PROTOCOL.md`.
+- **Implemented; offline-tested, not live-verified:** a versioned HMAC-authenticated receiver protocol, short heartbeat lease, sequence/replay checks, exact blueprint hash/regions/dimensions binding, and a review guard that invalidates on transform/world/client changes. It binds to loopback by default and has no action endpoint. See `docs/LITEMATICA_BRIDGE_PROTOCOL.md`.
 - The Windows Modrinth client sender is not implemented. Pin the user's exact Fabric/Litematica/MaLiLib versions before writing it; no live client connection has occurred.
 - Terminal confirmation records plan review only, not permission to build. A future manual origin/rotation fallback remains an option if client integration is too fragile.
 

@@ -1,8 +1,8 @@
 # Live verification checklist
 
-This checklist separates historical live-server verification from outstanding work. Sections 16 and 17 record earlier runs against a non-vanilla stand-in; section 18 lists older persistent-session, scheduler, launcher and Control Center checks. The Minecraft companion, exact-username chat, Ollama responder, starter-house material gate, offline Litematic importer, and plan-only placement receiver changed after those checks and remain unvalidated. No test, build, offline audit, or live-world action has yet been run for that newest work in this implementation session.
+This checklist separates historical live-server verification from outstanding work. Sections 16 and 17 record earlier runs against a non-vanilla stand-in; section 18 lists live checks still to be done for the persistent session, scheduler, launcher, Control Center, and companion. The Minecraft companion, exact-username chat, Ollama responder, starter-house material gate, offline Litematic importer, and plan-only placement receiver passed the offline implementation-end audit recorded in §19. They have not been checked against a live world or exact Modrinth/Fabric profile.
 
-**This document is not authorization to connect to or modify a live Minecraft world.** The user explicitly requires separate approval before any live use. Until then, perform only the offline implementation-end audit in §19; do not run §§1–18, even in a disposable world.
+**This document is not authorization to connect to or modify a live Minecraft world.** The user explicitly requires separate approval before any live use. The offline audit in §19 is complete; do not run §§1–18, even in a disposable world, without separate explicit approval.
 
 ## 0. Safety and scope
 
@@ -334,35 +334,32 @@ None of the following has been run against a Minecraft server. Each item is the 
 
 **Record for every item:** what you ran, the date, the server software and version, the evidence (event-log lines, trace file names, a screenshot for item 8) and anything that differed from *Expected*. A difference is a result.
 
-## 19. Implementation-end offline audit (current; not yet run)
+## 19. Implementation-end offline audit (completed: 12 October 2026)
 
-This is the next permitted verification gate for the current implementation. Finish source and documentation review first; then run the offline checks, fix any findings, inspect affected call sites, and rerun the relevant checks. These commands must not connect to Minecraft or start a persistent session.
+The implementation-end audit was completed using offline fixtures, test doubles, loopback test servers and deterministic simulations only. The audit found a real chat-parser defect: normalization stripped the leading slash before `/gamemind help` could be recognized. Prefix removal now happens before normalization, and the regression test exercises the slash command. The post-fix chat grammar/controller tests passed **27/27**.
+
+Validation results:
+
+| Check | Result |
+| --- | --- |
+| `npm test` | Passed: **952/952** Node tests and **1/1** Vitest integration test |
+| `npm run build` | Passed |
+| `npm run typecheck:public` | Passed |
+| `npm run test:launcher` | Passed: **50/50** Python launcher tests |
+| `python3 main.py --check` | Passed; Java and Docker were absent but optional, so no game server was started |
+| `npm run eval:offline` | Passed all scenario gates: **520 runs**, 0 unsafe actions, 0 unverified confirmations, 0 deaths |
+| Policy-ranking evaluation | Skipped: there was no weighted candidate in `data/learning` |
+
+Repeat the offline checks from the repository root with:
 
 ```bash
-# Focused companion/house/chat/bridge tests (Node's built-in test runner)
-node --import tsx --test --test-concurrency=4 --test-reporter=tap \
-  test/minecraft-chat-commands.test.ts \
-  test/minecraft-chat-controller.test.ts \
-  test/minecraft-excavation-runner.test.ts \
-  test/minecraft-house-runner.test.ts \
-  test/minecraft-wheat-farm-runner.test.ts \
-  test/litematic-importer.test.ts \
-  test/litematica-placement-guard.test.ts \
-  test/litematica-bridge-server.test.ts \
-  test/ollama-chat-responder.test.ts
-npm run test:integration -- src/testing/integration/pause-resume-integration.test.ts
-
-# Whole TypeScript suite (Node tests plus Vitest integration), public API typecheck, compile/package, Python launcher suite, offline evaluator
+npm ci --no-audit --no-fund
 npm test
-npm run typecheck:public
 npm run build
-python3 -m unittest discover -s tests_py -t .
-npm run eval:offline:quick
-
-# Safe launcher preflight only; do not run `python3 main.py` without --check or an explicit offline-plan option
+npm run typecheck:public
+npm run test:launcher
+npm run eval:offline
 python3 main.py --check
 ```
 
-The focused test-file list is a target inventory; remove or rename entries only if the final implementation deliberately uses different files. Add coverage for importer corruption/limits and signed NBT fixtures; multi-region packing, negative dimensions and overlap; HMAC authentication, stale/replayed reports, expiry and placement-identity invalidation; loopback defaults and non-loopback opt-in; chat authorization, two-stage project/material confirmations, timeout/cancel paths; Ollama timeout/cooldown and action-claim rejection; and Python-launcher forwarding of explicitly offline commands. Use synthetic files, fakes and loopback test servers only. Never invoke `npm run test:live`, `npm run task:minecraft`, a live `--host`, a raw persistent launcher, or any command that attaches to an actual Minecraft process without separate explicit approval.
-
-After the suite, manually inspect the final diff and documentation claims. Report which offline checks passed, any limitations that remain, and that no live Minecraft connection or world modification was performed. This audit is not evidence of compatibility with a real server, Fabric client, Modrinth profile, Windows/WSL network path, or Ollama installation.
+No live Minecraft connection, block placement, material gathering, or other world modification was performed. These results do not establish compatibility with Java 1.20.4, a Modrinth/Fabric/Litematica/MaLiLib client, Windows/WSL networking, a real browser, or an installed Ollama endpoint. A Fabric-side sender and in-game Litematica build executor remain unimplemented. Follow §§1–18 only after separate explicit live-use approval, and use a disposable authorized world as specified there.

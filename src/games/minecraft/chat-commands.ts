@@ -67,7 +67,8 @@ function matchAlias(text: string, aliases: readonly string[]): boolean {
 
 /** Parses a deliberately small command grammar; unrecognised chat remains ordinary conversation. */
 export function parseMinecraftChatCommand(raw: string): MinecraftChatCommand | null {
-  const text = normalizeChatText(raw).replace(/^\/+(?:gamemind\s+)?/, "");
+  const withoutSlashPrefix = raw.replace(/^\s*\/+\s*(?:gamemind\s+)?/i, "");
+  const text = normalizeChatText(withoutSlashPrefix);
   if (!text) return null;
 
   if (/^(?:follow|follow me|folge|folge mir|folg mir|mir folgen)$/.test(text)) return { kind: "mode", mode: "follow" };

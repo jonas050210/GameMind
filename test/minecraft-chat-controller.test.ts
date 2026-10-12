@@ -570,7 +570,7 @@ test("material approval expiry does not start the house or collect nearby logs",
 
 test("long help replies are split into deliverable Minecraft chat messages instead of truncated", async () => {
   const { controller, transport } = setup();
-  transport.emit("Operator_1", "help");
+  transport.emit("Operator_1", "/gamemind help");
   await flush();
   assert.ok(transport.sent.length > 1);
   assert.ok(transport.sent.every((message) => message.length <= 256));
