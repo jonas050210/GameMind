@@ -54,7 +54,6 @@ test("the switch turns the interface German, remembers the choice, and switching
     assert.equal(page.visibleText("tab-overview"), "Übersicht", "text from index.html is translated");
     assert.equal(page.visibleText("tab-bots"), "Bots", "a word German spells the same stays as it is");
     assert.equal(page.byId("lang-de").getAttribute("aria-pressed"), "true");
-    assert.equal(page.visibleText("tab-training"), "Training");
     assert.match(page.visibleText("updated"), /^(Gerade aktualisiert|Vor .* aktualisiert)$/, "text the shell composed is translated");
     assert.match(page.document.title, /· GameMind$/, "the browser tab title keeps its shape");
     assert.notEqual(page.document.title, englishTitle, "the browser tab title follows the interface");
@@ -100,8 +99,8 @@ test("an unknown stored value falls back to English", async () => {
 });
 
 test("the notes the running app writes into the panels are German as well", async () => {
-  // These sentences do not live in the page: the host process writes them (learning explanations, the
-  // training state, world memory). The source scan above cannot see them, so they are pinned here.
+  // These sentences do not live in the page: the host process writes them (learning explanations and world memory).
+  // The source scan above cannot see them, so they are pinned here.
   interface DomNode {
     readonly nodeType?: number;
     readonly data?: string;
@@ -130,7 +129,6 @@ test("the notes the running app writes into the panels are German as well", asyn
       assert.match(learning, /Der Planer verweigerte die Aktion und nannte den Grund/, "the failure explanation is German");
       assert.match(learning, /kein gangbares Ziel/, "the failure detail is German");
       assert.doesNotMatch(learning, /A success is an action the adapter confirmed/);
-      assert.match(await openTab("training"), /Hier ist kein Lauf gespeichert; ein Start beginnt also einen neuen bei Episode 0\./);
       assert.match(await openTab("memory"), /Das Weltgedächtnis ist das, woran sich der Agent aus Beobachtungen erinnert/);
       assert.match(await openTab("tasks"), /Die Autonomie hat noch kein Teilziel gewählt\./);
     },

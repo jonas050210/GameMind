@@ -154,7 +154,8 @@ test("every failure code the runtime can raise is classified", () => {
       if (!full.endsWith(".ts") || full.includes("failure-taxonomy")) continue;
       const source = readFileSync(full, "utf8");
       codesFromThrowSite(source);
-      for (const match of source.matchAll(/code:\s*"([A-Z][A-Z0-9_]{2,})"/g)) {
+      // Task runners carry codes as `failureCode` summaries as well as `{ code, message }` objects.
+      for (const match of source.matchAll(/\b(?:code|failureCode):\s*"([A-Z][A-Z0-9_]{2,})"/g)) {
         if (match[1]) literals.add(match[1]);
       }
     }

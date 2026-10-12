@@ -23,9 +23,11 @@ export const MINECRAFT_REST_CAPABILITY = "minecraft.rest";
 export const MINECRAFT_SWIM_TO_SURFACE_CAPABILITY = "minecraft.swim_to_surface";
 export const MINECRAFT_MINE_BLOCK_CAPABILITY = "minecraft.mine_block";
 export const MINECRAFT_PLACE_BLOCK_CAPABILITY = "minecraft.place_block";
+export const MINECRAFT_PLANT_WHEAT_CAPABILITY = "minecraft.plant_wheat";
 export const MINECRAFT_BUILD_SHELTER_CAPABILITY = "minecraft.build_shelter";
 export const MINECRAFT_ATTACK_HOSTILE_CAPABILITY = "minecraft.attack_hostile";
 export const MINECRAFT_DROP_ITEM_CAPABILITY = "minecraft.drop_item";
+export const MINECRAFT_GIVE_ITEM_CAPABILITY = "minecraft.give_item";
 /** Shared center-to-center reach budget used by both the planner and Minecraft adapters. */
 export const MINECRAFT_CRAFTING_TABLE_REACH = 4.5;
 
@@ -215,6 +217,17 @@ export const minecraftPickupNames = [
   "iron_sword",
 ] as const;
 
+/** Items the companion may transfer to its configured operator; equipment and irreplaceable tools are excluded. */
+export const minecraftTransferableItemNames = [
+  ...minecraftLogNames,
+  ...minecraftMiningDropNames,
+  "iron_ingot",
+  "wheat",
+  "wheat_seeds",
+  "bread",
+  "apple",
+] as const;
+
 export const minecraftPickupItemInputSchema = z
   .object({
     x: xzCoordinate,
@@ -271,6 +284,13 @@ export const minecraftPlaceBlockInputSchema = z
   })
   .strict();
 
+export const minecraftPlantWheatInputSchema = z.object({
+  x: xzCoordinate,
+  y: yCoordinate,
+  z: xzCoordinate,
+  dangerRadius: z.number().finite().min(2).max(16).default(6),
+}).strict();
+
 export const minecraftBuildShelterInputSchema = z
   .object({
     mode: z.enum(["cardinal", "full"]).default("cardinal"),
@@ -297,10 +317,21 @@ export const minecraftDropItemInputSchema = z
   })
   .strict();
 
+/** Transfers only a bounded amount of allowlisted resources to the exact configured operator at close range. */
+export const minecraftGiveItemInputSchema = z
+  .object({
+    itemName: z.enum(minecraftTransferableItemNames),
+    count: z.number().int().min(1).max(64),
+    targetUsername: z.string().regex(/^[A-Za-z0-9_]{3,16}$/),
+    maxDistance: z.number().finite().min(1).max(4.5).default(4.5),
+    dangerRadius: z.number().finite().min(2).max(16).default(6),
+  })
+  .strict();
+
 export const minecraftCraftItemInputSchema = z
   .object({
     item: z.enum(minecraftCraftableItemNames),
-    count: z.number().int().min(1).max(64),
+    count: z.number().int().min(1).max(128),
     craftingTable: z
       .object({ x: xzCoordinate, y: yCoordinate, z: xzCoordinate })
       .strict()
@@ -334,9 +365,11 @@ export type MinecraftHarvestBerriesInput = z.infer<typeof minecraftHarvestBerrie
 export type MinecraftRestInput = z.infer<typeof minecraftRestInputSchema>;
 export type MinecraftMineBlockInput = z.infer<typeof minecraftMineBlockInputSchema>;
 export type MinecraftPlaceBlockInput = z.infer<typeof minecraftPlaceBlockInputSchema>;
+export type MinecraftPlantWheatInput = z.infer<typeof minecraftPlantWheatInputSchema>;
 export type MinecraftBuildShelterInput = z.infer<typeof minecraftBuildShelterInputSchema>;
 export type MinecraftAttackHostileInput = z.infer<typeof minecraftAttackHostileInputSchema>;
 export type MinecraftDropItemInput = z.infer<typeof minecraftDropItemInputSchema>;
+export type MinecraftGiveItemInput = z.infer<typeof minecraftGiveItemInputSchema>;
 export type MinecraftFoodName = (typeof minecraftFoodNames)[number];
 export type MinecraftLogName = (typeof minecraftLogNames)[number];
 export type MinecraftPlankName = (typeof minecraftPlankNames)[number];
@@ -457,10 +490,19 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
   {
     name: MINECRAFT_PLACE_BLOCK_CAPABILITY,
     description:
-      "Place one allowlisted block from inventory onto an observed solid support in an observed air cell, after rechecking reach, player collision and hostile proximity. Confirms by reading the block back.",
+      "Place one allowlisted block from inventory into an observed air cell against a visible, safe solid support face below or beside it, after rechecking reach, player collision and hostile proximity. Confirms by reading the block back.",
     inputSchema: minecraftPlaceBlockInputSchema,
     defaultTimeoutMs: 15_000,
     maxTimeoutMs: 30_000,
+    risk: "medium",
+  },
+  {
+    name: MINECRAFT_PLANT_WHEAT_CAPABILITY,
+    description:
+      "Plant one wheat seed only into an already hydrated, observed farmland cell. Rechecks survival mode, seed inventory, block identity, reach, player collision and hostile proximity; confirms the crop and seed delta.",
+    inputSchema: minecraftPlantWheatInputSchema,
+    defaultTimeoutMs: 30_000,
+    maxTimeoutMs: 60_000,
     risk: "medium",
   },
   {
@@ -489,6 +531,15 @@ export const minecraftCapabilities: readonly CapabilityDefinition[] = [
     defaultTimeoutMs: 8_000,
     maxTimeoutMs: 15_000,
     risk: "low",
+  },
+  {
+    name: MINECRAFT_GIVE_ITEM_CAPABILITY,
+    description:
+      "At close range, toss a bounded allowlisted resource stack only to the exact operator username configured for this session. Refuses unknown players, distance, threats, unlisted items, or insufficient inventory.",
+    inputSchema: minecraftGiveItemInputSchema,
+    defaultTimeoutMs: 10_000,
+    maxTimeoutMs: 15_000,
+    risk: "medium",
   },
 ];
 

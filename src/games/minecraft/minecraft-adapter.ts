@@ -23,9 +23,11 @@ import {
   minecraftSwimToSurfaceInputSchema,
   MINECRAFT_MINE_BLOCK_CAPABILITY,
   MINECRAFT_PLACE_BLOCK_CAPABILITY,
+  MINECRAFT_PLANT_WHEAT_CAPABILITY,
   MINECRAFT_BUILD_SHELTER_CAPABILITY,
   MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
   MINECRAFT_DROP_ITEM_CAPABILITY,
+  MINECRAFT_GIVE_ITEM_CAPABILITY,
   MINECRAFT_EQUIP_CAPABILITY,
   MINECRAFT_INSPECT_BLOCK_CAPABILITY,
   MINECRAFT_LOOK_CAPABILITY,
@@ -39,9 +41,11 @@ import {
   minecraftRestInputSchema,
   minecraftMineBlockInputSchema,
   minecraftPlaceBlockInputSchema,
+  minecraftPlantWheatInputSchema,
   minecraftBuildShelterInputSchema,
   minecraftAttackHostileInputSchema,
   minecraftDropItemInputSchema,
+  minecraftGiveItemInputSchema,
   minecraftEquipInputSchema,
   minecraftInspectBlockInputSchema,
   minecraftLookInputSchema,
@@ -76,6 +80,7 @@ import { isMineableBlockName, minecraftMiningRequirements, estimatedDigSeconds, 
 import { bestWeapon, combatIsAllowed, weaponDamageFor } from "./combat.js";
 import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_DIRECTIONS } from "./shelter.js";
 import { minecraftObservationSchema } from "./observation.js";
+import { reachedNavigationGoal } from "./reach.js";
 import type {
   AdapterAction,
   AdapterActionOutcome,
@@ -86,7 +91,6 @@ import type {
   GameObservation,
   GameSession,
 } from "../../core/types.js";
-import { checkActionAvailability, getUnavailableReason } from "./action-availability.js";
 const unsafePlacementSupportNames = new Set([
   "lava",
   "water",
@@ -94,7 +98,16 @@ const unsafePlacementSupportNames = new Set([
   "soul_fire",
   "magma_block",
   "cactus",
+  "sand",
+  "red_sand",
+  "gravel",
+  "suspicious_sand",
+  "suspicious_gravel",
 ]);
+
+function unsafePlacementSupport(name: string): boolean {
+  return unsafePlacementSupportNames.has(name) || name.endsWith("_concrete_powder");
+}
 type BotPosition = Bot["entity"]["position"];
 
 /**
@@ -128,13 +141,31 @@ const COMBAT_MAX_APPROACHES_PER_SWING = 2;
 type BotEntityLike = { readonly id: number; readonly position: BotPosition };
 
 /**
- * True when no solid block lies on the straight line from the player's eye to the target's centre. Sampled every
- * 0.2 blocks, which is finer than a block, so a thin wall is not stepped over. Unloaded blocks count as clear only
- * when the bot can see them; an unknown block is treated as blocking (safer to reposition than to swing blind).
+ * True when the target can be seen from the player's eye. Block targets use Mineflayer's collision-shape-aware
+ * raycast; entity targets use a conservative 0.2-block sampled ray. A missing/unknown block or a no-hit ray fails
+ * closed, so an unreadable chunk is never treated as an unobstructed view.
  */
-function hasLineOfSight(bot: Bot, target: { position: BotPosition }): boolean {
+function hasLineOfSight(
+  bot: Bot,
+  target: { position: BotPosition },
+  targetIsBlock = false,
+): boolean {
+  // Mineflayer's raycaster targets the block centre and accounts for its actual collision shape. Prefer it
+  // for block interactions; the sampled fallback below is retained for entity visibility and older doubles.
+  if (targetIsBlock && typeof bot.canSeeBlock === "function") {
+    try {
+      return bot.canSeeBlock(target as Parameters<Bot["canSeeBlock"]>[0]) === true;
+    } catch {
+      return false;
+    }
+  }
   const eye = bot.entity.position.offset(0, PLAYER_EYE_HEIGHT, 0);
   const centre = target.position.offset(0, 0.9, 0);
+  const targetCell = {
+    x: Math.floor(target.position.x),
+    y: Math.floor(target.position.y),
+    z: Math.floor(target.position.z),
+  };
   const dx = centre.x - eye.x;
   const dy = centre.y - eye.y;
   const dz = centre.z - eye.z;
@@ -143,7 +174,10 @@ function hasLineOfSight(bot: Bot, target: { position: BotPosition }): boolean {
   for (let step = 1; step < steps; step += 1) {
     const t = step / steps;
     const point = eye.offset(dx * t, dy * t, dz * t);
-    const block = bot.blockAt(point.floored());
+    const cell = point.floored();
+    // The target block is expected to be solid; only *intervening* blocks obstruct the ray.
+    if (targetIsBlock && cell.x === targetCell.x && cell.y === targetCell.y && cell.z === targetCell.z) continue;
+    const block = bot.blockAt(cell);
     if (!block) return false;
     if (block.boundingBox === "block" && !isWaterBlockName(block.name)) return false;
   }
@@ -203,10 +237,17 @@ import mineflayerTool from "mineflayer-tool";
 const pathfinderApi = mineflayerPathfinder;
 const toolApi = mineflayerTool;
 
+export interface MinecraftChatMessage {
+  readonly username: string;
+  readonly message: string;
+}
+
 export interface MinecraftAdapterConfig {
   readonly host: string;
   readonly port: number;
   readonly username: string;
+  /** Exact in-game username authorised to issue live chat commands; null disables chat control. */
+  readonly operatorUsername: string | null;
   readonly version: string;
   readonly auth: "offline" | "microsoft";
   readonly connectTimeoutMs: number;
@@ -247,6 +288,7 @@ export const DEFAULT_MINECRAFT_CONFIG: MinecraftAdapterConfig = {
   host: "127.0.0.1",
   port: 25565,
   username: "GameMind",
+  operatorUsername: null,
   version: "1.20.4",
   auth: "offline",
   connectTimeoutMs: 15_000,
@@ -602,6 +644,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
   private activeActionId: string | null = null;
   private activeCapability: string | null = null;
   private readonly statusListeners = new Set<(change: AdapterStatusChange) => void>();
+  private readonly chatListeners = new Set<(message: MinecraftChatMessage) => void>();
+  private readonly deathListeners = new Set<() => void>();
+  private readonly respawnListeners = new Set<() => void>();
   private readonly botFactory: MinecraftBotFactory;
   private readonly installPlugins: (bot: Bot) => void;
   private readonly configureSafeMovements: (bot: Bot, navigation: NavigationMovementOptions) => void;
@@ -628,6 +673,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       throw new Error("Minecraft port must be an integer from 1 through 65535.");
     }
     if (!config.username.trim()) throw new Error("Minecraft username must not be empty.");
+    if (config.operatorUsername !== null && !/^[A-Za-z0-9_]{3,16}$/.test(config.operatorUsername)) {
+      throw new Error("Minecraft operator username must be an exact 3 to 16 character in-game name, or null to disable chat control.");
+    }
     if (!config.version.trim()) throw new Error("Minecraft version must not be empty.");
     if (!Number.isInteger(config.connectTimeoutMs) || config.connectTimeoutMs <= 0) {
       throw new Error("Minecraft connection timeout must be a positive integer.");
@@ -699,6 +747,36 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     return () => this.statusListeners.delete(listener);
   }
 
+  get operatorUsername(): string | null {
+    return this.config.operatorUsername;
+  }
+
+  onChatMessage(listener: (message: MinecraftChatMessage) => void): () => void {
+    this.chatListeners.add(listener);
+    return () => this.chatListeners.delete(listener);
+  }
+
+  onDeath(listener: () => void): () => void {
+    this.deathListeners.add(listener);
+    return () => this.deathListeners.delete(listener);
+  }
+
+  onRespawn(listener: () => void): () => void {
+    this.respawnListeners.add(listener);
+    return () => this.respawnListeners.delete(listener);
+  }
+
+  sendChat(message: string): void {
+    const bot = this.requireConnectedBot();
+    const safeMessage = message.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ").trim();
+    if (!safeMessage) return;
+    if (/^[\/\uFF0F\u2215\u2044\u29F8]/u.test(safeMessage)) {
+      throw new Error("Minecraft chat bridge refuses slash-prefixed text because it may be interpreted as a server command.");
+    }
+    if (safeMessage.length > 256) throw new Error("Minecraft chat replies must be 256 characters or fewer.");
+    bot.chat(safeMessage);
+  }
+
   async connect(): Promise<GameSession> {
     if (this.statusValue === "connecting" || this.statusValue === "connected") {
       if (this.sessionValue && this.statusValue === "connected") return this.sessionValue;
@@ -744,6 +822,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
 
     return new Promise<GameSession>((resolve, reject) => {
       let settled = false;
+      let sawDeath = false;
       const finishFailure = (error: Error, status: "failed" | "disconnected" = "failed") => {
         if (settled) return;
         settled = true;
@@ -766,6 +845,12 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
               this.logger.info({ sessionId, deathCount: this.deathCount }, "Minecraft player spawned; safe movement policy reapplied");
             } catch (error) {
               this.logger.error({ err: error, sessionId }, "Could not reapply safe movement after respawn");
+            }
+            if (sawDeath) {
+              sawDeath = false;
+              for (const listener of this.respawnListeners) {
+                try { listener(); } catch (error) { this.logger.warn({ err: error, sessionId }, "Minecraft respawn listener failed"); }
+              }
             }
           }
           return;
@@ -844,13 +929,22 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       };
 
       bot.on("spawn", onSpawn);
-      // Minecraft chat is intentionally not wired to any control path. All agent control arrives
-      // through the Control Center Library; chat text is never parsed into actions.
+      bot.on("chat", (username, message) => {
+        if (typeof username !== "string" || typeof message !== "string") return;
+        const event = { username, message } satisfies MinecraftChatMessage;
+        for (const listener of this.chatListeners) {
+          try { listener(event); } catch (error) { this.logger.warn({ err: error, sessionId }, "Minecraft chat listener failed"); }
+        }
+      });
       bot.on("death", () => {
+        sawDeath = true;
         this.deathCount += 1;
         this.logger.warn({ sessionId, deathCount: this.deathCount }, this.config.autoRespawn
           ? "Minecraft player died; Mineflayer automatic respawn is enabled"
           : "Minecraft player died; automatic respawn is disabled");
+        for (const listener of this.deathListeners) {
+          try { listener(); } catch (error) { this.logger.warn({ err: error, sessionId }, "Minecraft death listener failed"); }
+        }
       });
       bot.on("error", onError);
       bot.on("kicked", onKicked);
@@ -1293,30 +1387,6 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       throw new MinecraftAdapterError("Minecraft adapter already has an active action.", "ACTION_BUSY");
     }
 
-    // Check if action is available before attempting execution
-    const currentObservation = this.lastObservation;
-    if (currentObservation) {
-      const availability = checkActionAvailability(
-        { capability: action.capability, input: action.input },
-        currentObservation
-      );
-      if (!availability.available) {
-        const reason = getUnavailableReason(availability.reason ?? "UNKNOWN");
-        this.logger.debug(
-          { actionId: action.actionId, capability: action.capability, reason: availability.reason },
-          "Action rejected by availability check"
-        );
-        return {
-          confirmed: false,
-          confirmation: "availability_check_failed",
-          failure: {
-            code: `ACTION_UNAVAILABLE_${availability.reason}`,
-            message: reason,
-          },
-        };
-      }
-    }
-
     this.activeActionId = action.actionId;
     this.activeCapability = action.capability;
     try {
@@ -1350,12 +1420,16 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
           return await this.executeMineBlock(bot, action.input, signal);
         case MINECRAFT_PLACE_BLOCK_CAPABILITY:
           return await this.executePlaceBlock(bot, action.input, signal);
+        case MINECRAFT_PLANT_WHEAT_CAPABILITY:
+          return await this.executePlantWheat(bot, action.input, signal);
         case MINECRAFT_BUILD_SHELTER_CAPABILITY:
           return await this.executeBuildShelter(bot, action.input, signal);
         case MINECRAFT_ATTACK_HOSTILE_CAPABILITY:
           return await this.executeAttackHostile(bot, action.input, signal);
         case MINECRAFT_DROP_ITEM_CAPABILITY:
           return await this.executeDropItem(bot, action.input, signal);
+        case MINECRAFT_GIVE_ITEM_CAPABILITY:
+          return await this.executeGiveItem(bot, action.input, signal);
         default:
           throw new MinecraftAdapterError(
             `Unsupported Minecraft capability '${action.capability}'.`,
@@ -1477,6 +1551,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         name: block.name,
         type: block.type,
         boundingBox: block.boundingBox,
+        properties: blockProperties(block),
         hardness: finiteOrNull(block.hardness),
         canDig: bot.canDigBlock(block),
       },
@@ -1721,6 +1796,10 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         signal,
       );
     }
+    // Dimension or mode can change while pathing. Reapply these guards immediately before reading the final
+    // target state and starting the irreversible dig.
+    this.requireOverworld(bot, "Log collection", "UNSUPPORTED_DIMENSION");
+    this.requireSurvivalMode(bot, "Log collection", "GAME_MODE_BLOCKS_COLLECTION");
     // Pathing can take several seconds in a live world. Never dig the pre-walk Block object: another player or
     // server-side event may have changed it while we moved. Re-read the exact cell, then validate reach and harvest
     // against the fresh block state before starting the irreversible dig.
@@ -1736,6 +1815,11 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     }
     if (refreshedBlock.position.distanceTo(bot.entity.position) > reach + 1 || !bot.canDigBlock(refreshedBlock)) {
       throw new MinecraftAdapterError("The log is still out of reach after navigation.", "BLOCK_OUT_OF_REACH");
+    }
+    // A house-material approval is specifically for visible logs. Recheck visibility at the irreversible boundary,
+    // after any pathing, and fail closed when any intervening block is solid or unknown.
+    if (!hasLineOfSight(bot, refreshedBlock, true)) {
+      throw new MinecraftAdapterError("The log is no longer visible from the current position; no dig was started.", "RESOURCE_TARGET_NOT_VISIBLE");
     }
     // The walk can take many seconds. A hostile that closed in during it stops the dig, as it would have before the walk.
     if (hasVisibleHostileNear(bot, refreshedBlock.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
@@ -2036,6 +2120,13 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         MINECRAFT_HARVEST_BERRIES_CAPABILITY,
       );
     }
+    this.requireSurvivalMode(bot, "Berry harvesting", "GAME_MODE_BLOCKS_HARVEST");
+    if (hasVisibleHostileNear(bot, center, dangerRadius)) {
+      throw new MinecraftAdapterError(
+        `A currently visible hostile is within ${dangerRadius} blocks of the berry bush after navigation.`,
+        "RESOURCE_TARGET_THREATENED",
+      );
+    }
     const refreshed = this.blockAtCoordinates(bot, x, y, z);
     if (!refreshed || refreshed.name !== "sweet_berry_bush") {
       throw new MinecraftAdapterError("The berry bush changed before harvesting.", "RESOURCE_TARGET_CHANGED");
@@ -2200,7 +2291,7 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (
       !support ||
       support.boundingBox !== "block" ||
-      unsafePlacementSupportNames.has(support.name) ||
+      unsafePlacementSupport(support.name) ||
       !bot.canSeeBlock(support)
     ) {
       throw new MinecraftAdapterError("Crafting-table destination has no visible safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
@@ -2350,6 +2441,8 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
       );
     }
 
+    // A mode change during navigation must stop the destructive action, even when the initial gate passed.
+    this.requireSurvivalMode(bot, "Mining", "GAME_MODE_BLOCKS_MINING");
     // The target may be mined or replaced by another player while pathing. Use a fresh block read for the final
     // reach/tool/safety checks so we never dig from a stale observation.
     const refreshedBlock = this.blockAtCoordinates(bot, x, y, z);
@@ -2451,14 +2544,18 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     if (!destination || (destination.name !== "air" && !destination.name.endsWith("_air"))) {
       throw new MinecraftAdapterError("Placement destination is unknown or occupied.", "PLACEMENT_CELL_NOT_EMPTY");
     }
-    const support = this.blockAtCoordinates(bot, x, y - 1, z);
-    if (
-      !support ||
-      support.boundingBox !== "block" ||
-      unsafePlacementSupportNames.has(support.name) ||
-      !bot.canSeeBlock(support)
-    ) {
-      throw new MinecraftAdapterError("Placement destination has no visible safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
+    const supportCandidates = [
+      { block: this.blockAtCoordinates(bot, x, y - 1, z), face: [0, 1, 0] as const },
+      { block: this.blockAtCoordinates(bot, x - 1, y, z), face: [1, 0, 0] as const },
+      { block: this.blockAtCoordinates(bot, x + 1, y, z), face: [-1, 0, 0] as const },
+      { block: this.blockAtCoordinates(bot, x, y, z - 1), face: [0, 0, 1] as const },
+      { block: this.blockAtCoordinates(bot, x, y, z + 1), face: [0, 0, -1] as const },
+    ];
+    const support = supportCandidates.find(({ block }) =>
+      block && block.boundingBox === "block" && !unsafePlacementSupport(block.name) && bot.canSeeBlock(block),
+    );
+    if (!support?.block) {
+      throw new MinecraftAdapterError("Placement destination has no visible safe solid face to support the block.", "PLACEMENT_SUPPORT_UNSAFE");
     }
     const distance = destination.position.distanceTo(bot.entity.position);
     if (distance > this.config.maxPlacementDistance) {
@@ -2480,7 +2577,10 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const countBefore = inventoryCount(bot, blockName);
     await raceWithAbort(bot.equip(item, "hand"), signal);
     await raceWithAbort(
-      bot.placeBlock(support, bot.entity.position.offset(0, 1, 0).subtract(bot.entity.position)),
+      bot.placeBlock(
+        support.block,
+        support.block.position.offset(support.face[0], support.face[1], support.face[2]).subtract(support.block.position),
+      ),
       signal,
     );
     const placed = this.blockAtCoordinates(bot, x, y, z);
@@ -2494,6 +2594,96 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         inventoryBefore: countBefore,
         inventoryAfter: countAfter,
         placedBlock: placed?.name ?? null,
+      },
+    };
+  }
+
+  /** Plants one seed into a pre-existing, currently hydrated farmland block; this action never tills soil or places water. */
+  private async executePlantWheat(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftPlantWheatInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid wheat planting target.", "INVALID_ACTION_INPUT");
+    const { x, y, z, dangerRadius } = parsed.data;
+    this.requireOverworld(bot, "Wheat planting", "UNSUPPORTED_DIMENSION");
+    this.requireSurvivalMode(bot, "Wheat planting", "GAME_MODE_BLOCKS_PLANTING");
+    if (!bot.pathfinder) throw new MinecraftAdapterError("Pathfinder plugin is unavailable.", "PATHFINDER_UNAVAILABLE");
+    const seedItem = bot.inventory.items().find((item) => item.name === "wheat_seeds");
+    if (!seedItem || inventoryCount(bot, "wheat_seeds") < 1) {
+      throw new MinecraftAdapterError("No wheat seeds are available in inventory.", "WHEAT_SEEDS_MISSING");
+    }
+    const requireHydratedFarmland = () => {
+      const soil = this.blockAtCoordinates(bot, x, y - 1, z);
+      if (!soil || soil.name !== "farmland") {
+        throw new MinecraftAdapterError("The planting cell no longer has observed farmland beneath it.", "WHEAT_FARMLAND_CHANGED");
+      }
+      const moisture = Number(blockProperties(soil).moisture);
+      if (!Number.isFinite(moisture) || moisture < 1) {
+        throw new MinecraftAdapterError("Farmland has no confirmed moisture; wheat is not planted in a dry or unknown plot.", "WHEAT_FARMLAND_DRY");
+      }
+      return soil;
+    };
+    let soil = requireHydratedFarmland();
+    let cropCell = this.blockAtCoordinates(bot, x, y, z);
+    if (!cropCell || (cropCell.name !== "air" && !cropCell.name.endsWith("_air"))) {
+      throw new MinecraftAdapterError("The crop destination is unknown or occupied.", "WHEAT_CROP_CELL_OCCUPIED");
+    }
+    const targetDistance = cropCell.position.distanceTo(bot.entity.position);
+    if (targetDistance > this.config.maxResourceGatherDistance) {
+      throw new MinecraftAdapterError("The wheat plot cell is outside the safe planting distance.", "WHEAT_TARGET_TOO_FAR");
+    }
+    if (hasVisibleHostileNear(bot, soil.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+      throw new MinecraftAdapterError(`A visible hostile is within ${dangerRadius} blocks of the crop cell.`, "WHEAT_TARGET_THREATENED");
+    }
+    if (targetDistance > 3.5) {
+      await this.navigateWithProgressWatchdog(
+        bot,
+        new pathfinderApi.goals.GoalNear(x, y, z, 2),
+        signal,
+      );
+    }
+    // Pathing may have taken long enough for a portal or mode switch; recheck before planting into the world.
+    this.requireOverworld(bot, "Wheat planting", "UNSUPPORTED_DIMENSION");
+    this.requireSurvivalMode(bot, "Wheat planting", "GAME_MODE_BLOCKS_PLANTING");
+    soil = requireHydratedFarmland();
+    cropCell = this.blockAtCoordinates(bot, x, y, z);
+    if (!cropCell || (cropCell.name !== "air" && !cropCell.name.endsWith("_air"))) {
+      throw new MinecraftAdapterError("The crop destination changed while approaching it.", "WHEAT_CROP_CELL_CHANGED");
+    }
+    if (cropCell.position.distanceTo(bot.entity.position) > this.config.maxPlacementDistance) {
+      throw new MinecraftAdapterError("The crop cell is still outside interaction reach.", "WHEAT_TARGET_OUT_OF_REACH");
+    }
+    const horizontalPlayerDistance = Math.hypot(bot.entity.position.x - (x + 0.5), bot.entity.position.z - (z + 0.5));
+    if (horizontalPlayerDistance < 0.9 && Math.abs(bot.entity.position.y - y) < 2) {
+      throw new MinecraftAdapterError("Planting here would intersect the player; the bot must stand beside the crop cell.", "WHEAT_PLANT_INTERSECTS_PLAYER");
+    }
+    if (hasVisibleHostileNear(bot, soil.position.offset(0.5, 0.5, 0.5), dangerRadius)) {
+      throw new MinecraftAdapterError(`A visible hostile entered the ${dangerRadius}-block planting radius.`, "WHEAT_TARGET_THREATENED");
+    }
+    const seedsBefore = inventoryCount(bot, "wheat_seeds");
+    await raceWithAbort(bot.equip(seedItem, "hand"), signal);
+    await raceWithAbort(bot.activateBlock(soil), signal);
+    const settleMs = Math.min(3_000, Math.max(500, this.config.dropSettleMs));
+    const deadline = Date.now() + settleMs;
+    let planted = this.blockAtCoordinates(bot, x, y, z);
+    let seedsAfter = inventoryCount(bot, "wheat_seeds");
+    while ((planted?.name !== "wheat" || seedsAfter !== seedsBefore - 1) && Date.now() < deadline) {
+      await delayWithAbort(100, signal);
+      planted = this.blockAtCoordinates(bot, x, y, z);
+      seedsAfter = inventoryCount(bot, "wheat_seeds");
+    }
+    return {
+      confirmed: planted?.name === "wheat" && seedsAfter === seedsBefore - 1,
+      confirmation: "wheat_crop_read_back_and_seed_delta_checked",
+      details: {
+        position: { x, y, z },
+        soil: "farmland",
+        moisture: Number(blockProperties(soil).moisture),
+        plantedBlock: planted?.name ?? null,
+        seedsBefore,
+        seedsAfter,
       },
     };
   }
@@ -2847,6 +3037,57 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     } finally {
       bot.pathfinder.setGoal(null);
     }
+  }
+
+  /**
+   * Gives a bounded resource amount to the configured operator, never to an arbitrary chat participant.
+   * The operator must be visibly online and within the short hand-off radius; visible hostiles near either
+   * player, a missing stack, an unknown registry item or an inventory delta that does not confirm the toss
+   * all fail closed.
+   */
+  private async executeGiveItem(
+    bot: Bot,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<AdapterActionOutcome> {
+    const parsed = minecraftGiveItemInputSchema.safeParse(input);
+    if (!parsed.success) throw new MinecraftAdapterError("Invalid item transfer request.", "INVALID_ACTION_INPUT");
+    const { itemName, count, targetUsername, maxDistance, dangerRadius } = parsed.data;
+    if (!this.config.operatorUsername || targetUsername !== this.config.operatorUsername) {
+      throw new MinecraftAdapterError("Item transfer is allowed only to the exact configured Minecraft operator.", "TRANSFER_TARGET_NOT_AUTHORIZED");
+    }
+    this.requireSurvivalMode(bot, "Transferring items", "GAME_MODE_INVENTORY_TRANSFER");
+    const target = Object.values(bot.entities).find((entity) => entity.type === "player" && entity.username === targetUsername);
+    if (!target) throw new MinecraftAdapterError(`Configured operator '${targetUsername}' is not currently visible online.`, "TRANSFER_TARGET_NOT_VISIBLE");
+    const distance = target.position.distanceTo(bot.entity.position);
+    if (distance > maxDistance) {
+      throw new MinecraftAdapterError(`Operator is ${distance.toFixed(1)} blocks away; transfer limit is ${maxDistance}.`, "TRANSFER_TARGET_TOO_FAR");
+    }
+    if (hasVisibleHostileNear(bot, bot.entity.position, dangerRadius) || hasVisibleHostileNear(bot, target.position, dangerRadius)) {
+      throw new MinecraftAdapterError("A visible hostile is too close to the item hand-off; no items were dropped.", "TRANSFER_TARGET_THREATENED");
+    }
+    const registryItem = bot.registry.itemsByName[itemName];
+    if (!registryItem) throw new MinecraftAdapterError(`Item '${itemName}' does not exist in the connected server's registry.`, "TRANSFER_ITEM_UNKNOWN");
+    const before = inventoryCount(bot, itemName);
+    if (before < count) {
+      throw new MinecraftAdapterError(`Inventory holds ${before} ${itemName}, fewer than the ${count} requested.`, "ITEM_NOT_IN_INVENTORY");
+    }
+    const stack = bot.inventory.items().find((item) => item.name === itemName);
+    if (!stack) throw new MinecraftAdapterError(`${itemName} is not in the accessible inventory.`, "ITEM_NOT_IN_INVENTORY");
+    await raceWithAbort(bot.toss(stack.type, null, count), signal);
+    const deadline = Date.now() + Math.min(this.config.dropSettleMs, 2_000);
+    while (inventoryCount(bot, itemName) > before - count && Date.now() < deadline) {
+      await delayWithAbort(ACTION_CONFIRMATION_POLL_MS, signal);
+    }
+    const after = inventoryCount(bot, itemName);
+    if (after > before - count) {
+      throw new MinecraftAdapterError(`The server did not confirm removal of ${count} ${itemName} from inventory.`, "TRANSFER_INVENTORY_DELTA_UNCONFIRMED");
+    }
+    return {
+      confirmed: true,
+      confirmation: "operator_visible_nearby_and_inventory_delta_checked_after_toss",
+      details: { itemName, count, operator: targetUsername, distance: Number(distance.toFixed(2)), inventoryBefore: before, inventoryAfter: after },
+    };
   }
 
   /** Drops a small amount of allowlisted terrain. Tools, food and resources are refused by the schema. */
@@ -3214,6 +3455,10 @@ export function minecraftAdapterConfigFromEnv(
   if (authValue !== "offline" && authValue !== "microsoft") {
     throw new Error("MINECRAFT_AUTH must be either 'offline' or 'microsoft'.");
   }
+  const operatorUsername = env.MINECRAFT_OPERATOR?.trim() || null;
+  if (operatorUsername !== null && !/^[A-Za-z0-9_]{3,16}$/.test(operatorUsername)) {
+    throw new Error("MINECRAFT_OPERATOR must be the exact in-game username (3 to 16 letters, digits or underscores).");
+  }
   const navDoorsValue = env.MINECRAFT_NAV_ALLOW_DOORS;
   const navigationAllowDoors = navDoorsValue === undefined || navDoorsValue.trim() === ""
     ? DEFAULT_MINECRAFT_CONFIG.navigationAllowDoors
@@ -3237,6 +3482,7 @@ export function minecraftAdapterConfigFromEnv(
     host: env.MINECRAFT_HOST ?? DEFAULT_MINECRAFT_CONFIG.host,
     port,
     username: env.MINECRAFT_USERNAME ?? DEFAULT_MINECRAFT_CONFIG.username,
+    operatorUsername,
     version: env.MINECRAFT_VERSION ?? DEFAULT_MINECRAFT_CONFIG.version,
     auth: authValue,
     connectTimeoutMs,

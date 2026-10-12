@@ -94,7 +94,6 @@ export async function startHostFixture(options: HostFixtureOptions = {}): Promis
     ...(options.startServer === undefined ? {} : { startServer: options.startServer }),
     companionMemoryDirectory: path.join(directory, "companion"),
     worldConfigPath: path.join(directory, "world-config.json"),
-    trainingDirectory: path.join(directory, "training"),
     dataDirectory: path.join(directory, "data"),
     evaluationReportPath: path.join(directory, "no-report.json"),
     evaluationScenarioIds: evaluationScenarios().map((candidate) => candidate.id),

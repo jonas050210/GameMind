@@ -151,14 +151,14 @@ test("every tab of a real session draws without error, and the regions each view
     await waitUntil(() => sessionOf(fixture)?.state === "idle", "idle");
     booted = await openPage(fixture);
     const { page } = booted;
-    const tabs = ["overview", "training", "bots", "tasks", "evaluation", "learning", "memory"] as const;
+    const tabs = ["overview", "bots", "tasks", "evaluation", "learning", "memory"] as const;
     for (const tab of tabs) {
       await openTab(booted, tab);
       if (tab === "overview") page.click("overview-details-summary");
       assert.equal(page.visibleText("render-error"), "", `${tab} drew without an error`);
       const ctx = {
         snapshot: booted.app.store.state.snapshot,
-        data: { learning: booted.app.store.resource("learning"), memory: booted.app.store.resource("memory"), evaluation: booted.app.store.resource("evaluation"), tasks: booted.app.store.resource("tasks"), events: booted.app.store.resource("events"), preflight: booted.app.store.resource("training-preflight"), diagnostics: booted.app.store.resource("diagnostics") },
+        data: { learning: booted.app.store.resource("learning"), memory: booted.app.store.resource("memory"), evaluation: booted.app.store.resource("evaluation"), tasks: booted.app.store.resource("tasks"), events: booted.app.store.resource("events"), diagnostics: booted.app.store.resource("diagnostics") },
         ui: booted.app.ui,
         now: Date.now(),
         lost: false,
@@ -171,7 +171,7 @@ test("every tab of a real session draws without error, and the regions each view
         const target = page.document.getElementById(id);
         assert.ok(target, `${tab}: the region #${id} exists on the page`);
         assert.ok(panel.descendants().includes(target as FakeElement), `${tab}: #${id} is inside its own panel`);
-        assert.ok(page.visibleText(target as FakeElement).length > 0 || tab === "learning" || id === "training-reward", `${tab}: #${id} shows something (an empty state counts)`);
+        assert.ok(page.visibleText(target as FakeElement).length > 0 || tab === "learning", `${tab}: #${id} shows something (an empty state counts)`);
       }
     }
     assert.deepEqual(page.window.console.errors, []);
@@ -220,11 +220,11 @@ test("the controls that are enabled on a real idle session are all accepted by t
     booted = await openPage(fixture, log);
     const { page } = booted;
     // These start child processes, end the session or the app, or trip safety for the rest of the run: they are exercised
-    // by their own tests (training-safety, app, lifecycle), not clicked here.
-    const SKIPPED = new Set(["shutdownApp", "stopSession", "panic", "runUnitTests", "runOfflineEvaluation", "runLiveVerification", "startTraining", "evaluateTraining", "resumeTraining"]);
+    // by their own tests (app and lifecycle), not clicked here.
+    const SKIPPED = new Set(["shutdownApp", "stopSession", "panic", "runUnitTests", "runOfflineEvaluation", "runLiveVerification"]);
     const clicked = new Set<string>();
     page.window.confirmAnswer = true;
-    for (const tab of ["overview", "bots", "tasks", "training", "evaluation", "learning", "memory"]) {
+    for (const tab of ["overview", "bots", "tasks", "evaluation", "learning", "memory"]) {
       await openTab(booted, tab);
       const controls = page.all("[data-command]").filter((button) => !page.isHidden(button) && !button.disabled);
       for (const control of controls) {
@@ -258,9 +258,6 @@ test("the commands that start processes parse the exact payloads the page builds
   const fixture = await startUiApp();
   try {
     // The page builds these shapes (see ui-page.test.ts); out-of-range values must hit the server's own validation.
-    const training = await fixture.command("startTraining", { directory: "training", fresh: false, confirmFresh: false, maxMinutes: 0 });
-    assert.equal(training.status, 409);
-    assert.match(training.body.message ?? "", /Time budget \(minutes\) must be a whole number/);
     const evaluation = await fixture.command("runOfflineEvaluation", { seeds: 0, scenarioId: "explore-remote-log" });
     assert.equal(evaluation.status, 409);
     const unknownScenario = await fixture.command("runOfflineEvaluation", { scenarioId: "no-such-scenario" });
@@ -269,7 +266,6 @@ test("the commands that start processes parse the exact payloads the page builds
     assert.equal(live.status, 409);
     assert.match(live.body.message ?? "", /digging blocks changes the world/);
     assert.equal(fixture.app.jobs.busy, false, "the refused requests started nothing");
-    assert.equal((await fixture.command("selectTrainingDirectory", "roadmap")).status, 409, "a folder GameMind keeps for something else is refused");
   } finally {
     await fixture.close();
   }

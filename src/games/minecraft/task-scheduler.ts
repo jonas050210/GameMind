@@ -14,7 +14,7 @@ import type { MinecraftTaskResult } from "./task-runner.js";
  * Rules, all enforced in `submit`:
  *  - one task runs at a time; there is never a second concurrent runner;
  *  - the same task (same parameters) cannot be running or queued twice;
- *  - operator origins outrank the agent's own autonomy: an autonomous task is asked to stop at the next
+ *  - chat and other operator origins outrank the agent's own autonomy: an autonomous task is asked to stop at the next
  *    action boundary and the operator task starts as soon as the slot is free;
  *  - autonomy never queues and never starts while anything else is running, queued or reserved;
  *  - a startup reservation lets the CLI hold the slot for its requested task before the first observation,
@@ -22,10 +22,11 @@ import type { MinecraftTaskResult } from "./task-runner.js";
  *  - after `drain` nothing new is accepted, queued tasks are cancelled and the running one is asked to stop.
  */
 
-export type TaskOrigin = "cli" | "control-center" | "library" | "companion" | "autonomy";
+export type TaskOrigin = "chat" | "cli" | "control-center" | "library" | "companion" | "autonomy";
 
 /** Higher wins. Only `autonomy` can be pre-empted; every other origin is an explicit request from a person. */
 export const TASK_ORIGIN_PRIORITY: Readonly<Record<TaskOrigin, number>> = {
+  chat: 110,
   cli: 100,
   "control-center": 90,
   library: 80,
@@ -229,6 +230,12 @@ export function describeTask(task: MinecraftTask): string {
       return `Secure food (hunger ${task.targetHunger})`;
     case "build_shelter":
       return `Build shelter (${task.mode})`;
+    case "build_house":
+      return `Build starter house at ${task.origin.x},${task.origin.y},${task.origin.z}`;
+    case "farm_wheat":
+      return `Plant ${task.width}×${task.depth} wheat plot at ${task.origin.x},${task.origin.y},${task.origin.z}`;
+    case "excavate_volume":
+      return `Excavate ${task.width}×${task.height}×${task.depth} at ${task.origin.x},${task.origin.y},${task.origin.z}`;
     default:
       return String((task as { kind?: unknown }).kind ?? "task");
   }

@@ -12,21 +12,13 @@
       "NODE_OPTIONS": "--max-old-space-size=8192"
     }
   },
-  "vitest": {
-    "test": {
-      "globals": true,
-      "environment": "node",
-      "include": ["src/**/*.test.ts"],
-      "coverage": {
-        "provider": "v8"
-      }
-    }
-  },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "start": "node dist/src/cli.js",
     "dev": "tsx src/cli.ts",
-    "test": "vitest run",
+    "test": "node scripts/run-node-tests.mjs && npm run test:integration",
+    "test:node": "node scripts/run-node-tests.mjs",
+    "test:integration": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck:public": "tsc -p tsconfig.public.json",
@@ -53,10 +45,8 @@
     "test:live:quick": "tsx src/testing/live/live-test-runner.ts --scenario live-connection",
     "profile:autonomy": "tsx src/testing/autonomy-profile.ts",
     "perf:observe": "tsx src/testing/perf/observe-benchmark.ts",
-    "perf:profile": "tsx src/testing/perf/profile-training.ts",
     "train": "tsx src/training/cli.ts",
     "train:experiment": "tsx src/training/experiment-cli.ts",
-    "train:benchmark": "tsx src/training/benchmark-cli.ts",
     "test:record": "node scripts/record-test-run.mjs",
     "roadmap": "tsx src/roadmap/cli.ts",
     "app": "tsx src/cli.ts",
@@ -70,6 +60,7 @@
     "mineflayer-pathfinder": "2.4.5",
     "mineflayer-tool": "1.2.0",
     "pino": "10.4.0",
+    "prismarine-nbt": "2.8.0",
     "zod": "4.6.5"
   },
   "devDependencies": {

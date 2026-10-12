@@ -1,10 +1,13 @@
 # Live verification checklist
 
-This checklist is what remains before GameMind's new Minecraft behaviour can be described as verified on a real server. Nothing here has been executed against a server yet. Sections 16 and 17 record the only runs so far, against a non-vanilla stand-in; section 18 lists the checks for the persistent session, the scheduler, the launcher and the rewritten Control Center, none of which has been run against a server either. Record the result of each check, including failures, before making any compatibility claim.
+This checklist separates historical live-server verification from outstanding work. Sections 16 and 17 record earlier runs against a non-vanilla stand-in; section 18 lists live checks still to be done for the persistent session, scheduler, launcher, Control Center, and companion. The Minecraft companion, exact-username chat, Ollama responder, starter-house material gate, offline Litematic importer, and plan-only placement receiver passed the offline implementation-end audit recorded in §19. They have not been checked against a live world or exact Modrinth/Fabric profile.
+
+**This document is not authorization to connect to or modify a live Minecraft world.** The user explicitly requires separate approval before any live use. The offline audit in §19 is complete; do not run §§1–18, even in a disposable world, without separate explicit approval.
 
 ## 0. Safety and scope
 
-- Use a **disposable, private world** on a server you are authorized to operate, on Minecraft Java **1.20.4** (or the version you pin with `--version`).
+- The following are future verification instructions only, **not permission to connect to a live world**. Do not run them in this task; obtain separate explicit user approval first.
+- If such approval is later given, use a **disposable, private world** on a server you are authorized to operate, on Minecraft Java **1.20.4** (or the version you pin with `--version`).
 - Use `MINECRAFT_AUTH=offline` for offline-mode servers only. Do not pass account credentials on the command line or in files you commit.
 - Stop the agent with **Ctrl-C** at any time. The CLI closes the Minecraft session before exiting.
 - A session is **persistent** by default: it stays connected after a task until you stop it. Commands in this checklist that expect the run to finish by itself and print a result carry `--one-shot`.
@@ -330,3 +333,33 @@ None of the following has been run against a Minecraft server. Each item is the 
 9. **Live verification phases.** On the Tests & Evaluation tab, try to run live verification without confirming (the controls must stay disabled), then confirm the connection and run the read-only phases; confirm again only in a disposable world before the digging and combat phases. Expected: PASS, FAIL or SKIPPED with a reason for every skip, and a result labelled `NOT VERIFIED LIVE` unless a server was actually reached. Compare with the headless harness in §16.
 
 **Record for every item:** what you ran, the date, the server software and version, the evidence (event-log lines, trace file names, a screenshot for item 8) and anything that differed from *Expected*. A difference is a result.
+
+## 19. Implementation-end offline audit (completed: 12 October 2026)
+
+The implementation-end audit was completed using offline fixtures, test doubles, loopback test servers and deterministic simulations only. The audit found a real chat-parser defect: normalization stripped the leading slash before `/gamemind help` could be recognized. Prefix removal now happens before normalization, and the regression test exercises the slash command. The post-fix chat grammar/controller tests passed **27/27**.
+
+Validation results:
+
+| Check | Result |
+| --- | --- |
+| `npm test` | Passed: **952/952** Node tests and **1/1** Vitest integration test |
+| `npm run build` | Passed |
+| `npm run typecheck:public` | Passed |
+| `npm run test:launcher` | Passed: **50/50** Python launcher tests |
+| `python3 main.py --check` | Passed; Java and Docker were absent but optional, so no game server was started |
+| `npm run eval:offline` | Passed all scenario gates: **520 runs**, 0 unsafe actions, 0 unverified confirmations, 0 deaths |
+| Policy-ranking evaluation | Skipped: there was no weighted candidate in `data/learning` |
+
+Repeat the offline checks from the repository root with:
+
+```bash
+npm ci --no-audit --no-fund
+npm test
+npm run build
+npm run typecheck:public
+npm run test:launcher
+npm run eval:offline
+python3 main.py --check
+```
+
+No live Minecraft connection, block placement, material gathering, or other world modification was performed. These results do not establish compatibility with Java 1.20.4, a Modrinth/Fabric/Litematica/MaLiLib client, Windows/WSL networking, a real browser, or an installed Ollama endpoint. A Fabric-side sender and in-game Litematica build executor remain unimplemented. Follow §§1–18 only after separate explicit live-use approval, and use a disposable authorized world as specified there.

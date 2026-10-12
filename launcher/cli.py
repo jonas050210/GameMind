@@ -14,12 +14,14 @@ from typing import Callable, Mapping, Optional, Sequence
 from . import checks, process, wsl
 
 DEFAULT_CONTROL_PORT = 8787
+OFFLINE_PLAN_FLAGS = {"--house-plan", "--house-plan-json", "--litematic-plan", "--litematic-layer", "--litematic-bridge"}
 
 EPILOG = """\
 Examples:
-  python3 main.py                               Control Center only; connect from the Bots tab (the field is pre-filled)
+  python3 main.py                               connect and stay in the terminal until Ctrl-C
   python3 main.py --host 192.168.1.20 --port 25565
   python3 main.py --task gather-logs            run a task first, then stay connected
+  python3 main.py --control-center              opt in to the browser dashboard
   python3 main.py --simulated                   offline simulator instead of a real server (labelled simulated everywhere)
   python3 main.py --check                       only check the environment
 Anything after -- is passed to the TypeScript CLI unchanged (try: python3 main.py -- --help).
@@ -29,7 +31,7 @@ Anything after -- is passed to the TypeScript CLI unchanged (try: python3 main.p
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="Start GameMind (the TypeScript agent) and its Control Center, open your browser, and stop everything cleanly on Ctrl-C.",
+        description="Start GameMind (the TypeScript agent) in terminal-first mode; optionally open the Control Center, and stop cleanly on Ctrl-C.",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -40,14 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--version", help="Minecraft version (default 1.20.4)")
     live.add_argument("--auth", choices=["offline", "microsoft"], help="authentication mode (default offline)")
     live.add_argument("--simulated", nargs="?", const="explore-remote-log", metavar="SCENARIO", help="use the offline simulator (default scenario explore-remote-log) instead of a real server")
-    live.add_argument("--no-connect", action="store_true", help="start only the Control Center and connect from the page")
+    live.add_argument("--no-connect", action="store_true", help="start only the Control Center and connect from the page (requires --control-center)")
     task = parser.add_argument_group("Task")
     task.add_argument("--task", choices=["gather-logs", "mine-stone", "craft-wooden-pickaxe", "secure-food", "build-shelter"], help="run this task first")
     task.add_argument("--resource", help="task target (for example oak_log)")
     task.add_argument("--count", type=int, help="task amount")
     task.add_argument("--one-shot", action="store_true", help="end the session when the task finishes (default: stay connected until you stop it)")
     task.add_argument("--no-autonomy", action="store_true", help="the agent acts only on tasks you start")
-    ui = parser.add_argument_group("Control Center")
+    ui = parser.add_argument_group("Optional Control Center")
+    ui.add_argument("--control-center", action="store_true", help="opt in to the browser dashboard (off by default)")
     ui.add_argument("--control-port", type=int, help=f"Control Center port (default {DEFAULT_CONTROL_PORT}, or the next free one; 0 lets the system pick)")
     ui.add_argument("--control-host", default="127.0.0.1", help="interface to bind (default 127.0.0.1, this machine only)")
     ui.add_argument("--no-browser", action="store_true", help="do not open the browser")
@@ -61,9 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def agent_arguments(args: argparse.Namespace, control_port: int, host: Optional[str]) -> list[str]:
+def agent_arguments(args: argparse.Namespace, control_port: Optional[int], host: Optional[str]) -> list[str]:
     """The argument list for ``src/cli.ts``. Pure, so it can be tested without starting anything."""
     out: list[str] = []
+    passthrough = [item for item in args.passthrough if item != "--"] if args.passthrough else []
+    offline_plan_mode = any(item in OFFLINE_PLAN_FLAGS for item in passthrough)
     if args.simulated is not None:
         out += ["--sim", args.simulated]
     else:
@@ -84,17 +89,21 @@ def agent_arguments(args: argparse.Namespace, control_port: int, host: Optional[
     if args.count is not None:
         out += ["--count", str(args.count)]
     if args.one_shot:
-        out += ["--one-shot", "--control-center"]
-    else:
-        out += ["--persistent", "--control-center"]
+        out.append("--one-shot")
+    elif not offline_plan_mode:
+        out.append("--persistent")
+    if args.control_center:
+        out.append("--control-center")
     if args.no_autonomy:
         out.append("--no-autonomy")
     if args.no_connect:
         out.append("--no-connect")
-    out += ["--control-port", str(control_port), "--control-host", args.control_host]
-    if not args.no_browser:
-        out.append("--open-browser")
-    passthrough = [item for item in args.passthrough if item != "--"] if args.passthrough else []
+    if args.control_center:
+        if control_port is not None:
+            out += ["--control-port", str(control_port)]
+        out += ["--control-host", args.control_host]
+        if not args.no_browser:
+            out.append("--open-browser")
     return out + passthrough
 
 
@@ -143,14 +152,10 @@ def main(
     args = parser.parse_args(list(argv) if argv is not None else None)
     root = (root or Path(__file__).resolve().parent.parent).resolve()
     environment = dict(os.environ if env is None else env)
-    # Plain `python3 main.py` opens the Control Center and waits: the operator connects from the page, with host and port
-    # typed there. Any explicit connection request (a host, a port, the simulator, a task) still connects at once.
-    explicit_connection = bool(
-        args.host or args.port is not None or args.simulated is not None or args.task
-        or environment.get("MINECRAFT_HOST") or environment.get("MINECRAFT_PORT")
-    )
-    if not explicit_connection:
-        args.no_connect = True
+    if args.no_connect and not args.control_center:
+        parser.error("--no-connect requires --control-center; otherwise the terminal session connects immediately.")
+    if args.control_port is not None and not args.control_center:
+        parser.error("--control-port requires --control-center.")
     system = platform_module.system()
     plat = wsl.detect_platform(system, environment, read_proc_version())
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
@@ -191,7 +196,7 @@ def main(
 
     explicit_port = args.control_port is not None
     control_port, port_problem = (None, None)
-    if not running:
+    if args.control_center and not running:
         control_port, port_problem = checks.choose_control_port(args.control_port if explicit_port else DEFAULT_CONTROL_PORT, explicit_port, args.control_host)
         if port_problem:
             problems.append(port_problem)
@@ -200,7 +205,7 @@ def main(
         out(f"Project:      {root}")
         out(f"Platform:     {system}{' (WSL' + str(plat.wsl_version or '') + (', ' + plat.distro if plat.distro else '') + ')' if plat.wsl else ''}")
         out(f"Node:         {node or 'not found'} {'.'.join(map(str, version)) if version else ''}")
-        out(f"Control port: {control_port if control_port is not None else 'unavailable'}")
+        out(f"Control port: {control_port if control_port is not None else ('disabled' if not args.control_center else 'unavailable')}")
         if running:
             out(f"Running:      GameMind is already running (process {running.get('pid')}) at {running.get('url') or 'an unknown address'}")
         if mount_warning:
@@ -223,20 +228,24 @@ def main(
         for problem in problems:
             out(f"  - {problem.render()}")
         return 2
-    assert node is not None and control_port is not None
+    assert node is not None
+    if args.control_center and control_port is None:
+        raise RuntimeError("Control Center requested but no port was selected")
 
     host: Optional[str] = args.host
-    # Host detection also runs without a connection: the Control Center pre-fills its host field from it under WSL.
-    if args.simulated is None:
+    passthrough = [item for item in args.passthrough if item != "--"] if args.passthrough else []
+    offline_plan_mode = any(item in OFFLINE_PLAN_FLAGS for item in passthrough)
+    # Host detection under WSL prefers the Windows host when it is the only endpoint that answers.
+    if args.simulated is None and not offline_plan_mode:
         port = args.port or int(environment.get("MINECRAFT_PORT", "25565") or "25565")
         decision = wsl.choose_host(args.host, environment.get("MINECRAFT_HOST"), port, plat, discover_windows_host(plat), wsl.probe_tcp)
         host = decision.host if (decision.changed or args.host) else None
         for note in decision.notes:
             out(f"Note: {note}")
-        if not decision.changed and not args.host and not environment.get("MINECRAFT_HOST"):
+        if not args.no_connect and not decision.changed and not args.host and not environment.get("MINECRAFT_HOST"):
             status = wsl.probe_tcp(decision.host, port)
             if status != "open":
-                out(f"Note: nothing answers at {decision.host}:{port} right now ({status}). GameMind will still start and explain the failure; start Minecraft (or open the world to LAN) and connect from the page.")
+                out(f"Note: nothing answers at {decision.host}:{port} right now ({status}). GameMind will attempt the connection and explain the failure; start Minecraft or open the world to LAN.")
     if mount_warning:
         out(f"Note: {mount_warning}")
     for tool in optional_tools:

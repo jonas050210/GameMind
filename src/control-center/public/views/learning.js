@@ -1,7 +1,6 @@
 import { h } from "../lib/h.js";
-import { badge, button, card, empty, kv, notice, sourceBadge, statusBadge, table, unknown } from "../lib/ui.js";
-import { fmtDateTime, fmtNumber, fmtPercent, fmtTime, humanise, orUnknown } from "../lib/format.js";
-import { conclusionNotice } from "./training.js";
+import { badge, button, card, empty, kv, notice, statusBadge, table, unknown } from "../lib/ui.js";
+import { fmtDateTime, fmtNumber, fmtPercent, fmtTime, humanise } from "../lib/format.js";
 
 const PROVENANCE_LABELS = {
   live: "Live Minecraft session",
@@ -169,33 +168,11 @@ function runs(data) {
   );
 }
 
-function checkpointEvaluations(data) {
-  const reports = data.trainingReports ?? [];
-  return card(
-    { title: "Checkpoint evaluations", subtitle: `Offline training folder: ${data.trainingDirectory}`, actions: sourceBadge("offline") },
-    reports.length
-      ? table({
-          dense: true,
-          columns: [
-            { label: "Checkpoint", cell: (r) => h("code", null, r.checkpointId) },
-            { label: "Learned contexts", align: "right", cell: (r) => orUnknown(r.learnedContexts, fmtNumber) },
-            { label: "Success baseline → candidate", cell: (r) => `${fmtPercent(r.baseline.successRate)} → ${fmtPercent(r.candidate.successRate)}` },
-            { label: "Differed in", align: "right", cell: (r) => (r.behaviour ? `${fmtNumber(r.behaviour.runsWithDifferentChoices)}/${fmtNumber(r.behaviour.pairedRuns)} runs` : unknown()) },
-            { label: "Conclusion", cell: (r) => r.conclusion ?? "not recorded" },
-            { label: "Gate", cell: (r) => (r.verdict === "promotable" ? badge("promotable", "good") : badge("not promotable", "neutral")) },
-          ],
-          rows: reports.map((value) => ({ key: value.checkpointId + value.generatedAt, value })),
-        })
-      : empty("No checkpoint has been evaluated", "Evaluate a checkpoint from the Training tab."),
-    reports[0] ? conclusionNotice(reports[0].conclusion) : null,
-  );
-}
-
 export function renderLearning(ctx) {
   const resource = ctx.data.learning;
   const blocked = unavailable(resource, "Learning and policy");
   if (blocked) {
-    return { "learn-store": blocked, "learn-policy": null, "learn-contexts": null, "learn-failures": null, "learn-explain": null, "learn-runs": null, "learn-checkpoints": null };
+    return { "learn-store": blocked, "learn-policy": null, "learn-contexts": null, "learn-failures": null, "learn-explain": null, "learn-runs": null };
   }
   const data = resource.value;
   return {
@@ -205,7 +182,6 @@ export function renderLearning(ctx) {
     "learn-failures": failures(data),
     "learn-explain": explain(data),
     "learn-runs": runs(data),
-    "learn-checkpoints": checkpointEvaluations(data),
   };
 }
 

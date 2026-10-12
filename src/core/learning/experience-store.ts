@@ -204,9 +204,6 @@ export class ExperienceStore {
     await this.queue;
   }
 
-  async flush(): Promise<void> {
-    await this.queue;
-  }
 }
 
 /** In-memory store used by tests and short-lived evaluations. */

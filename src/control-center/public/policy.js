@@ -3,25 +3,6 @@
   imported by the page (app.js) and by the Node tests.
 */
 
-export const HEADLESS_STORAGE_KEY = "gamemind-headless-training";
-
-/** Headless is the default: training should not cost browser rendering unless the operator asks for it. */
-export function parseHeadless(stored) {
-  return stored === null || stored === undefined ? true : stored !== "0";
-}
-
-export function isTrainingActive(training) {
-  return !!training && (training.status === "running" || training.status === "paused" || training.status === "evaluating");
-}
-
-/**
- * True when the browser should stop drawing the 3D world. It applies only while headless training is actually
- * running: the agent's own view is unaffected otherwise, and nothing is hidden while the flag is off.
- */
-export function renderingSuspended(snapshot, headless) {
-  return headless === true && isTrainingActive(snapshot?.training ?? null);
-}
-
 export const ROADMAP_CATEGORY_ORDER = [
   "reliability",
   "autonomy",
@@ -29,7 +10,6 @@ export const ROADMAP_CATEGORY_ORDER = [
   "navigation",
   "observation",
   "performance",
-  "training",
   "world-knowledge",
   "interface",
   "other",

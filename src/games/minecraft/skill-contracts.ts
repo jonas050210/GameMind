@@ -176,6 +176,20 @@ export function verifySkillPostcondition(
         evidence: `Placed ${expected} ${seen ? "observed" : "not observed"} at ${x},${y},${z}.`,
       };
     }
+    case "minecraft.plant-wheat": {
+      const x = Number(record.x);
+      const y = Number(record.y);
+      const z = Number(record.z);
+      const planted = after.nearbyBlocks.some((block) =>
+        block.position.x === x && block.position.y === y && block.position.z === z && block.name === "wheat",
+      );
+      const seedsBefore = countBefore("wheat_seeds");
+      const seedsAfter = countAfter("wheat_seeds");
+      return {
+        verified: seedsBefore !== null && planted && seedsBefore - seedsAfter === 1,
+        evidence: `Wheat ${planted ? "observed" : "not observed"} at ${x},${y},${z}; seed delta ${seedsBefore === null ? "unknown" : seedsBefore - seedsAfter}.`,
+      };
+    }
     case "minecraft.build-shelter": {
       // The contract counts how many cardinal sides are solid before and after: progress must be
       // visible in the world, not only in the adapter's own report.
@@ -225,6 +239,22 @@ export function verifySkillPostcondition(
       return {
         verified: delta >= count,
         evidence: `Observed ${item} inventory decrease of ${delta} for a requested drop of ${count}.`,
+      };
+    }
+    case "minecraft.give-item": {
+      const item = String(record.itemName);
+      const count = Number(record.count ?? 0);
+      const targetName = String(record.targetUsername ?? "");
+      const maxDistance = Number(record.maxDistance ?? 4.5);
+      const had = countBefore(item);
+      if (had === null) return { verified: null, evidence: UNKNOWN_BEFORE_EVIDENCE };
+      const delta = had - countAfter(item);
+      const target = after.entities.find((entity) => entity.type === "player" && entity.name === targetName);
+      const distance = target ? Math.hypot(after.player.position.x - target.position.x, after.player.position.y - target.position.y, after.player.position.z - target.position.z) : null;
+      const near = distance !== null && distance <= maxDistance;
+      return {
+        verified: delta >= count && near,
+        evidence: `Observed ${item} inventory decrease of ${delta}/${count}; configured operator ${targetName} ${distance === null ? "was not visible" : `was ${distance.toFixed(1)} blocks away`} after the toss.`,
       };
     }
     case "minecraft.orient": {

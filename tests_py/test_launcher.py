@@ -336,20 +336,37 @@ class AgentArguments(unittest.TestCase):
         # Built with the platform's own separator, so the expectation holds on Windows (backslashes) too.
         self.assertEqual(command, ["/usr/bin/node", str(Path("/proj") / "node_modules" / "tsx" / "dist" / "cli.mjs"), str(Path("/proj") / "src" / "cli.ts"), "--help"])
 
-    def test_default_is_a_persistent_live_session_that_opens_the_browser_once(self) -> None:
+    def test_default_is_a_persistent_terminal_session_without_a_dashboard(self) -> None:
         args = self.parse()
-        result = cli.agent_arguments(args, 8787, None)
+        result = cli.agent_arguments(args, None, None)
         self.assertIn("--persistent", result)
         self.assertNotIn("--one-shot", result)
-        self.assertIn("--open-browser", result)
-        self.assertEqual(result[result.index("--control-port") + 1], "8787")
-        self.assertEqual(result[result.index("--control-host") + 1], "127.0.0.1")
+        self.assertNotIn("--control-center", result)
+        self.assertNotIn("--open-browser", result)
+        self.assertNotIn("--control-port", result)
+        self.assertNotIn("--control-host", result)
         self.assertNotIn("--sim", result)
         self.assertNotIn("--host", result, "an unset host is left to the agent (MINECRAFT_HOST or its default)")
 
+    def test_dashboard_is_opt_in_and_opens_a_browser_only_when_requested(self) -> None:
+        args = self.parse("--control-center")
+        result = cli.agent_arguments(args, 8787, None)
+        self.assertIn("--control-center", result)
+        self.assertIn("--control-port", result)
+        self.assertEqual(result[result.index("--control-port") + 1], "8787")
+        self.assertIn("--open-browser", result)
+        quiet = cli.agent_arguments(self.parse("--control-center", "--no-browser"), 8787, None)
+        self.assertIn("--control-center", quiet)
+        self.assertNotIn("--open-browser", quiet)
+
+    def test_no_connect_and_port_require_the_optional_dashboard(self) -> None:
+        for argv in (["--no-connect"], ["--control-port", "8787"]):
+            with self.subTest(argv=argv), mock.patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit):
+                cli.main(argv, out=lambda _line: None)
+
     def test_options_map_onto_the_agent_flags(self) -> None:
         args = self.parse("--host", "mc.local", "--port", "25566", "--username", "Bot", "--version", "1.20.4", "--auth", "offline", "--task", "gather-logs", "--count", "3", "--resource", "oak_log", "--one-shot", "--no-autonomy", "--no-browser", "--", "--allow-combat")
-        result = cli.agent_arguments(args, 9000, args.host)
+        result = cli.agent_arguments(args, None, args.host)
         for pair in (["--host", "mc.local"], ["--port", "25566"], ["--username", "Bot"], ["--task", "gather-logs"], ["--count", "3"], ["--resource", "oak_log"]):
             index = result.index(pair[0])
             self.assertEqual(result[index : index + 2], pair)
@@ -358,6 +375,22 @@ class AgentArguments(unittest.TestCase):
         self.assertNotIn("--open-browser", result)
         self.assertEqual(result[-1], "--allow-combat")
         self.assertNotIn("--", result)
+
+    def test_explicit_offline_blueprint_modes_forward_without_a_minecraft_session(self) -> None:
+        for mode in ("--litematic-plan", "--litematic-bridge"):
+            with self.subTest(mode=mode):
+                args = self.parse("--", mode, "./blueprints/house.litematic")
+                result = cli.agent_arguments(args, None, None)
+                self.assertNotIn("--persistent", result)
+                self.assertEqual(result, [mode, "./blueprints/house.litematic"])
+        args = self.parse("--", "--litematic-plan", "./blueprints/house.litematic", "--litematic-layer", "0")
+        result = cli.agent_arguments(args, None, None)
+        self.assertNotIn("--persistent", result)
+        self.assertEqual(result, ["--litematic-plan", "./blueprints/house.litematic", "--litematic-layer", "0"])
+        args = self.parse("--", "--house-plan", "B", "--house-plan-json", "./blueprints/house-b.json")
+        result = cli.agent_arguments(args, None, None)
+        self.assertNotIn("--persistent", result)
+        self.assertEqual(result, ["--house-plan", "B", "--house-plan-json", "./blueprints/house-b.json"])
 
     def test_simulated_mode_uses_the_simulator_flag_and_no_server_flags(self) -> None:
         result = cli.agent_arguments(self.parse("--simulated", "food-remote-berries", "--host", "ignored"), 8787, "ignored")
@@ -430,7 +463,7 @@ class MainFlow(unittest.TestCase):
 
     def test_ready_line_becomes_a_friendly_banner_and_the_exit_code_is_the_childs(self) -> None:
         ready = 'GAMEMIND_READY ' + json.dumps({"url": "http://127.0.0.1:8787/", "port": 8787, "browser": {"requested": True, "opened": True, "method": "xdg-open", "reason": None}})
-        code, lines, spawned = self.run_main(["--simulated", "--control-port", "8787"], spawn_lines=["starting", ready, "done"])
+        code, lines, spawned = self.run_main(["--simulated", "--control-center", "--control-port", "8787"], spawn_lines=["starting", ready, "done"])
         self.assertEqual(code, 0)
         self.assertEqual(len(spawned), 1)
         self.assertIn("--open-browser", spawned[0])
@@ -441,18 +474,20 @@ class MainFlow(unittest.TestCase):
 
     def test_a_browser_that_could_not_be_opened_is_reported_with_the_address(self) -> None:
         ready = 'GAMEMIND_READY ' + json.dumps({"url": "http://127.0.0.1:8787/", "browser": {"requested": True, "opened": False, "method": None, "reason": "No browser opener worked"}})
-        _, lines, _ = self.run_main(["--simulated"], spawn_lines=[ready])
+        _, lines, _ = self.run_main(["--simulated", "--control-center"], spawn_lines=[ready])
         text = "\n".join(lines)
         self.assertIn("could not be opened automatically (No browser opener worked)", text)
         self.assertIn("Open http://127.0.0.1:8787/ yourself.", text)
 
-    def test_plain_start_opens_the_control_center_and_waits_for_the_page(self) -> None:
+    def test_plain_start_connects_in_the_terminal_without_a_dashboard(self) -> None:
         code, _lines, spawned = self.run_main([])
         self.assertEqual(code, 0)
-        self.assertIn("--no-connect", spawned[0], "no connection is made until the operator connects from the page")
-        self.assertIn("--control-center", spawned[0])
+        self.assertIn("--persistent", spawned[0])
+        self.assertNotIn("--no-connect", spawned[0])
+        self.assertNotIn("--control-center", spawned[0])
+        self.assertNotIn("--open-browser", spawned[0])
 
-    def test_an_explicit_host_or_task_or_simulator_still_connects_at_once(self) -> None:
+    def test_explicit_host_or_task_or_simulator_keeps_the_terminal_session_connected(self) -> None:
         for argv in (["--host", "mc.local"], ["--port", "25566"], ["--task", "gather-logs"], ["--simulated"]):
             with self.subTest(argv=argv):
                 _code, _lines, spawned = self.run_main(argv)
@@ -540,7 +575,7 @@ class MainFlow(unittest.TestCase):
             with mock.patch.object(checks, "find_executable", return_value="/usr/bin/node"), mock.patch.object(checks, "node_version", return_value=(22, 1, 0)), mock.patch.object(
                 checks, "check_dependencies", return_value=[]
             ), mock.patch.object(checks, "is_port_free", return_value=False):
-                code = cli.main(["--control-port", "8787"], root=root, env={}, out=lines.append, spawn_fn=lambda *a, **k: None)
+                code = cli.main(["--control-center", "--control-port", "8787"], root=root, env={}, out=lines.append, spawn_fn=lambda *a, **k: None)
         self.assertEqual(code, 2)
         self.assertIn("Control Center port 8787 is already in use", "\n".join(lines))
 

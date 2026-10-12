@@ -485,114 +485,6 @@ export interface ControlCenterWorldSeed {
   readonly note: string;
 }
 
-export interface ControlCenterTrainingDeltas {
-  readonly successRate: number;
-  readonly medianActions: number;
-  readonly meanWastedActions: number;
-  readonly unsafeActions: number;
-  readonly deaths: number;
-}
-
-/** Training as reported from its state file and its child process. Nothing here is estimated. */
-/** What the Training form sends. `directory` is a name under the data directory, never a path. */
-export interface ControlCenterTrainingStart {
-  readonly episodesPerStage?: number;
-  readonly maxEpisodes?: number;
-  readonly maxMinutes?: number;
-  readonly fresh?: boolean;
-  /** Required for `fresh` when the directory already holds a run; the consequences are shown before it is sent. */
-  readonly confirmFresh?: boolean;
-  readonly explorationRate?: number;
-  readonly stageIds?: readonly string[];
-  readonly directory?: string;
-}
-
-export interface ControlCenterTraining {
-  /** `interrupted` means the state says a run was active but its process is gone; it can be resumed. */
-  readonly status: "idle" | "running" | "paused" | "stopped" | "completed" | "failed" | "interrupted" | "evaluating";
-  readonly processAlive: boolean;
-  readonly pid: number | null;
-  readonly root: string;
-  readonly episodesTotal: number;
-  readonly episodeBudget: number;
-  readonly episodesPerStage: number | null;
-  readonly stage: {
-    readonly index: number;
-    readonly total: number;
-    readonly id: string;
-    readonly label: string;
-    readonly episodes: number;
-    readonly successRate: number | null;
-    readonly passRate: number;
-  } | null;
-  readonly recentSuccessRate: number | null;
-  readonly recentMeanReward: number | null;
-  readonly recentEpisodes: readonly {
-    readonly index: number;
-    readonly stageId: string;
-    readonly scenarioId: string;
-    readonly seed: number;
-    readonly success: boolean;
-    readonly status: string;
-    readonly failureCode: string | null;
-    readonly actions: number;
-    readonly wastedActions: number;
-    readonly simulatedSeconds: number;
-    readonly reward: number | null;
-    readonly at: string;
-  }[];
-  readonly checkpoints: readonly {
-    readonly id: string;
-    readonly stageId: string;
-    readonly createdAt: string;
-    readonly episodes: number;
-    readonly weightedContexts: number;
-    /** False when the checkpoint holds no learned weights: it is the baseline policy and an evaluation cannot show learning. */
-    readonly evaluable: boolean;
-  }[];
-  readonly lastEvaluation: {
-    readonly checkpointId: string;
-    readonly generatedAt: string;
-    readonly verdict: "promotable" | "not-promotable";
-    readonly successRate: { readonly baseline: number; readonly candidate: number };
-    readonly deltas: ControlCenterTrainingDeltas | null;
-    readonly reasons: readonly string[];
-    /** What the comparison established (no-learned-contexts, identical-behaviour, improved, ...); null for older reports. */
-    readonly conclusion: string | null;
-    readonly learnedContexts: number | null;
-    readonly behaviourChangedRuns: number | null;
-    readonly pairedRuns: number | null;
-  } | null;
-  /** Curriculum stages a run may use; the form offers exactly these. */
-  readonly availableStages: readonly { readonly id: string; readonly label: string; readonly scenarioCount: number; readonly minEpisodes: number }[];
-  /** Stages the saved run was started with; null before any run. */
-  readonly stageIds: readonly string[] | null;
-  /** Exploration rate the saved run used; null before any run. */
-  readonly explorationRate: number | null;
-  /** The default exploration rate offered for a new run. */
-  readonly defaultExplorationRate: number;
-  /** Curriculum stages recommended by the most recent environment benchmark, or null (all stages). */
-  readonly defaultStageIds?: readonly string[] | null;
-  /** Who holds this directory's lock, if anyone. */
-  readonly lock: { readonly pid: number; readonly kind: "train" | "evaluate"; readonly startedAt: string; readonly alive: boolean } | null;
-  readonly lastError: string | null;
-  readonly updatedAt: string | null;
-  readonly note: string;
-  /** Where training runs. Always the offline simulator: no Minecraft client, no browser rendering. */
-  readonly execution: "offline-simulator";
-  readonly render: "none";
-  /** Time budget for the run, in minutes; null when only the episode budget applies. */
-  readonly maxMinutes: number | null;
-  /** Active episode time across all invocations, in seconds. Pauses are not counted. */
-  readonly activeSeconds: number;
-  /** Lifetime throughput: episodes divided by active minutes. Null before any active time. */
-  readonly episodesPerMinute: number | null;
-  /** Per-episode reward for the saved recent episodes, oldest first. Null entries had no learner reward. */
-  readonly rewardTrend: readonly (number | null)[];
-  /** Why the run last stopped (operator, time budget, episode budget, curriculum complete). */
-  readonly stopReason: string | null;
-}
-
 export interface ControlCenterSnapshot {
   readonly generatedAt: string;
   /** Measured timing of the fast observation loop: frequency, observation age, decision/action/reaction latency. */
@@ -600,7 +492,6 @@ export interface ControlCenterSnapshot {
   /** Subgoal choice, cooldowns, and recent outcomes from the autonomy controller. */
   readonly objective?: AutonomySnapshot | null;
   readonly worldSeed?: ControlCenterWorldSeed | null;
-  readonly training?: ControlCenterTraining | null;
   /** Improvement roadmap built from recorded evidence and the live loop. Null when the host has none. */
   readonly roadmap?: RoadmapSnapshot | null;
   /** Lightweight process/host sampling; no inspector, profiler, or Minecraft tick hook is enabled. */
@@ -654,7 +545,7 @@ export interface ControlCenterAppView {
   readonly bind: { readonly host: string; readonly port: number; readonly localOnly: boolean; readonly url: string };
   readonly platform: { readonly os: string; readonly wsl: boolean; readonly wslVersion: number | null; readonly distro: string | null; readonly node: string };
   /** Folders shown relative to the project; absolute paths never reach the page. */
-  readonly directories: { readonly data: string; readonly learning: string | null; readonly worldMemory: string; readonly traces: string; readonly training: string };
+  readonly directories: { readonly data: string; readonly learning: string | null; readonly worldMemory: string; readonly traces: string };
   readonly defaultMode: SessionMode;
   readonly learning: { readonly enabled: boolean; readonly evidence: readonly string[] | null };
   /** URLs this process has asked a browser to open; proves a state change did not open another tab. */
@@ -725,14 +616,9 @@ export interface ControlCenterCommands {
   resetTrip?(): ControlCommandResult | Promise<ControlCommandResult>;
   enableCombat?(enabled: boolean): ControlCommandResult | Promise<ControlCommandResult>;
   setWorldSeed?(seed: string | null): ControlCommandResult | Promise<ControlCommandResult>;
-  startTraining?(options: ControlCenterTrainingStart): ControlCommandResult | Promise<ControlCommandResult>;
   /** Reports what a start would do (resume or fresh) for a directory, without starting anything. */
   refreshRoadmap?(): ControlCommandResult | Promise<ControlCommandResult>;
   roadmapAction?(payload: { readonly fingerprint: string; readonly action: string; readonly value?: number; readonly note?: string }): ControlCommandResult | Promise<ControlCommandResult>;
-  pauseTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
-  resumeTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
-  stopTraining?(): ControlCommandResult | Promise<ControlCommandResult>;
-  evaluateTraining?(checkpointId?: string): ControlCommandResult | Promise<ControlCommandResult>;
   /** `queue: true` runs the task after the current one instead of refusing while the agent is busy. */
   startTask?(task: { readonly kind: string; readonly resource?: string; readonly count?: number; readonly queue?: boolean }): ControlCommandResult | Promise<ControlCommandResult>;
   stopTask?(reason: string): ControlCommandResult | Promise<ControlCommandResult>;
@@ -752,14 +638,6 @@ export interface ControlCenterCommands {
   /** Emergency stop: simultaneously trips, stops the task, and disarms combat. */
   panic?(): ControlCommandResult | Promise<ControlCommandResult>;
   /** Starts the offline Docker test server in the background; poll the `testServer` query for its state. */
-  /** Runs the exploration-rate benchmark as a cancellable job; results appear in the Training tab. */
-  runBenchmark?(payload?: {
-    readonly name?: string;
-    readonly environmentCases?: number;
-    readonly environmentSecondsPerCase?: number;
-    readonly workerLimit?: number;
-    readonly stageIds?: readonly string[];
-  }): ControlCommandResult | Promise<ControlCommandResult>;
   startTestServer?(): ControlCommandResult | Promise<ControlCommandResult>;
   stopTestServer?(): ControlCommandResult | Promise<ControlCommandResult>;
   /** A plain TCP check that host:port accepts connections. Read-only; it does not connect the bot. */

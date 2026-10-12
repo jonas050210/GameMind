@@ -37,8 +37,7 @@ const EXPECTED_ENTRY_IDS = [
   "safety.pause", "safety.resume", "safety.trip", "safety.reset-trip", "safety.stop-task", "safety.panic",
   "safety.combat",
   // Learning & Memory
-  "learn.promote", "learn.reject", "learn.world-seed", "learn.training-start",
-  "learn.training-pause", "learn.training-resume", "learn.training-stop", "learn.training-evaluate",
+  "learn.promote", "learn.reject", "learn.world-seed",
 ];
 
 test("the catalog is complete, unique, categorized, and self-describing", () => {
@@ -128,7 +127,6 @@ function fakeContext(overrides: Partial<LibraryHandlerContext> & { control?: Fak
     runtime: null,
     safety: null,
     learner: null,
-    training: null,
     worldSeed: null,
     advertisedCapabilities: [],
     combatSwitchAvailable: false,
@@ -152,7 +150,6 @@ test("availability names the missing requirement for every requirement kind", ()
   assert.match(statusOf("safety.pause")?.statusReason ?? "", /Safety Broker/);
   assert.match(statusOf("safety.combat")?.statusReason ?? "", /combat switch/);
   assert.match(statusOf("learn.promote")?.statusReason ?? "", /learner/);
-  assert.match(statusOf("learn.training-start")?.statusReason ?? "", /Training/);
 
   // A fully wired run advertises everything the catalog lists as implemented.
   const full = fakeContext({
@@ -160,7 +157,6 @@ test("availability names the missing requirement for every requirement kind", ()
     companion: {} as never,
     safety: {} as never,
     learner: {} as never,
-    training: {} as never,
     worldSeed: {} as never,
     advertisedCapabilities: ["minecraft.navigate", "minecraft.look", "minecraft.inspect_block"],
     combatSwitchAvailable: true,

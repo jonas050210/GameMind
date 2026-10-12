@@ -11,8 +11,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { BASELINE_POLICY_WEIGHTS } from "../src/core/learning/policy-weights.js";
 import { acquireTrainingLock, readTrainingLock, TrainingLockError, TRAINING_LOCK_FILE } from "../src/training/lock.js";
-import { TrainingManager } from "../src/training/manager.js";
-import { saveTrainingDefaults } from "../src/training/defaults.js";
 import { analyseComparison, evaluateCheckpoint, wilsonInterval, type PolicyMeasurement } from "../src/training/evaluate.js";
 import { DEFAULT_TRAINING_EXPLORATION_RATE, type CurriculumStage } from "../src/training/curriculum.js";
 import { readTrainingState, trainingPaths } from "../src/training/state.js";
@@ -251,106 +249,6 @@ test("evaluating a checkpoint with no learned weights is reported as no-learned-
     const third = await evaluateCheckpoint({ root, seeds: 2, scenarios, episodeRunner: drifting });
     assert.equal(third.baselineStability?.stable, false);
     assert.match(third.baselineStability?.note ?? "", /no longer matches/);
-  });
-});
-
-test("the manager explains a fresh start before it happens, and refuses it without explicit confirmation", async () => {
-  await withRoot(async (root) => {
-    const manager = new TrainingManager({ root, displayRoot: "data/example", entry: join(root, "never-run.mjs") });
-    const empty = await manager.preflight();
-    assert.equal(empty.directory, "data/example");
-    assert.equal(empty.fresh.needsConfirmation, false, "nothing to archive, so nothing to confirm");
-    assert.equal(empty.existing.hasRun, false);
-
-    await runTraining({ root, stages: STAGES, maxEpisodes: 4, episodeRunner: passing });
-    const used = await manager.preflight();
-    assert.equal(used.existing.hasRun, true);
-    assert.equal(used.fresh.needsConfirmation, true);
-    assert.ok(used.fresh.wouldArchive.some((line) => line.startsWith("state.json")));
-    assert.ok(used.fresh.wouldArchive.some((line) => line.startsWith("checkpoints/")));
-    assert.match(used.fresh.summary, /data\/example\/archive\//);
-    assert.ok(used.fresh.consequences.some((line) => /archived, not deleted/.test(line)));
-    assert.ok(used.fresh.consequences.some((line) => /not learning in a real Minecraft world/.test(line)));
-    assert.ok(!JSON.stringify(used).includes(root), "no absolute path appears in what the operator is shown");
-
-    const before = await readFile(trainingPaths(root).state, "utf8");
-    const refused = await manager.start({ fresh: true });
-    assert.equal(refused.ok, false);
-    assert.match(refused.message, /confirm it explicitly; nothing was changed/);
-    assert.equal(await readFile(trainingPaths(root).state, "utf8"), before, "the refused fresh start changed nothing");
-    assert.equal((await readdir(root)).includes("archive"), false, "and archived nothing");
-  });
-});
-
-test("a start without its own settings uses the saved benchmark defaults for workers, exploration and stages", async () => {
-  await withRoot(async (root) => {
-    const entry = join(root, "record-args.mjs");
-    await writeFile(entry, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(root, "args.json"))}, JSON.stringify(process.argv.slice(2)));\n`);
-    const defaultsFile = join(root, "..", `${root.split(/[\\/]/).pop()}-defaults.json`);
-    await saveTrainingDefaults(defaultsFile, {
-      schemaVersion: 1,
-      workers: 3,
-      explorationRate: 0.3,
-      stageIds: ["basics"],
-      savedAt: "2026-10-10T10:00:00.000Z",
-      benchmark: "gui-test",
-      decision: "test",
-      probe: null,
-      machine: { platform: "test", cpus: 1, memoryGb: 1, node: "test" },
-    });
-    try {
-      const manager = new TrainingManager({ root, entry, defaultsFile });
-      const started = await manager.start({ fresh: true, confirmFresh: true, maxEpisodes: 30 });
-      assert.equal(started.ok, true, started.message);
-      const deadline = Date.now() + 8_000;
-      let recorded: string[] | null = null;
-      while (Date.now() < deadline && recorded === null) {
-        recorded = await readFile(join(root, "args.json"), "utf8").then((text) => JSON.parse(text) as string[], () => null);
-        if (recorded === null) await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      assert.ok(recorded, "the child ran");
-      assert.deepEqual(recorded!.slice(recorded!.indexOf("--explore"), recorded!.indexOf("--explore") + 2), ["--explore", "0.3"]);
-      assert.deepEqual(recorded!.slice(recorded!.indexOf("--workers"), recorded!.indexOf("--workers") + 2), ["--workers", "3"]);
-      assert.deepEqual(recorded!.slice(recorded!.indexOf("--stages"), recorded!.indexOf("--stages") + 2), ["--stages", "basics"]);
-    } finally {
-      await rm(defaultsFile, { force: true });
-    }
-  });
-});
-
-test("a confirmed fresh start passes its options to the child process, with the default exploration rate", async () => {
-  await withRoot(async (root) => {
-    await runTraining({ root, stages: STAGES, maxEpisodes: 2, episodeRunner: passing });
-    const entry = join(root, "record-args.mjs");
-    await writeFile(entry, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(join(root, "args.json"))}, JSON.stringify(process.argv.slice(2)));\n`);
-    const manager = new TrainingManager({ root, entry });
-    const started = await manager.start({ fresh: true, confirmFresh: true, maxEpisodes: 30, stageIds: ["basics"] });
-    assert.equal(started.ok, true, started.message);
-    const deadline = Date.now() + 8_000;
-    let recorded: string[] | null = null;
-    while (Date.now() < deadline && recorded === null) {
-      recorded = await readFile(join(root, "args.json"), "utf8").then((text) => JSON.parse(text) as string[], () => null);
-      if (recorded === null) await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.ok(recorded, "the child ran");
-    assert.ok(recorded!.includes("--fresh"));
-    assert.deepEqual(recorded!.slice(recorded!.indexOf("--explore"), recorded!.indexOf("--explore") + 2), ["--explore", String(DEFAULT_TRAINING_EXPLORATION_RATE)]);
-    assert.deepEqual(recorded!.slice(recorded!.indexOf("--stages"), recorded!.indexOf("--stages") + 2), ["--stages", "basics"]);
-  });
-});
-
-test("the manager validates exploration and stage input and refuses a start while another process holds the directory", async () => {
-  await withRoot(async (root) => {
-    const manager = new TrainingManager({ root, entry: join(root, "never-run.mjs") });
-    assert.equal((await manager.start({ explorationRate: 2 })).ok, false);
-    assert.match((await manager.start({ stageIds: ["nope"] })).message, /Unknown curriculum stage\(s\): nope/);
-    assert.match((await manager.start({ stageIds: [] })).message, /at least one curriculum stage/);
-    // The manager probes real process liveness, so the lock is held under a pid that really exists: the parent shell.
-    const self = acquireTrainingLock(root, "train", { pid: process.ppid || 1 });
-    const blocked = await manager.start({});
-    assert.equal(blocked.ok, false);
-    assert.match(blocked.message, /Another process \(\d+\) is using this training directory/);
-    self.release();
   });
 });
 

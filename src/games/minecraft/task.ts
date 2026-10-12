@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { minecraftCraftTaskItemNames, minecraftLogNames } from "./capabilities.js";
+import { minecraftCraftTaskItemNames, minecraftLogNames, minecraftPlankNames } from "./capabilities.js";
 import { minecraftMineableBlockNames } from "./mining.js";
 
 const taskLimits = {
@@ -60,12 +60,87 @@ export const buildShelterTaskSchema = z.object({
   maxBlocks: z.number().int().min(1).max(16).default(4),
 });
 
+const wheatFarmOriginSchema = z.object({
+  x: z.number().int().min(-30_000_000).max(30_000_000),
+  y: z.number().int().min(-63).max(512),
+  z: z.number().int().min(-30_000_000).max(30_000_000),
+}).strict();
+
+/** Plant wheat into a bounded plot of already-hydrated farmland; soil and irrigation are never guessed or built. */
+export const farmWheatTaskSchema = z.object({
+  ...taskLimits,
+  maxActions: z.number().int().min(1).max(5_000).default(5_000),
+  maxDurationMs: z.number().int().min(1_000).max(1_800_000).default(1_800_000),
+  maxTargetDistance: z.number().finite().min(2).max(48).default(48),
+  maxExplorationLegs: z.number().int().min(0).max(60).default(0),
+  id: z.string().min(1).max(96),
+  kind: z.literal("farm_wheat"),
+  origin: wheatFarmOriginSchema,
+  width: z.number().int().min(1).max(25),
+  depth: z.number().int().min(1).max(50),
+}).strict().refine((task) => task.width * task.depth <= 1_250, {
+  message: "A wheat plot may contain at most 1,250 crop cells.",
+  path: ["width"],
+});
+
+const houseOriginSchema = z.object({
+  x: z.number().int().min(-30_000_000).max(30_000_000),
+  y: z.number().int().min(-63).max(509),
+  z: z.number().int().min(-30_000_000).max(30_000_000),
+}).strict();
+
+/** A fixed, small, roofed 5×5 starter house; its style and material budget cannot be expanded by chat. */
+export const buildHouseTaskSchema = z.object({
+  ...taskLimits,
+  maxActions: z.number().int().min(1).max(5_000).default(1_000),
+  maxDurationMs: z.number().int().min(1_000).max(1_800_000).default(1_800_000),
+  maxExplorationLegs: z.number().int().min(0).max(60).default(0),
+  id: z.string().min(1).max(96),
+  kind: z.literal("build_house"),
+  origin: houseOriginSchema,
+  materialName: z.enum(minecraftPlankNames).default("oak_planks"),
+  /** Separate explicit operator permission is required before collecting any nearby logs. */
+  allowMaterialGathering: z.boolean().default(false),
+}).strict().refine((task) => task.origin.y + 3 <= 512, {
+  message: "The house roof extends above the supported Minecraft build height.",
+  path: ["origin", "y"],
+});
+
+const excavationOriginSchema = z.object({
+  x: z.number().int().min(-30_000_000).max(30_000_000),
+  y: z.number().int().min(-64).max(512),
+  z: z.number().int().min(-30_000_000).max(30_000_000),
+}).strict();
+
+/** A bounded axis-aligned excavation cuboid, anchored to already-resolved world coordinates. */
+export const excavateVolumeTaskSchema = z.object({
+  ...taskLimits,
+  maxActions: z.number().int().min(1).max(5000).default(5000),
+  maxDurationMs: z.number().int().min(1_000).max(1_800_000).default(1_800_000),
+  maxExplorationLegs: z.number().int().min(0).max(60).default(0),
+  id: z.string().min(1).max(96),
+  kind: z.literal("excavate_volume"),
+  origin: excavationOriginSchema,
+  width: z.number().int().min(1).max(10),
+  height: z.number().int().min(1).max(10),
+  depth: z.number().int().min(1).max(10),
+}).strict().refine((task) => task.width * task.height * task.depth <= 1_000, {
+  message: "An excavation request may include at most 1,000 block cells.",
+  path: ["width"],
+}).refine((task) => task.origin.y + task.height - 1 <= 512, {
+  message: "The excavation extends above the supported Minecraft build height.",
+  path: ["height"],
+});
+
 export const minecraftTaskSchema = z.discriminatedUnion("kind", [
   gatherResourceTaskSchema,
   craftItemTaskSchema,
   secureFoodTaskSchema,
   mineResourceTaskSchema,
   buildShelterTaskSchema,
+  buildHouseTaskSchema,
+  farmWheatTaskSchema,
+  excavateVolumeTaskSchema,
 ]);
 
 export type GatherResourceTask = z.infer<typeof gatherResourceTaskSchema>;
@@ -73,6 +148,9 @@ export type CraftItemTask = z.infer<typeof craftItemTaskSchema>;
 export type SecureFoodTask = z.infer<typeof secureFoodTaskSchema>;
 export type MineResourceTask = z.infer<typeof mineResourceTaskSchema>;
 export type BuildShelterTask = z.infer<typeof buildShelterTaskSchema>;
+export type BuildHouseTask = z.infer<typeof buildHouseTaskSchema>;
+export type FarmWheatTask = z.infer<typeof farmWheatTaskSchema>;
+export type ExcavateVolumeTask = z.infer<typeof excavateVolumeTaskSchema>;
 export type MinecraftTask = z.infer<typeof minecraftTaskSchema>;
 
 export const DEFAULT_GATHER_LOG_TASK: GatherResourceTask = gatherResourceTaskSchema.parse({

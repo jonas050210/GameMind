@@ -161,22 +161,6 @@ function activity(snapshot) {
   );
 }
 
-function trainingSummary(snapshot) {
-  const training = snapshot.training;
-  if (!training) return card({ title: "Training" }, empty("Not available", "This run has no training support."));
-  const evaluation = training.lastEvaluation;
-  return card(
-    { title: "Training", subtitle: "Offline simulator only", actions: sourceBadge("offline") },
-    kv([
-      ["State", badge(training.status, training.status === "running" ? "info" : training.status === "failed" || training.status === "interrupted" ? "bad" : "neutral")],
-      ["Episodes", `${fmtNumber(training.episodesTotal)} of ${fmtNumber(training.episodeBudget)}`],
-      ["Checkpoints", fmtNumber(training.checkpoints.length)],
-      ["Last evaluation", evaluation ? `${evaluation.checkpointId}: ${evaluation.verdict === "promotable" ? "promotable" : "not promotable"} (${evaluation.conclusion ?? "no conclusion recorded"})` : "none yet"],
-    ]),
-    button("Open Training", { action: "goto-tab", data: { tab: "training" } }),
-  );
-}
-
 function evaluationSummary(snapshot) {
   const jobs = snapshot.jobs?.items ?? [];
   const tests = jobs.find((job) => job.kind === "unit-tests");
@@ -215,7 +199,6 @@ export function renderOverview(ctx) {
     "ov-activity": activity(snapshot),
     
     // === PANEL 3: TRAINING ===
-    "ov-training": trainingSummary(snapshot),
     
     // === PANEL 4: BENCHMARK & EVALUATION ===
     "ov-evaluation": evaluationSummary(snapshot),

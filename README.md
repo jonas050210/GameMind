@@ -1,38 +1,45 @@
 # GameMind
 
-GameMind is a modular, observable game-agent runtime. The current implementation closes a bounded Minecraft loop: observe the world, choose a goal by priority and utility, pass it a safety gate, execute a validated skill, verify the result against the next observation, and replan. Decisions, refusals and outcomes are recorded as structured traces, an experience memory makes later runs avoid known dead ends, and a **Control Center** serves that same live state in a browser — with operator controls that reach the running agent. The wider architecture and roadmap are documented in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md). The live test checklist is in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md). Run it with `python3 main.py` (see [Quick start](#quick-start)).
+GameMind is a modular, observable game-agent runtime. Its Minecraft code combines bounded observations, a deterministic planner, a safety broker, validated skills, structured traces, and an optional **Control Center**. A gated Minecraft chat companion is available only when `MINECRAFT_OPERATOR` exactly matches the configured operator's in-game username; an optional Ollama helper can answer brief English/German questions but cannot issue actions or approvals. Offline `.litematic` import, generated planning-only large-house blueprints, and a loopback-by-default authenticated placement-report receiver are implemented; no Litematica build executor exists. The wider architecture and roadmap are in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md); companion scope is in [`docs/MINECRAFT_COMPANION_PLAN.md`](docs/MINECRAFT_COMPANION_PLAN.md); the bridge contract is in [`docs/LITEMATICA_BRIDGE_PROTOCOL.md`](docs/LITEMATICA_BRIDGE_PROTOCOL.md).
 
-> **Live status:** none of the behaviour below has been run against a Minecraft server in this repository, and the Control Center has never been opened in a real browser from the build environment. Offline tests, an offline simulator, Mineflayer doubles and a fake DOM validate control logic and mock interactions only. Live compatibility is **not** claimed. The Control Center labels every figure as live, simulated, historical or unavailable, and a simulated figure is never evidence about a real world. See [Live Minecraft](#live-minecraft), [What still needs your environment](#what-still-needs-your-environment) and the checklist.
+> **Safety and verification status (12 October 2026):** the implementation-end offline audit passed: `npm test` (952 Node tests plus 1 Vitest integration test), `npm run build`, `npm run typecheck:public`, 50 Python launcher tests, `python3 main.py --check`, and the 520-run offline evaluator all passed. The evaluator recorded 0 unsafe actions, 0 unverified confirmations, and 0 deaths; its policy-ranking check was skipped because no weighted candidate existed. No live Minecraft connection or world modification was performed; Java 1.20.4 / Modrinth / Fabric, Windows/WSL networking, real-browser appearance, and the Ollama endpoint remain unverified. Offline/simulated results are not evidence about a real world. The Control Center is optional and binds locally by default.
 
 ## Quick start
 
 ```bash
-npm ci               # once; `python3 main.py --install` does this for you when node_modules is missing
-python3 main.py      # checks, Control Center, browser; connect from the Bots tab (or pass --host to connect at once)
+npm ci                         # once; the Python launcher can also install missing dependencies
+python3 main.py --check        # safe preflight; does not connect to Minecraft
 ```
 
-`python3 main.py` is the supported way to run GameMind. It is a launcher around the TypeScript agent, not a second implementation: no agent, planner or learning code exists in Python. It:
+Offline examples:
 
-1. checks Node.js 22+ (set `NODE=/full/path/to/node`, or `GAMEMIND_NODE`, if it is installed somewhere unusual), the installed dependencies (including the platform build of `esbuild`), the project path (a warning for `/mnt/c/...` checkouts under WSL, which are slow), whether another GameMind is already running in this project (the lock is looked up in the data directory, so a `--data-dir` in the arguments moves it too), and the Control Center port (8787, or the next free one unless you pass `--control-port`);
-2. decides whether to connect at once: with an explicit connection request (`--host`, `--port`, `--task`, `--simulated`, `$MINECRAFT_HOST` or `$MINECRAFT_PORT`) it starts the persistent session there, otherwise it starts only the Control Center (`--no-connect`) and the page connects. Under **WSL2** with no `--host` and no `MINECRAFT_HOST` it discovers the Windows host and pre-fills it. An explicit `--host` or `MINECRAFT_HOST` always wins and is never rewritten;
-3. starts `src/cli.ts` through the project's own `tsx`, waits for its `GAMEMIND_READY` line, prints the Control Center address and has the agent open your default browser **once**. The Control Center stays up for the whole session, so refreshing or closing the tab restarts nothing, and state updates never open another tab;
-4. on Ctrl-C or SIGTERM asks the agent to stop: the running task is stopped, queued work is cancelled, the bot disconnects once, the Control Center closes and the single-instance lock is released. If that takes longer than 25 s the launcher sends SIGTERM, then SIGKILL; a second Ctrl-C sends SIGTERM at once.
+```bash
+npm run dev -- --sim explore-remote-log --seed 101
+npm run dev -- --house-plan A --house-plan-json "./blueprints/house-a.json"
+npm run dev -- --litematic-plan "/path/to/house.litematic" --litematic-layer 0
+# Or use the Python launcher while preserving its Node/WSL checks:
+python3 main.py -- --litematic-plan "/path/to/house.litematic" --litematic-layer 0
+```
+
+`python3 main.py` is a launcher around the TypeScript agent, not a second implementation. **A plain `python3 main.py` starts a persistent Minecraft connection** (default `127.0.0.1:25565`, or configured host/port); it is not a no-connect dashboard command. Only run it when you intentionally want to connect to that server and have separately approved live use. The Control Center is optional and needs `--control-center`; to start just the dashboard, use `python3 main.py --control-center --no-connect`.
+
+The launcher checks Node.js 22+, project dependencies, the project path, an existing GameMind process, and the optional Control Center port. Under WSL2 it can select an answering Windows-host address for an explicitly requested live connection. Ctrl-C/SIGTERM asks the TypeScript agent to stop, cancel queued work, disconnect once, close the optional Control Center, and release the project lock. Use `--no-browser` to suppress a requested dashboard launch.
 
 | Command | What it does |
 | --- | --- |
-| `python3 main.py` | Only the Control Center, nothing connects: the host field on the **Bots** tab is pre-filled (from the Windows host under WSL2). Same as `--no-connect` |
-| `python3 main.py --host 127.0.0.1` | Persistent session (default host `127.0.0.1`, port `$MINECRAFT_PORT` or 25565); with `$MINECRAFT_HOST`/`$MINECRAFT_PORT` set, the launcher connects without any flag |
-| `python3 main.py --host 192.168.1.20 --port 25565 --username GameMind` | The same, on an explicit server |
-| `python3 main.py --task gather-logs --resource oak_log --count 2` | Run that task first (it has priority over autonomy), then stay connected |
-| `python3 main.py --task gather-logs --one-shot` | End the session when the task finishes; exit code 1 if it did not succeed |
-| `python3 main.py --simulated [SCENARIO]` | The offline simulator instead of a server, labelled simulated everywhere |
-| `python3 main.py --no-connect` | Only the Control Center; connect from the **Bots** tab |
-| `python3 main.py --no-autonomy` | The agent acts only on tasks you start (safety limits are unchanged either way) |
-| `python3 main.py --no-browser` | Do not open a browser |
-| `python3 main.py --check` | Check Node, dependencies, ports and WSL, report every problem, and exit |
-| `python3 main.py -- --help` | Everything after `--` goes to the TypeScript CLI unchanged |
+| `python3 main.py --check` | Safe preflight; reports Node/dependency/WSL issues and exits without a Minecraft connection |
+| `python3 main.py -- --house-plan A --house-plan-json PATH` | Generates a relative planning-only block/material/layer blueprint; no world access or action |
+| `python3 main.py -- --litematic-plan PATH [--litematic-layer Y]` | Offline bounded `.litematic` import; optional top-down view of one Y layer; no world access or action |
+| `python3 main.py -- --litematic-bridge PATH` | Starts the authenticated plan-only placement receiver; no Minecraft connection or build executor |
+| `python3 main.py --simulated [SCENARIO]` | Runs the offline simulator instead of a server |
+| `python3 main.py --control-center --no-connect` | Starts only the optional Control Center; connect from its **Bots** tab later |
+| `python3 main.py` | Persistent live Minecraft connection to the configured/default host; use only when explicitly intended and approved |
+| `python3 main.py --host HOST --port PORT --username BOT` | Persistent live connection to the explicitly named server/profile |
+| `python3 main.py --task gather-logs --resource oak_log --count 2 --host HOST --port PORT` | Starts the bounded task first, then stays connected; this is a live-world command |
+| `python3 main.py --no-autonomy --host HOST --port PORT` | Connects live but accepts only explicit operator-started work; it still connects to Minecraft |
+| `python3 main.py -- --help` | Passes help through to the TypeScript CLI |
 
-The launcher's own exit codes: `0` normal, `1` `--check` found a problem, `2` it could not start (the message names the fix). If GameMind is already running in this project it says where and does not start a second bot. The Control Center binds to `127.0.0.1`; to reach it from another machine (or a hosted preview) pass `--control-host 0.0.0.0` and read [Control Center](#control-center) first. The TypeScript CLI can also be run directly: `npm run app -- --host 127.0.0.1` (development) or `npm run build && npm run app:build -- --host 127.0.0.1`.
+After `--`, arguments are passed through to `src/cli.ts`. The launcher's exit codes are `0` normal, `1` when `--check` finds a problem, and `2` when it cannot start. A second GameMind process in the same project is refused by default. The optional Control Center binds to `127.0.0.1`; do not expose it with `--control-host 0.0.0.0` unless the network is trusted and its controls are intentionally exposed.
 
 ## Sessions, tasks and the scheduler
 
@@ -66,7 +73,7 @@ Each row has regression tests; none of it has been run against a live server.
 | `CLI run complete` and a disconnect just after joining | The CLI was one-shot by design: its `finally` always ended in `runtime.shutdown("CLI run complete")`, and only an observation-only run with a dashboard waited for Ctrl-C | Persistent sessions are the default and end only on an explicit stop; one-shot is opt-in |
 | The agent refused every task after one failed start | `control.task` was set *before* the `try` that releases it, so an exception while creating the runner (the temporal-dead-zone error was one) left the lock held for good | Slot acquisition, runner creation and release sit in one `try/finally` |
 | The dashboard answered requests for any `Host` and from any origin | Permissive server defaults | Loopback bind, `Host` allowlist, same-origin writes, `x-gamemind-token` |
-| Two trainings (or a training and an evaluation) in one directory overwrote each other | No lock; a run directory could even be the app's own data folder | `training.lock`, a preflight, reserved data folders, archive-never-delete for fresh runs |
+| Two trainings (or a training and an evaluation) in one directory overwrote each other | No lock; a run directory could even be the app's own data folder | `training.lock`, reserved data folders, archive-never-delete for fresh runs |
 | A command racing a refresh answered `500` (`ENOENT` on rename) | Every writer used `<file>.<pid>.tmp`, so two saves in one process shared a temp file | `src/core/atomic-file.ts`: unique temp names and per-file ordered writes |
 | The learner counted confirmed-but-unverified actions as successes; the runner counted them as failures | Two definitions of "success" | One definition (`src/core/learning/outcome.ts`) used by both |
 | A context that failed because of the game mode or a safety refusal looked like a skill that never works | Every non-success counted against the chosen skill | Environment, session and policy outcomes are *excluded*: counted and shown, never held against a skill |
@@ -78,7 +85,7 @@ Each row has regression tests; none of it has been run against a live server.
 | A reconnect was followed by "no active session" although the bot was connected | The previous client's `error`/`end`/`kicked` handlers were still attached to it and nulled the *current* session (they belonged to the session they were created for) | A client's events only change the adapter state while that client is the current one |
 | After a kick the adapter said "disconnected" while the socket stayed open | Nothing closed the client on `kicked`; Mineflayer does not close it by itself | A kick quits the client, and a kick during the handshake closes the attempt and the socket |
 | A font or image served by the Control Center was corrupted | The static handler built every response by decoding the file as UTF-8 and used the decoded string's length | Only the HTML page is treated as text; every other asset is sent as the bytes on disk (`content-length` included) |
-| `python3 main.py` looked like it would connect to a server while it only starts the Control Center | README and the launcher's own examples still described the old default | Both now state what a plain start does (Control Center only, host pre-filled on the Bots tab) and that any explicit host/port/task/`--simulated`/`MINECRAFT_HOST` connects at once |
+| `python3 main.py` did not describe the terminal-first assistant clearly | launcher docs encouraged starting the dashboard and connecting manually | A plain start now attempts the default Minecraft connection in the terminal; `--control-center` is optional |
 | `npm run test:record` failed on Windows with `ENOENT` | `spawnSync("npm")`: Windows has no `npm` executable, only `npm.cmd`, and this spawn did not use a shell | `npm.cmd` on Windows, spawned through the shell |
 | Two processes could both end up holding a training directory | Judging a stale lock and deleting it were two separate steps: another process could replace the lock in between, and the delete removed the live one | Only the exact entry that was judged stale is removed (`removeIfUnchanged`), so a lock that changed is left alone and the attempt simply retries |
 | A lock file that could not be read was treated as "nothing is running" | The instance-lock reader swallowed every error, including a torn or unreadable file, and overwrote it — the moment two agents would share one account and one data directory | A missing lock still means free; a file that cannot be read or parsed stops the start with a message naming the file and the fix, and the lock is now written temp-then-rename |
@@ -126,21 +133,21 @@ Each row has regression tests; none of it has been run against a live server.
 
 This remains a deliberately narrow, rule-based agent. It is not a full survival agent, an RL system, an LLM planner, or a general-purpose GUI. It does not hunt passive animals, go mining below the surface deliberately (it digs blocks it can reach with a tool it holds), build anything beyond a closed shell around the player, handle every recipe or version, or plan across dimensions. Fighting is only reachable when an operator armed combat for that run.
 
-## Behaviour changes in this release
+## Previously released behaviour changes
 
-Existing users should review these. Each is deliberate and covered by offline tests; none has been run against a live server.
+Existing users should review these earlier agent/Control Center changes. They have offline coverage but no live-server verification. The newer companion, chat/Ollama, house-material approval, and Litematica changes described above passed the implementation-end offline audit; their live behavior and client compatibility remain unverified.
 
-1. **Sessions are persistent by default.** `--task` (and a plain `--host`) now keeps the bot connected after the task and serves the Control Center until you stop it. Pass `--one-shot` for the old "run, report, disconnect" behaviour (with no task and no Control Center it prints the first observation and the skill list, as a bare `--host` run used to); the `task:minecraft*` npm scripts now end with `--one-shot` so they behave as before.
-2. **The Control Center is on by default** for persistent sessions, on `127.0.0.1:8787` (`--control-port`, `--control-host`, `--no-control-center`). One-shot runs serve it only with `--control-center`. `--open-browser` opens it once.
+1. **Live sessions are persistent by default.** `--task` (and a plain `--host`) keeps the bot connected after the task; the terminal and Minecraft chat are the default operator surfaces. The optional Control Center is enabled with `--control-center`. Pass `--one-shot` for the old "run, report, disconnect" behaviour (with no task and no Control Center it prints the first observation and the skill list, as a bare `--host` run used to); the `task:minecraft*` npm scripts now end with `--one-shot` so they behave as before.
+2. **The Control Center is optional** and binds to `127.0.0.1:8787` when `--control-center` is given (`--control-port`, `--control-host`). `--open-browser` opens it once.
 3. **One scheduler decides what runs.** A CLI task has priority over autonomy during startup; an operator task pre-empts a running autonomous subgoal; duplicates are refused; a queue of at most 5 holds follow-up tasks. Autonomy is still on by default (`--no-autonomy` turns it off) and every safety policy, task-level action/time limit, combat restriction and capability check is unchanged.
 4. **One GameMind per project.** A second process refuses to start and names the first (`--no-instance-lock` opts out).
 5. **The dashboard server is hardened.** Loopback bind, a `Host` allowlist (`--allow-host`), same-origin writes and a per-process token. Binding beyond loopback needs `--control-host`.
-6. **Training is locked, preflighted and non-destructive.** One run per directory (`training.lock`), data folders of the app cannot be used as a training directory, resume is the default, and `--fresh` archives the previous run instead of overwriting it. `npm run train` and the Control Center now explore by default (rate 0.15, seeded and recorded on each decision, never used in evaluation); `--explore 0` restores the earlier greedy behaviour.
+6. **Optional CLI training stays separate from the live agent.** The offline trainer is invoked only from the terminal with `npm run train`; it has per-run locking, resumes by default, and `--fresh` archives rather than overwrites. It is not surfaced in the Control Center, and no training benchmark is shipped. `--explore` is an explicit CLI option; ordinary live sessions do not run an offline training job.
 7. **Learning counts verified outcomes only.** Success, failure and *excluded* are defined once. **A safety refusal is not an attempt**: it happens before the action runs, so across runs it is counted as a denial and as an excluded outcome and cannot move a skill's success rate or weight (inside a run it is still a failed action: it counts toward the consecutive-failure stop and its target is excluded). The one existing assertion that expected `attempts` to be 1 for a denied approach was changed on purpose to expect 0 attempts and 1 excluded outcome. Simulator and live episodes are kept in separate stores; learning state is schema v2 (the old file is backed up as `state.json.v1.bak` or `state.json.evidence-filter.bak`, and the episode log is never rewritten).
 8. **"Wasted actions" has a new definition** (`verified-world-progress.v2`): an action is wasted only if the next observation shows no item or food gained, no new ground explored, no measurable approach to its target, no healing from a rest and no retreat from a hostile. Reports and evaluation sets record the definition, so figures measured under the old one are never compared with new ones. The figure is a measurement: it does not change any decision.
 9. **The snapshot publishes the player's whole-block position.** `test/control-center.test.ts` used to require `world.position` to be absent; that assertion was changed deliberately because the Control Center now shows the position. Block coordinates, terrain and entity coordinates are still not published.
-10. **The Control Center page was rewritten** as seven tabs over one polling store (see [Control Center](#control-center)). The old WebGL block view is gone (it had already been removed from the code; its documentation is cleaned up).
-11. **Atomic file writes are serialised.** Every file the app rewrites while another reader may see it — the learning state and checkpoints, the experience log, world/companion memory, training state, job records and the lock files — goes through `src/core/atomic-file.ts` (unique temp names per write, ordered writes per file, temp-then-rename). What does *not* go through it is deliberate: append-only JSONL logs, and files that are written once per run (evaluation/benchmark reports, `data/evidence/tests.json`).
+10. **The optional Control Center page** has six tabs over one polling store (see [Control Center](#control-center)). The old WebGL block view is gone (it had already been removed from the code; its documentation is cleaned up).
+11. **Atomic file writes are serialised.** Every file the app rewrites while another reader may see it — the learning state and checkpoints, the experience log, world/companion memory, training state, job records and lock files — goes through `src/core/atomic-file.ts` (unique temp names per write, ordered writes per file, temp-then-rename). What does *not* go through it is deliberate: append-only JSONL logs, and files that are written once per run (evaluation reports, `data/evidence/tests.json`).
 12. **The build verifies the packaged UI.** `npm run build` fails if any file of the page did not reach `dist/`.
 13. **The console is quieter by default.** The per-tick `observation.received` trace event is still written to the trace, but it is printed on the console only at `LOG_LEVEL=debug`. A persistent session that idles would otherwise print two JSON lines a second (at the default 500 ms observation interval) for as long as it runs, burying the decisions, actions, lifecycle lines and errors you are there to read; those still print at the default level.
 
@@ -266,27 +273,27 @@ Policy candidates are additionally compared against the baseline through the gat
 The Control Center is the operator surface of a running GameMind. It is served by the same process as the agent (one server per process, bound to `127.0.0.1:8787` by default) and stays up for the whole persistent session, so refreshing or closing the page restarts nothing and the browser is opened at most once. It is plain HTML, CSS and ES modules served from this package: no build step, no dependencies, and no CDN, remote font or other external asset. Its visual direction (restrained colours, a strong typographic hierarchy, top tabs with a compact status area) follows the written brief that named learningview.org as inspiration; that site was not reachable from the build environment and nothing was copied from it. It has automatic, light and dark themes, switches off its transitions under `prefers-reduced-motion`, and is laid out desktop-first with a responsive fallback.
 
 ```bash
-python3 main.py                                   # persistent session + Control Center + browser
-python3 main.py --simulated                       # the same, against the offline simulator
+python3 main.py                                   # persistent terminal session; no dashboard/browser
+python3 main.py --control-center                   # opt in to the dashboard + browser
+python3 main.py --simulated                       # persistent simulator session in the terminal
 npm run dev -- --sim recovery-persistent-stall --control-center --control-port 0
 npm run ui:demo                                   # simulator + Control Center on all interfaces (sandbox previews; anyone who reaches the port can drive the agent)
 ```
 
-The compact header keeps session state, data source, last-update age, an emergency stop, a language switch (EN/DE) and the theme switch in view. Seven tabs share one polling store:
+The compact header keeps session state, data source, last-update age, an emergency stop, a language switch (EN/DE) and the theme switch in view. Six tabs share one polling store:
 
 | Tab | What it shows and does |
 | --- | --- |
-| **Overview** | A compact operator view: session state, current task and measurable progress, health/food, position, plus Pause/Resume and Connect/Stop session. Stop task is beside an active task and Emergency stop stays in the header. Connection, world and task detail—and recent activity, training and evaluation summaries—are secondary or collapsed. A stale observation explains that world-changing actions are refused until newer data arrives. |
-| **Training** | Headless offline training in a separate process: directory, episode and time budgets, curriculum stages and exploration rate. Resume is the default; a fresh run archives (never deletes) only after explicit confirmation. A separately started benchmark probes up to 256 simulator environments at about 20 seconds each, measures worker throughput and early/late learning signals, compares exploration candidates on held-out seeds, and saves supported worker/stage/exploration defaults. It never auto-runs after training or changes the live policy. |
+| **Overview** | A compact operator view: session state, current task and measurable progress, health/food, position, plus Pause/Resume and Connect/Stop session. Stop task is beside an active task and Emergency stop stays in the header. Connection, world and task detail—and recent activity and evaluation summaries—are secondary or collapsed. A stale observation explains that world-changing actions are refused until newer data arrives. |
 | **Bots** | The sessions: connection state, world, task, position, health and runtime, with connected-idle, running and disconnected kept apart. Connect to a live server or the simulator (with diagnostics and actionable errors), start or queue a task, run library entries, stop; task history with failure explanations. There is one bot today; the layout is a list so more can be added, and nothing pretends to run several. |
 | **Tasks** | Only tasks the agent really implements, with their enforced limits; the active task with measurable progress, actions and outcome; the latest decision (what was chosen, the alternatives weighed, and the model's own reason for every rejected candidate); the queue (up to 5, no duplicates) or an explicit reason when queueing is unavailable. |
 | **Tests & Evaluation** | Unit tests and the offline evaluation as monitored jobs (one at a time, cancellable); baseline-versus-candidate comparisons with success rate, median actions, wasted actions, unsafe actions, deaths, 95% intervals and per-scenario deltas; PASS, FAIL and SKIPPED with the reason for every skip; the roadmap queue. **Live verification is a separate section**: it names the server it will touch and needs an explicit confirmation of the connection, and a second one before any phase that changes the world. |
 | **Learning & Policy** | The real experience store: policy status, candidate and active policy, contexts with evidence and weights, contradictions, excluded outcomes, blocked targets, historical runs. Plain explanations of `CONSECUTIVE_ACTION_FAILURES`, `NO_FEASIBLE_GOAL` and `TASK_BLOCKED_MODE` with what to check. Promote and reject only through the existing gate. |
 | **World Memory & Events** | World identity, remembered resource sightings, explored regions and memory status; the world seed (entered by hand, never auto-detected); and a searchable event log of connections, decisions, actions, task transitions, safety refusals, errors and shutdown reasons. |
 
-**Language.** The page is written in English and can be switched to German with the **EN/DE** buttons beside the theme switch; the choice is remembered per browser and applied before the first render. The switch covers everything the page itself writes, including sentences assembled from values (`Vor 3s aktualisiert`, `12 Seeds, disjunkt zum Training: ja`, `5 Szenarien, mindestens 8 Episoden`) and the browser tab title, plus the short notes the running app writes into the panels (why a run ended, what a failure means, what training is doing, what world memory holds) — a reader cannot tell those apart from the page's own text. What stays as written is the *runtime's own catalog*: action, skill, scenario and task descriptions and the labels of its commands, event-log lines, ids, codes, names and numbers. The translation lives in `src/control-center/public/lib/i18n-de.js` (fixed strings plus patterns for composed sentences) and is applied in `lib/i18n.js` where text reaches the DOM, so no view has to know about languages. `test/ui-language.test.ts` reads every string the page can render — including prose with semicolons, slashes and lowercase labels, and the notes only the host process sends — and fails when one of them has no German entry, when a pattern is not anchored, when a pattern or entry would rewrite runtime text, or when a panel note stops being German.
+**Language.** The page is written in English and can be switched to German with the **EN/DE** buttons beside the theme switch; the choice is remembered per browser and applied before the first render. The switch covers everything the page itself writes, including sentences assembled from values (`Vor 3s aktualisiert`, `12 Seeds, disjunkt zum Training: ja`, `5 Szenarien, mindestens 8 Episoden`) and the browser tab title, plus the short notes the running app writes into the panels (why a run ended, what a failure means, what world memory holds) — a reader cannot tell those apart from the page's own text. What stays as written is the *runtime's own catalog*: action, skill, scenario and task descriptions and the labels of its commands, event-log lines, ids, codes, names and numbers. The translation lives in `src/control-center/public/lib/i18n-de.js` (fixed strings plus patterns for composed sentences) and is applied in `lib/i18n.js` where text reaches the DOM, so no view has to know about languages. `test/ui-language.test.ts` reads every string the page can render — including prose with semicolons, slashes and lowercase labels, and the notes only the host process sends — and fails when one of them has no German entry, when a pattern is not anchored, when a pattern or entry would rewrite runtime text, or when a panel note stops being German.
 
-**Where each number comes from.** Every panel carries a badge: **LIVE** (a connected Minecraft session), **SIMULATED** (the offline simulator), **HISTORICAL** (remembered or stored data, or a session that has ended), **OFFLINE** (unit tests, evaluation and training) or **UNAVAILABLE**. A value that was not reported is shown as *unknown*, never as a default; there are no placeholder charts and no invented metrics. An offline result is never labelled live, and nothing is called "improved" or "promotable" except by the existing gate's own verdict.
+**Where each number comes from.** Every panel carries a badge: **LIVE** (a connected Minecraft session), **SIMULATED** (the offline simulator), **HISTORICAL** (remembered or stored data, or a session that has ended), **OFFLINE** (unit tests and evaluation) or **UNAVAILABLE**. A value that was not reported is shown as *unknown*, never as a default; there are no placeholder charts and no invented metrics. An offline result is never labelled live, and nothing is called "improved" or "promotable" except by the existing gate's own verdict.
 
 Controls exist only where the runtime really implements them:
 
@@ -301,7 +308,6 @@ Controls exist only where the runtime really implements them:
 | Stop task / Cancel queued / Clear queue | Cooperative stop checked between actions: the run ends as `aborted` / `OPERATOR_STOP` with the operator's reason. |
 | Connect / Stop session | Starts or ends the session through the same lifecycle as the CLI (live or simulated). A connect while a session exists is refused (`SESSION_ALREADY_ACTIVE`): only one session runs at a time. |
 | Autonomy on / off | Switches the autonomous planner; safety limits are identical either way. |
-| Start / Pause / Resume / Stop training | Runs the offline trainer in a child process under `training.lock`; pause and stop take effect after the current episode. |
 | Run unit tests / offline evaluation | Monitored jobs in child processes; one at a time; cancelled on shutdown. |
 | Run live verification | Only after the confirmations above; the server must receive `confirmed === true`. |
 | Promote / Reject policy | `ExperienceLearner.promote()` / `rollback()`, refusing when any confirmation was contradicted or the candidate never left the baseline. |
@@ -309,7 +315,7 @@ Controls exist only where the runtime really implements them:
 | Quit GameMind | The footer button runs the orderly shutdown of the whole process. Closing the tab does not. |
 | Nothing about the world | The page can hold, arm and stop the agent; it never writes to the world or to `bot.*`. |
 
-**HTTP surface.** `GET /api/health`; `GET /api/snapshot` (`?fresh=1` bypasses the one-second cache); detail reads `GET /api/events` (`q`, `category`, `level`, `source`, `scope`, `after`, `limit`), `learning` (`store=simulated|live`), `memory`, `evaluation`, `jobs`, `training-preflight` (`directory`), `tasks` and `diagnostics`; and `POST /api/command` with `{ "type", "payload" }`. The page polls instead of holding a stream (every 1.5 s while visible, 15 s in a hidden tab; slower detail queries only for the tab that is open) and shows the connection as lost after two failed reads, then recovers by itself. `GET /api/stream` answers `410 STREAM_REMOVED`. Writes need the `x-gamemind-token` header (the token is injected into the served page only and is not readable from any endpoint), the `Host` header must be the bound address or a name allowed with `--allow-host`, and a cross-origin write is refused. A command the host cannot honour returns `501`, a refused one `409` with the reason, and a missing token `403`, so the page can never look as if something worked when nothing happened.
+**HTTP surface.** `GET /api/health`; `GET /api/snapshot` (`?fresh=1` bypasses the one-second cache); detail reads `GET /api/events` (`q`, `category`, `level`, `source`, `scope`, `after`, `limit`), `learning` (`store=simulated|live`), `memory`, `evaluation`, `jobs`, `tasks` and `diagnostics`; and `POST /api/command` with `{ "type", "payload" }`. The page polls instead of holding a stream (every 1.5 s while visible, 15 s in a hidden tab; slower detail queries only for the tab that is open) and shows the connection as lost after two failed reads, then recovers by itself. `GET /api/stream` answers `410 STREAM_REMOVED`. Writes need the `x-gamemind-token` header (the token is injected into the served page only and is not readable from any endpoint), the `Host` header must be the bound address or a name allowed with `--allow-host`, and a cross-origin write is refused. A command the host cannot honour returns `501`, a refused one `409` with the reason, and a missing token `403`, so the page can never look as if something worked when nothing happened.
 
 **What it deliberately does not do.** It exposes no free-form command console, no credential handling and no block map. The world snapshot carries the player's whole-block position but no blocks, terrain or entity coordinates; a decision's own explanation may name the block it is about, because that is what explains it, but a candidate's raw target and input are never drawn. Every message and field in the event log is redacted before it is stored (no tokens, no home directory, no absolute paths), and the log is kept as rotating JSONL files under `data/events/` (four files by default). The server has no TLS, and its per-process token is not access control: the page carries the token so its own browser can read and write, and that page is served to anyone who can reach the port. Every bind beyond loopback (`--control-host 0.0.0.0`, a LAN address, a hosted preview) therefore exposes the full surface — snapshot, event-log tail and the commands that move a real character — to whoever can reach that port. Use it only on a network you trust, or behind a proxy that authenticates on its own, and keep it on loopback otherwise. The token still refuses an anonymous `curl` against `/api/*` and cross-origin reads. Persisted world memory stores only last-seen resource and minable locations and explored coverage; the default key (server host + port + dimension) cannot distinguish a reset or replaced world at the same endpoint, so use `--world-key` / `GAMEMIND_WORLD_KEY` to give separate worlds distinct identities. Perception timings are the adapter's last scan sample, not a hardware benchmark.
 
@@ -341,7 +347,7 @@ Failed versus successful therefore rests on a verified change in the observed wo
 1. **Repeatedly failed targets are excluded** in a later run against the same world key (`<scenario>#<seed>` offline, `host:port` on a live server) until enough observations contradict the failure. Only outcomes that say something about the target feed this memory, and a later success at the same target weakens the lesson instead of leaving a permanent ban.
 2. **Policy weights are derived** from verified success rates: one multiplier per context band, clamped to 0.75–1.25, and only for contexts with at least 8 evidence-bearing attempts. They reorder candidate goals inside their priority band; a weight can never make a denied capability allowed, skip a postcondition check, or move a goal between bands. The reward breakdown is recorded for analysis but does not feed the weights.
 3. **Within a run**, a failed target is excluded at once (a stalled route is retried after a sidestep), attempts at one target without progress are bounded (3), oscillation is detected, and a run ends after `maxConsecutiveFailures` failed actions in a row (default 2, schema range 1–5). Offline, that limit was measured: 2, 3, 4 and 5 give identical outcomes on the whole suite (191 of 260 runs succeed in each case, same actions, same waste, no `CONSECUTIVE_ACTION_FAILURES` stop) and only 1 changes the result (58.1%), so the default stays at 2; it is a safety brake and there is no measured reason to loosen it.
-4. **Promotion is gated consistently in the CLI and the Control Center.** A derived candidate has no effect while it is only a candidate: the running agent uses the *promoted* policy, or the hand-tuned baseline. Promotion refuses unless the offline report passed, was generated for the exact current candidate, covers every current scenario with at least 20 seeds per scenario, the learner has episodes and at least one statistically supported weighted context, the candidate comparison itself is promotable, and no confirmation was contradicted. `--policy reject` (or the dashboard button) drops the promoted policy entirely and records the reason in the state history. Nothing promotes automatically.
+4. **Promotion is gated consistently in the CLI and optional Control Center.** A derived candidate has no effect while it is only a candidate: the running agent uses the *promoted* policy, or the hand-tuned baseline. Promotion refuses unless the offline report passed, was generated for the exact current candidate, covers every current scenario with at least 20 seeds per scenario, the learner has episodes and at least one statistically supported weighted context, the candidate comparison itself is promotable, and no confirmation was contradicted. `--policy reject` (or the dashboard button) drops the promoted policy entirely and records the reason in the state history. Nothing promotes automatically.
 
 ### Why runs stop, in plain words
 
@@ -349,7 +355,7 @@ Failed versus successful therefore rests on a verified change in the observed wo
 
 ### Evaluating a checkpoint
 
-`npm run train -- evaluate` (or the Training tab) scores a checkpoint against the unchanged baseline policy on **held-out seeds**: training seeds start at a fixed base, evaluation seeds never overlap them, and the split is asserted before any run. The baseline is re-measured in the same report, and the first baseline recorded for an evaluation set is kept so a later measurement that no longer reproduces it is flagged (the code or the scenarios changed). The evaluation set's identity covers the scenarios, the seeds, the decision model and the definition of progress, so reports are only compared when it matches. The report carries success rates with 95% Wilson intervals, median actions, wasted actions, unsafe actions, deaths, per-scenario deltas, how often the candidate chose differently on the same world, and paired outcomes on identical worlds. Its conclusion is one of:
+`npm run train -- evaluate` scores a checkpoint against the unchanged baseline policy on **held-out seeds**: training seeds start at a fixed base, evaluation seeds never overlap them, and the split is asserted before any run. The baseline is re-measured in the same report, and the first baseline recorded for an evaluation set is kept so a later measurement that no longer reproduces it is flagged (the code or the scenarios changed). The evaluation set's identity covers the scenarios, the seeds, the decision model and the definition of progress, so reports are only compared when it matches. The report carries success rates with 95% Wilson intervals, median actions, wasted actions, unsafe actions, deaths, per-scenario deltas, how often the candidate chose differently on the same world, and paired outcomes on identical worlds. Its conclusion is one of:
 
 | Conclusion | Meaning |
 | --- | --- |
@@ -365,16 +371,17 @@ The design keeps the door open for real RL: episodes are the training records, t
 
 ## Autonomy, observation and training
 
-The agent runs two loops. A fast loop observes about once per second (`observationIntervalMs`, default 1000), checks reflexes (critical health, starvation, a close hostile, and so on), and interrupts an in-flight action only when the action is not protected (eating, attacking, looking and inspecting are never interrupted). A slower planner chooses the next task from the current observation and from its progress tracker, with cooldowns and a fallback when a subgoal repeatedly fails. Neither loop waits for the other, and training runs in a separate process, so observation never waits on training.
+The agent runs two loops. A fast loop observes about once per second (`observationIntervalMs`, default 1000), checks reflexes (critical health, starvation, a close hostile, and so on), and interrupts an in-flight action only when the action is not protected (eating, attacking, looking and inspecting are never interrupted). A slower planner chooses the next task from the current observation and from its progress tracker, with cooldowns and a fallback when a subgoal repeatedly fails. Neither loop waits for the other, Optional offline CLI training runs independently; it is never started by a live session.
 
-The Control Center shows observation age, loop frequency, decision latency, action latency and reaction time in the performance panel. There is no per-run action-count cap. Actions are bounded by per-action timeouts, stuck detection, retry limits, and the emergency stop.
+The optional Control Center shows observation age, loop frequency, decision latency, action latency and reaction time in the performance panel. There is no per-run action-count cap. Actions are bounded by per-action timeouts, stuck detection, retry limits, and the emergency stop.
 
 ```bash
 # Offline (no server needed)
 npm run profile:autonomy -- --scenario berries --seed 101 --virtual-seconds 900
 npm run eval:offline -- --learning-dir data/training/experience
 
-# Training (separate process; the Control Center can start and watch it too)
+
+# Optional CLI-only training (separate process; independent of the live agent)
 npm run train -- train --dir data/training --episodes-per-stage 8 --max-episodes 48 --max-minutes 30
 npm run train -- train --dir data/training --fresh        # archives the existing run first; never deletes it
 npm run train -- evaluate --dir data/training --seeds 10
@@ -384,13 +391,13 @@ npm run train -- pause|resume|stop --dir data/training   # pause and stop take e
 
 ### Training
 
-Training runs the curriculum (`basics`, `food`, `tools-and-shelter`) in the **offline simulator**, in a separate process, from the Training tab or from `npm run train`. It records each action as an episode, derives weights from them and writes a checkpoint when a stage passes. **It is not real-world training**: the simulator is written by this project, and a checkpoint says nothing about a real Minecraft world until a live comparison shows it.
+Training runs the curriculum (`basics`, `food`, `tools-and-shelter`) in the **offline simulator**, in a separate process, only when started with `npm run train`. It is an optional CLI utility, not part of the live assistant or Control Center. It records each action as an episode, derives weights from them and writes a checkpoint when a stage passes. **It is not real-world training**: the simulator is written by this project, and a checkpoint says nothing about a real Minecraft world until a live comparison shows it.
 
-- **Resume is the default.** A run continues from `state.json` in its directory. `--fresh` archives the existing run (state, control file, experience, checkpoints, evaluations) under `<dir>/archive/<timestamp>-before-fresh/` with a manifest and then starts a new one; nothing is deleted. The Control Center explains this before it runs and needs an explicit confirmation.
-- **One run per directory.** A `training.lock` file, created with exclusive-create semantics, refuses a second training run and an evaluation of a directory that is being trained. A lock whose process no longer exists is recognised as stale and replaced. A preflight (`GET /api/training-preflight`) reports what a directory holds and why a start would be refused. In the Control Center a training run is a folder *name* inside the data folder (it never takes an arbitrary path), and names the app uses for other data (`events`, `jobs`, `learning`, `learning-simulated`, `world-memory`, `traces`, `run`, `eval`, `roadmap`, and a few more) are refused.
+- **Resume is the default.** A run continues from `state.json` in its directory. `--fresh` archives the existing run (state, control file, experience, checkpoints, evaluations) under `<dir>/archive/<timestamp>-before-fresh/` with a manifest and then starts a new one; nothing is deleted.
+- **One run per directory.** A `training.lock` file, created with exclusive-create semantics, refuses a second training run and an evaluation of a directory that is being trained. A lock whose process no longer exists is recognised as stale and replaced. The CLI refuses reserved application data folders as training locations.
 - **Budgets and options.** `--max-episodes`, `--max-minutes` (a time budget), `--episodes-per-stage`, `--stages`, and `--explore RATE` (default 0.15: seeded, bounded switches among progress-band alternatives, recorded on the decision, never applied during evaluation). Pause and stop take effect after the current episode; the state, control and checkpoint files are written atomically.
 - **Held out.** Training seeds and evaluation seeds are disjoint, and the split is asserted at start-up.
-- Training data (`data/training/`) is git-ignored. The world seed can be entered manually in the Control Center; it is not auto-detected, and anything derived from it is labelled as predicted until it is verified in the world.
+- Training data (`data/training/`) is git-ignored. The world seed can be entered manually in the optional Control Center; it is not auto-detected, and anything derived from it is labelled as predicted until verified in-world.
 
 ## Live Minecraft
 
@@ -479,6 +486,7 @@ Environment variables may set connection defaults:
 - `MINECRAFT_HOST` (default `127.0.0.1`)
 - `MINECRAFT_PORT` (default `25565`)
 - `MINECRAFT_USERNAME` (default `GameMind`)
+- `MINECRAFT_OPERATOR` (required to enable chat control; exact in-game name, case-sensitive, 3–16 letters/digits/underscores)
 - `MINECRAFT_VERSION` (default `1.20.4`)
 - `MINECRAFT_AUTH` (`offline` by default; or `microsoft`)
 - `MINECRAFT_CONNECT_TIMEOUT_MS` (default `15000`)
@@ -493,17 +501,67 @@ Environment variables may set connection defaults:
 - `MINECRAFT_NAV_MAX_DROP` (default `1`, valid range `0–3`; how far the planner may drop down in one step)
 - `GAMEMIND_TRACE_DIR` (default `data/traces`)
 - `GAMEMIND_LEARNING_DIR` (default `data/learning`)
-- `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the dashboard binds this interface)
+- `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the optional dashboard binds this interface)
+- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`), `GAMEMIND_OLLAMA_MODEL` (default `qwen3:0.6b`), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`) and `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`)
+- `GAMEMIND_LITEMATICA_BRIDGE_TOKEN` (required only for the optional review receiver; at least 32 UTF-8 bytes), `GAMEMIND_LITEMATICA_BRIDGE_HOST` (default `127.0.0.1`) and `GAMEMIND_LITEMATICA_BRIDGE_PORT` (default `39990`)
 - `GAMEMIND_NODE` or `NODE` (optional; the Node.js executable `python3 main.py` should run, version-checked before use)
 - `GAMEMIND_LOG_LEVEL` (the training CLI's log level, default `info`) and `LOG_LEVEL` (the agent's own log level, default `info`)
 
 For an offline-mode server, keep `MINECRAFT_AUTH=offline`. Use Microsoft authentication only where appropriate. Do not put account credentials in command-line arguments, source control, logs, or traces; Mineflayer manages its own authentication flow and cache.
 
-When the Control Center is enabled, the Library in its **Bots** tab is the only control surface for these actions: every action (companion modes, homepoints, skills, tasks, safety, learning) is an explicit entry with typed fields, per-run availability, and a measured outcome — succeeded, failed with a failure code, or refused with the missing requirement named. There is no chat-command system: Minecraft chat is never parsed into actions, there is no commander username, and no `MINECRAFT_COMMANDER` variable is read. Named homepoints are world-scoped, dimension-aware, and never overwritten without an explicit delete. Follow targets a measured 4-block preference, stops inside 5 blocks, and treats 32 blocks as a normal maximum separation target—not a guarantee under teleportation, disconnection, or obstacles.
+### Minecraft chat and bounded projects
+
+Chat control is created only when `MINECRAFT_OPERATOR` is set to the **exact, case-sensitive in-game username** (3–16 letters, digits, or underscores). No username is configured by default. Messages from anyone else—including case-different look-alikes—are ignored. `status`, `stop`/`stopp`, and `hold`/`bleib` bypass model and queued work. Recognized commands are parsed deterministically; only unrecognized chat from the authorized username may be sent to Ollama.
+
+Optional local Ollama setup (not run by the launcher):
+
+```bash
+ollama pull qwen3:0.6b
+export GAMEMIND_OLLAMA_URL="http://127.0.0.1:11434" # use the address reachable from the GameMind process
+export GAMEMIND_OLLAMA_MODEL="qwen3:0.6b"
+```
+
+For a separately approved live session, set the authorized **human operator's** exact in-game name (not the bot account name):
+
+```bash
+export MINECRAFT_OPERATOR="YourExactMinecraftUsername"
+```
+
+No operator name or Ollama endpoint is configured by default. Do not run a live command until you have separately approved connecting to the specified server.
+
+Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is optional and prompt-constrained to brief English/German replies; it has a short timeout and never approves or issues actions. With no Ollama response, a deterministic fallback is used. The model is recommended at 0.6B parameters; do not use the model as a safety authority.
+
+The current project grammar includes `status`, `help`, `stop`, `hold`, `follow me`/`folge mir`, `come`/`komm`, allowlisted resource requests, and bounded building/farm/excavation intents. Project approvals are time-limited and fail closed:
+
+- Excavation is limited to **10×10×10 (1,000 cells)**; it surveys and stops at unknown/unsafe cells rather than clearing them.
+- Wheat planting is limited to **25×50 (1,250 cells)** on existing hydrated farmland with enough seeds. It does not till soil, add water, or clear the area.
+- “Build starter house” remains the existing **5×5 prototype** (80 oak planks). The larger-house concepts A/B/C now have deterministic relative block/material/layer plans: say `plan house A`, `plan house B`, or `plan house C` in authorized Minecraft chat, or run `npm run dev -- --house-plan A` offline. The JSON plan is review-only; it does not inspect a world or authorize building. Generic “build house” does not silently choose a design. Use `build starter house at X Y Z` to nominate the prototype's lower corner; without coordinates it is centered on the measured player position. A starter-house run requires a project confirmation, then a **separate** confirmation before collecting up to 20 visible oak logs within 24 blocks (the adapter's resource-gather reach cap). Declining collection restricts it to carried materials; if those are insufficient, construction stops before the first placement.
+- Material gathering is never authorized merely by loading or previewing a schematic. No live world has been used in this coding session.
+
+### Litematica plan-only workflow
+
+Inspect a file without a Minecraft connection:
+
+```bash
+npm run dev -- --litematic-plan "/path/to/house.litematic" --litematic-layer 0
+# Or through the Python launcher:
+python3 main.py -- --litematic-plan "/path/to/house.litematic" --litematic-layer 0
+```
+
+A bounded offline import prints regions, dimensions, material totals, non-air block count, warnings, and a source SHA-256. Add `--litematic-layer Y` to render one normalized Y layer as an ASCII top-down map; this is a file-only preview, not a world diff. To run the experimental authenticated placement-report receiver, see [`docs/LITEMATICA_BRIDGE_PROTOCOL.md`](docs/LITEMATICA_BRIDGE_PROTOCOL.md):
+
+```bash
+export GAMEMIND_LITEMATICA_BRIDGE_TOKEN="$(openssl rand -hex 32)"
+python3 main.py -- --litematic-bridge "/path/to/house.litematic"
+```
+
+The receiver is loopback-only by default, requires HMAC-signed heartbeats, and `confirm <fingerprint>` marks **review only**. There is currently no Fabric client sender, live-world diff, or build executor. Do not expose the receiver publicly or infer that its review confirmation authorizes construction.
+
+When the Control Center is enabled, its Library in the **Bots** tab offers explicit entries with typed fields, availability, and measured outcomes. It remains optional; it is not an alternative to the exact-username chat gate. Named homepoints are world-scoped, dimension-aware, and never overwritten without an explicit delete. Follow targets a measured 4-block preference, stops inside 5 blocks, and treats 32 blocks as a normal maximum separation target—not a guarantee under teleportation, disconnection, or obstacles.
 
 ## What still needs your environment
 
-Everything in this repository was verified offline: unit and integration tests, a deterministic simulator, Mineflayer doubles, a fake DOM for the page, and the real HTTP server. These checks need a real Minecraft Java 1.20.4 server (and, for items 7 and 8, your own machine), and are listed with commands and the evidence to keep in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md) §18:
+The pre-existing agent, simulator, launcher, and Control Center have offline unit/integration checks, Mineflayer doubles, a fake DOM, and HTTP coverage. **The newest companion changes in this worktree (chat/Ollama, separate house-material approval, Litematic parsing/bridge, and launcher passthrough) have not yet passed the implementation-end offline audit.** None of these checks establishes live Minecraft compatibility. The legacy server checklist and evidence to keep are in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md) §18:
 
 1. **Persistent session on vanilla 1.20.4:** it stays connected after a task and after an idle period, the Control Center shows the **LIVE** badge with the real health, food and position, and a page refresh restarts nothing.
 2. **The CLI task wins the startup race with autonomy on:** no "A task is already running" message, the task runs first, autonomous work starts after it.
@@ -514,10 +572,15 @@ Everything in this repository was verified offline: unit and integration tests, 
 7. **WSL2 and Windows:** host selection, the Windows firewall, and opening the browser from WSL.
 8. **The page in a real browser:** layout, contrast, light and dark themes, a narrow window, and reduced motion. This has never been looked at.
 9. **Live verification phases** from the Tests & Evaluation tab, with their two confirmations, in a disposable world.
+10. **Ollama from WSL:** where the service runs, whether `qwen3:0.6b` is installed, and which URL is reachable from the Ubuntu WSL process.
+11. **Modrinth client integration:** exact Minecraft 1.20.4 Fabric, Litematica, and MaLiLib versions plus the Windows/WSL networking mode. There is no Fabric client sender yet.
+12. **Any live-world action testing:** this needs separate explicit approval; the coding session has not connected to or changed a live world.
 
 ## Known limitations
 
-- **No live Minecraft verification of this release has been run.** The lifecycle, scheduler, Control Center, launcher, training and learning changes are covered by unit tests, Mineflayer doubles, an HTTP integration test and offline simulation, none of which proves Java 1.20.4 server or plugin behaviour. Earlier adapter checks against a non-vanilla stand-in server are recorded in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md) §17. Calls such as `findBlocks`, `getDroppedItem`, berry-property reads, harvesting, pickup, rest, respawn, and pathfinder error handling still need the live checks in that document.
+- **No live Minecraft verification of this release has been run.** The offline lifecycle, scheduler, Control Center, launcher, companion, importer, bridge, and learning checks use tests, Mineflayer doubles, an HTTP integration test, and simulation; none proves Java 1.20.4 server or plugin behaviour. The implementation-end offline audit passed, but calls such as `findBlocks`, `getDroppedItem`, berry-property reads, harvesting, pickup, rest, respawn, pathfinder error handling, and the new farm/house/excavation actions still need separate live checks. Earlier adapter checks against a non-vanilla stand-in server are recorded in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md) §17.
+- **Large-house design is planning-only.** A/B/C have generated relative block plans, material totals and per-layer counts, but no rendered layer map, selected/verified world-space plan, `.litematic` export, or construction executor. The existing builder is a fixed 5×5 starter prototype; generic “build house” will not silently substitute it.
+- **Litematica integration is partial.** Offline import, a signed plan-only report receiver, and a review guard exist in code, but no version-matched Fabric sender, in-world diff, or block-placement executor exists. The exact Modrinth profile is unknown. Review approval cannot build.
 - **The Control Center has never been seen in a browser from this build environment.** Its text, controls and states are tested in a fake DOM and over HTTP; how it looks (spacing, colour, contrast, responsive layout, transitions) is unverified.
 - **One bot per process.** The Bots tab is laid out as a list so more sessions can be added, but one session runs at a time and nothing pretends otherwise.
 - **Windows and WSL are covered by injected-environment tests only.** No real WSL, Windows firewall or `wslview` was involved.
@@ -528,13 +591,13 @@ Everything in this repository was verified offline: unit and integration tests, 
 - **Mining is limited to blocks the local scan can see and the held tool can break.** It walks to a remembered stone-class or ore cell, equips, digs, and verifies the drop; it does not dig downward deliberately, branch mineshafts, place torches, or manage falling into a ravine. Ore beyond `--max-target-distance` is out of scope for a task.
 - **Shelter means a closed shell.** `build-shelter` places blocks from inventory on the open cardinal (or all eight) sides at the player's level. It does not roof, light, or evaluate whether the location is defensible beyond the observed blocks, and it reports `unknown` support rather than guessing about unobserved cells.
 - **Learning is experience statistics, not model learning.** There is no gradient update, no neural network, no replay buffer beyond the episode log, and no online adaptation inside a single run: the memory changes decisions in *later* runs. Weights that were never promoted stay candidates.
-- **The event log and the trace are different things.** The Control Center's trace ring keeps the last 400 events in memory; the durable trace is `data/traces/*.jsonl`, and the searchable, redacted event log is `data/events/` (four rotating files by default). Neither is a long-term analytics store.
-- **Performance data is scoped and low-overhead.** The Control Center samples Node process CPU, event-loop utilization, RSS/heap, host memory/load on snapshot requests, plus live adapter scan timings and skill durations. It does not profile Minecraft server TPS, GPU, GC pauses, per-core counters, or end-to-end networking; no diagnostic profiler or Minecraft tick hook is installed.
+- **The event log and the trace are different things.** The optional Control Center's trace ring keeps the last 400 events in memory; the durable trace is `data/traces/*.jsonl`, and the searchable, redacted event log is `data/events/` (four rotating files by default). Neither is a long-term analytics store.
+- **Performance data is scoped and low-overhead.** The optional Control Center samples Node process CPU, event-loop utilization, RSS/heap, host memory/load on snapshot requests, plus live adapter scan timings and skill durations. It does not profile Minecraft server TPS, GPU, GC pauses, per-core counters, or end-to-end networking; no diagnostic profiler or Minecraft tick hook is installed.
 - **Simulator fidelity.** Walking, hostiles, hunger, and regeneration are simplified; the simulator has no collisions beyond solid cells, no lighting, no mob pathing, and no protocol.
 - **Live verification of the autonomy loop has not been run.** The fast loop, reflexes, the planner, the performance panel and the observation cadence are tested with the simulator and unit tests only. The ~1 s cadence is a design target, not a measured live figure.
 - **Repeated failures are bounded, not eliminated.** In the `berries` profile (seed 101, 900 virtual seconds), `autonomous:mine-iron-ore` is retried 8 times and fails each time after 2 actions with no simulated time spent. Cooldowns and the fallback stop the retries from growing without bound, but a task that always fails in the same way is still attempted repeatedly.
 - **No improvement has been measured, and the offline suite has no headroom to show one.** A 24-episode run changed choices in 10 of 260 paired runs without changing any outcome (`behaviour-changed-no-gain`). The 15 scenarios judged on success already succeed in every seed with the baseline, and the other 11 are judged on safety, which the baseline already satisfies, so a policy that is no worse scores exactly the baseline's figures. The suite can detect a regression or a change of behaviour, not a gain. Real evidence needs a live comparison. See [Learning and policy](#learning-and-policy).
-- **The wasted-action figure changed definition** (`verified-world-progress.v2`). Both evaluation reports now record the definition. A report written before that has none: the Evaluation tab labels such a training report as the first definition, and an old `data/eval/offline-report.json` holds first-definition numbers until you regenerate it with `npm run eval:offline`. Figures under different definitions are not comparable.
+- **The wasted-action figure changed definition** (`verified-world-progress.v2`). Both evaluation reports now record the definition. A report written before that has none: the evaluation report labels the definition it used, and an old `data/eval/offline-report.json` holds first-definition numbers until you regenerate it with `npm run eval:offline`. Figures under different definitions are not comparable.
 - **Seed is manual only.** No auto-detection is implemented, so seed-derived information is always a prediction until it is checked in the world.
 - **Recovery is bounded, not exhaustive.** A route blocked everywhere, or one whose shortest paths all pass through an unobservable block, ends in a bounded stop.
 
@@ -542,13 +605,15 @@ Everything in this repository was verified offline: unit and integration tests, 
 
 - `scenarios/minecraft-look-roundtrip.json` is the seeded orientation scenario.
 - `data/traces/<session-id>.jsonl` stores ordered session, observation, decision (with plan, band, alternatives, rejections, memory knowledge and the safety verdict), skill, action, verification, and task events. Sensitive-looking fields are redacted and long strings truncated.
-- `data/events/` holds the searchable, redacted event log of the app (connections, lifecycle, tasks, decisions, safety refusals, jobs, errors, shutdown reasons); `data/jobs/` the last result of each job kind (unit tests, offline evaluation, benchmark, live verification), by kind; `data/run/gamemind.lock.json` the single-instance lock.
+- `data/events/` holds the searchable, redacted event log of the app (connections, lifecycle, tasks, decisions, safety refusals, jobs, errors, shutdown reasons); `data/jobs/` the last result of each job kind (unit tests, offline evaluation, live verification); `data/run/gamemind.lock.json` the single-instance lock.
 - `data/learning/episodes.jsonl` plus `state.json` are the live experience memory and promoted policy; `data/learning-simulated/` is the same for simulated sessions; `data/world-memory/<world-hash>.json` stores validated resource/minable sightings and explored coverage. These data directories are gitignored and may be deleted to reset memory.
 - Tests use offline fixtures, deterministic simulated worlds, an injected Mineflayer double, a fake DOM and the real HTTP server. They verify program logic and simulated interactions, **not** Minecraft server behaviour, protocol compatibility, plugin behaviour or how the page looks.
 
 ```bash
-npm test                 # 908 TypeScript tests
-npm run test:launcher    # 41 Python tests for main.py and the launcher
+npm test                 # Node-based TypeScript unit suite plus the Vitest integration suite
+npm run test:node        # Node-based TypeScript unit suite only
+npm run test:integration # Vitest integration suite only
+npm run test:launcher    # Python tests for main.py and the launcher
 npm run build            # type-check, compile, copy and verify the Control Center files
 ```
 
@@ -560,15 +625,18 @@ The original suites cover loaded-chunk/truncation memory, persistent world snaps
 | `cli-lifecycle`, `probe`, `launcher` (+ `tests_py`) | Exit codes, the READY handshake, persistent and one-shot runs, signals, orphan-free shutdown, browser opened once, the observation probe, Windows/WSL host selection with injected platforms |
 | `app`, `control-center`, `control-center-http` | One server per process, the command set, the snapshot contract, redaction, `Host` and origin checks, token handling, reserved data folders |
 | `ui-components`, `ui-page`, `ui-e2e`, `ui-static` | The page's helpers and polling store, every tab's text, controls and states in a fake DOM, the page against a real app, and a static type-check of the browser modules with a canary proving it can see each defect class |
-| `training-safety`, `learning-evidence`, `progress-evidence`, `atomic-file` | Training lock, preflight, archive-never-delete and held-out evaluation; the success/failure/excluded rule and provenance; the wasted-action definition and what it must not steer; concurrent saves |
+| `training-safety`, `learning-evidence`, `progress-evidence`, `atomic-file` | CLI training lock, archive-never-delete and held-out evaluation; the success/failure/excluded rule and provenance; the wasted-action definition and what it must not steer; concurrent saves |
 | `safety-broker`, `skill-contracts`, `drowning-thresholds`, `reflex-and-autonomy` | The void check and its per-capability list, the one "arrived" definition shared by adapter, simulator and postcondition, the drowning threshold without the burning exception, and the survival constants read through `survival-thresholds.ts` |
 | `failure-taxonomy`, `learning-evidence`, `rl-readiness` | The external-failure kinds as one set (planner refusals are excluded from a skill's statistics), the code-only fallback, and the readiness report whose three in-process criteria are probed rather than asserted |
 | `memory-view-cache`, `event-log-rotation` | The memory view's reuse window (and that its live section stays fresh), and the log's one measurement per file plus the rotation that follows the counter |
 | `event-log-rotation`, `environment-settings`, `useful-drop-pickup` | The JSONL rotation honouring `keepFiles` including the active file and removing orphaned slots, the README/code round-trip of the documented environment variables, and the useful-drop list derived from the mining table |
 | `ui-language` | The EN/DE switch (static text, composed sentences, the tab title, the remembered choice), the catalog's coverage of every interface string the page can render, the host-written panel notes, and that the patterns stay anchored and leave runtime text alone |
 | `task-report`, `trace-console` | The printed task report: the simulator's clock and world statistics stay in it (on the one-shot path, the default persistent path and for dashboard tasks), a live report never carries simulated fields, and a detail that is not known is left out instead of invented; every trace event is recorded at every log level while per-tick observations print only at `debug` |
+| `minecraft-chat-commands`, `minecraft-chat-controller`, `ollama-chat-responder` | Exact-operator chat gating, bounded English/German commands, two-stage approvals, stale-confirmation cancellation, action-claim rejection, slash-command rejection and bounded Ollama fallback |
+| `house-blueprint`, `minecraft-house-runner`, `minecraft-wheat-farm-runner`, `minecraft-excavation-runner` | Deterministic relative house plans, separately approved starter-house material gathering, existing hydrated farmland and seed preflight, excavation bounds, and safety rechecks before world changes |
+| `litematic-importer`, `litematica-placement-guard`, `litematica-bridge-server` | Compressed NBT limits, palette packing and negative dimensions, layer previews, HMAC/freshness/replay checks, exact placement fingerprints, and loopback-only defaults |
 
-Existing tests were edited in a handful of places, each because behaviour changed on purpose; no test was removed or skipped, and every other assertion is unchanged:
+The companion, bridge, and launcher tests passed in the offline audit. The Training GUI, worker/environment benchmark, and their tests were removed because GUI training and training-benchmarking are out of scope; the independent CLI-only offline trainer remains. Other existing tests were edited where behavior deliberately changed:
 
 1. `test/control-center.test.ts` now requires `world.position` (whole blocks) where it used to require its absence. Blocks, terrain and entity coordinates are still asserted absent.
 2. `test/learning-system.test.ts` expects a safety-denied approach to count as a denial and an excluded outcome (`attempts` 0, `excluded` 1) rather than one attempt; `test/learning-evidence.test.ts` pins the rule.
@@ -577,4 +645,4 @@ Existing tests were edited in a handful of places, each because behaviour change
 5. `test/lifecycle.test.ts` asserts that a stop with a hung step says so (`shutdownIncomplete`) instead of reading as a clean shutdown.
 6. `test/ui-static.test.ts` no longer tolerates inference noise: it runs the committed `tsconfig.public.json` over the page and requires zero diagnostics, which is why the browser modules now carry JSDoc types.
 
-`npm audit --audit-level=low` found 0 vulnerabilities when run on 2026-10-10; no dependency was added in this release. Run it again, because advisories change.
+A dependency audit reported 0 vulnerabilities on 2026-10-10, before `prismarine-nbt@2.8.0` was added for offline Litematic parsing. That result no longer covers the current dependency tree; rerun `npm audit --audit-level=low` during the implementation-end offline audit. Advisories change over time.

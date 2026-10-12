@@ -28,7 +28,7 @@ test("launcher unit tests pass (WSL, Windows and missing-tool cases use injected
 });
 
 test("python3 main.py --check validates the environment without starting anything", { skip: python === null ? "python3 is not installed here" : false }, () => {
-  const result = spawnSync(python!, ["main.py", "--check", "--control-port", "0"], { cwd: root, encoding: "utf8", timeout: 60_000 });
+  const result = spawnSync(python!, ["main.py", "--check", "--control-center", "--control-port", "0"], { cwd: root, encoding: "utf8", timeout: 60_000 });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /Environment OK\./);
   assert.match(result.stdout, /Node:\s+\S+\s+22\./);
@@ -38,7 +38,7 @@ test("python3 main.py starts the TypeScript agent and Control Center, relays the
   const data = await mkdtemp(path.join(tmpdir(), "gamemind-launcher-"));
   // `--data-dir` also moves the lock the launcher looks for, so this start cannot be confused with a GameMind
   // that happens to be running in the repository itself (which is exactly what `python3 main.py` does).
-  const child = spawn(python!, ["main.py", "--simulated", "--no-browser", "--control-port", "0", "--", "--data-dir", data, "--learning-dir", path.join(data, "learning"), "--no-instance-lock"], {
+  const child = spawn(python!, ["main.py", "--simulated", "--control-center", "--no-browser", "--control-port", "0", "--", "--data-dir", data, "--learning-dir", path.join(data, "learning"), "--no-instance-lock"], {
     cwd: root,
     env: { ...process.env, LOG_LEVEL: "error" },
     stdio: ["ignore", "pipe", "pipe"],

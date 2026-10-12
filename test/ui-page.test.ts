@@ -74,7 +74,7 @@ test("the page shows a loading state until the first snapshot arrives, then the 
     const { page } = booted;
     assert.equal(page.byId("panel-loading").hasAttribute("hidden"), false);
     assert.match(page.visibleText("loading-text"), /Contacting GameMind/);
-    for (const tab of ["overview", "training", "bots", "tasks", "evaluation", "learning", "memory"]) {
+    for (const tab of ["overview", "bots", "tasks", "evaluation", "learning", "memory"]) {
       assert.equal(page.byId(`panel-${tab}`).hasAttribute("hidden"), true, `${tab} is not shown before there is data`);
     }
     assert.equal(page.visibleText("session-pill-text"), "Connecting to GameMind…");
@@ -107,7 +107,7 @@ test("tabs: the dropdown starts closed, the hash picks a tab, clicks and arrow k
   await withPage(server(), async ({ page, settle }) => {
     assert.equal(page.byId("tab-overview").getAttribute("aria-selected"), "true");
     assert.equal(page.byId("tools-navigation").open, false, "the navigation is compact until requested");
-    assert.equal(page.isHidden(page.byId("tab-training")), true, "closed navigation is not keyboard or click accessible");
+    assert.equal(page.document.getElementById("tab-training"), null, "there is no training tab in the operator UI");
     assert.equal(page.byId("panel-overview").hasAttribute("hidden"), false);
     assert.equal(page.byId("panel-bots").hasAttribute("hidden"), true);
     page.click("tools-navigation-summary");
@@ -140,7 +140,7 @@ test("tabs: the dropdown starts closed, the hash picks a tab, clicks and arrow k
     page.window.fire("hashchange");
     assert.equal(page.byId("tab-learning").getAttribute("aria-selected"), "true", "a bad hash changes nothing");
   });
-  await withPage(server(), async ({ page }) => assert.equal(page.byId("tab-training").getAttribute("aria-selected"), "true"), { hash: "#/training" });
+  await withPage(server(), async ({ page }) => assert.equal(page.byId("tab-overview").getAttribute("aria-selected"), "true"), { hash: "#/not-a-tab" });
   await withPage(server(), async ({ page }) => assert.equal(page.byId("tab-overview").getAttribute("aria-selected"), "true"), { hash: "#/bogus" });
 });
 
@@ -156,8 +156,6 @@ test("only the open tab's detail queries are polled, so an idle page costs the a
     assert.ok(asked().has("learning"));
     await openTab(booted, "evaluation");
     assert.ok(asked().has("evaluation"));
-    await openTab(booted, "training");
-    assert.ok(asked().has("training-preflight"));
     await openTab(booted, "bots");
     assert.ok(asked().has("diagnostics"));
     const learning = stub.requests.find((request) => request.url.includes("api/learning"));
@@ -634,23 +632,6 @@ test("when no task can start the form says exactly why", async () => {
   }
 });
 
-// ---- training form ----------------------------------------------------------------------------------------
-
-const preflightWith = (overrides: Record<string, unknown> = {}, existing: Record<string, unknown> = {}): Record<string, unknown> => ({
-  ...(clone(real.queries["training-preflight"]) as Record<string, unknown>),
-  directoryName: "training",
-  directories: ["roadmap-run", "training"],
-  ...overrides,
-  existing: { ...((real.queries["training-preflight"] as { existing: object }).existing), ...existing },
-});
-
-async function openTraining(stub: StubServer, run: (booted: BootedPage) => Promise<void>): Promise<void> {
-  await withPage(stub, async (booted) => {
-    await openTab(booted, "training");
-    await run(booted);
-  });
-}
-
 // ---- decisions ------------------------------------------------------------------------------------------------
 
 const decisionSkills = new Set([
@@ -725,221 +706,6 @@ test("with no decision recorded the card says so instead of showing an empty tab
   });
 });
 
-test("the headless benchmark is manual, shows the 256-case runtime, and sends its environment, worker and stage choices", async () => {
-  const stub = server(undefined, { "training-preflight": preflightWith({ resume: { possible: true, summary: "Resumes the saved run." } }, { hasRun: true }) });
-  await openTraining(stub, async ({ page, settle }) => {
-    assert.ok(page.byId("benchmark-form"), "the Training tab includes a dedicated manual benchmark form");
-    assert.equal(page.byId("benchmark-environment-cases").value, "13");
-    assert.equal(page.byId("benchmark-environment-seconds").value, "20");
-    assert.equal(page.byId("benchmark-worker-limit").value, "4");
-    const stages = page.all("input", "benchmark-form").filter((input) => input.type === "checkbox");
-    assert.equal(stages.length, 3);
-    assert.ok(stages.every((stage) => stage.checked));
-    assert.match(page.visibleText("benchmark-estimate"), /256 × 20 s is about 85 minutes/);
-    assert.match(page.visibleText("training-benchmarks"), /never starts automatically after training/);
-    assert.deepEqual(stub.commands(), [], "opening the page does not start a benchmark");
-
-    page.type("benchmark-environment-cases", "256");
-    page.type("benchmark-environment-seconds", "20");
-    page.choose("benchmark-worker-limit", "8");
-    page.check(stages[0] as FakeElement, false);
-    page.window.confirmAnswer = false;
-    page.submit("benchmark-form");
-    await settle();
-    await settle();
-    assert.deepEqual(stub.commands(), [], "declining the cost confirmation sends nothing");
-    assert.match(page.window.confirmations.at(-1) ?? "", /about 1 h 28 min/);
-
-    page.window.confirmAnswer = true;
-    page.submit("benchmark-form");
-    await settle();
-    await settle();
-    const command = stub.commands().find((item) => item.type === "runBenchmark");
-    assert.deepEqual(command?.payload, {
-      environmentCases: 256,
-      environmentSecondsPerCase: 20,
-      workerLimit: 8,
-      stageIds: [stages[1]?.value, stages[2]?.value],
-    });
-  });
-});
-
-test("benchmark reports explain when a selected stage is retained without a learning signal", async () => {
-  const listing = {
-    directory: "data/experiments/benchmarks",
-    reports: [{
-      name: "partial-sweep",
-      file: "partial-sweep.json",
-      createdAt: new Date().toISOString(),
-      winner: null,
-      decision: "Stages without a reliable signal are retained.",
-      workers: 1,
-      probe: null,
-      environmentCases: 1,
-      environmentSecondsPerCase: 20,
-      environmentScores: [
-        { stageId: "basics", cases: 1, completedCases: 1, episodes: 8, meanLearningSignal: 0.8, recommended: true },
-        { stageId: "food", cases: 0, completedCases: 0, episodes: 0, meanLearningSignal: null, recommended: true },
-      ],
-      recommendedStageIds: ["basics", "food"],
-      rows: [],
-      unreadable: false,
-    }],
-    savedDefault: null,
-  };
-  const stub = server(undefined, {
-    "training-preflight": preflightWith({ resume: { possible: true, summary: "Resumes the saved run." } }, { hasRun: true }),
-    benchmarks: listing,
-  });
-  await openTraining(stub, async ({ page }) => {
-    assert.match(page.visibleText("training-benchmarks"), /retained · unmeasured/);
-    assert.match(page.visibleText("training-benchmarks"), /Stages without a reliable signal are retained/);
-  });
-});
-
-test("benchmark and training stage selectors seed from the saved environment recommendation", async () => {
-  const stub = server((snapshot) => { snapshot.training.defaultStageIds = ["food"]; }, {
-    "training-preflight": preflightWith({ resume: { possible: false, summary: "No saved run." } }, { hasRun: false }),
-  });
-  await openTraining(stub, async ({ page, settle }) => {
-    const trainingStages = page.all("input", "training-stages");
-    const benchmarkStages = page.all("input", "benchmark-form").filter((input) => input.type === "checkbox");
-    assert.deepEqual(trainingStages.filter((stage) => stage.checked).map((stage) => stage.value), ["food"]);
-    assert.deepEqual(benchmarkStages.filter((stage) => stage.checked).map((stage) => stage.value), ["food"]);
-    page.click("training-start");
-    await settle();
-    assert.deepEqual(stub.commands().find((item) => item.type === "startTraining")?.payload, {
-      directory: "training",
-      fresh: false,
-      confirmFresh: false,
-    }, "the stage choice already matches the benchmark default, so no redundant override is sent");
-  });
-});
-
-test("training defaults to resume, and a fresh start explains what it archives and waits for a confirmation", async () => {
-  const stub = server(undefined, {
-    "training-preflight": preflightWith(
-      {
-        busy: false,
-        resume: { possible: true, summary: "Resumes at episode 40 in stage 2." },
-        fresh: { needsConfirmation: true, wouldArchive: ["state.json", "checkpoints"], summary: "Archives the saved run.", consequences: ["The policy starts empty again.", "Nothing is deleted: the old run is moved aside."] },
-      },
-      { hasRun: true, status: "stopped", episodes: 40, stageId: "tools", checkpoints: 2, experienceFiles: 1, evaluations: 0, stageIds: null, updatedAt: null },
-    ),
-  });
-  await openTraining(stub, async ({ page, settle }) => {
-    assert.equal(page.byId("training-mode-resume").checked, true, "resume is the default");
-    assert.equal(page.byId("training-mode-fresh").checked, false);
-    assert.equal(page.byId("training-confirm-row").hasAttribute("hidden"), true);
-    assert.equal(page.byId("training-start").disabled, false);
-    assert.match(page.visibleText("training-preflight"), /Resumes at episode 40/);
-
-    page.click("training-mode-fresh");
-    await settle();
-    assert.equal(page.byId("training-confirm-row").hasAttribute("hidden"), false, "a fresh start over an existing run needs its own confirmation");
-    assert.match(page.visibleText("training-preflight"), /policy starts empty again/);
-    assert.match(page.visibleText("training-preflight"), /Nothing is deleted/);
-    assert.equal(page.byId("training-start").disabled, true);
-    assert.match(page.visibleText("training-start-hint"), /confirm the fresh start/);
-
-    page.click("training-confirm-fresh");
-    assert.equal(page.byId("training-start").disabled, false);
-    page.window.confirmAnswer = false;
-    page.click("training-start");
-    await settle();
-    assert.deepEqual(stub.commands(), [], "declining the final question sends nothing");
-    assert.match(page.window.confirmations.at(-1) ?? "", /archived first \(nothing is deleted\)/);
-    page.window.confirmAnswer = true;
-    page.click("training-start");
-    await settle();
-    assert.deepEqual(stub.commands(), [{ type: "startTraining", payload: { directory: "training", fresh: true, confirmFresh: true } }]);
-  });
-});
-
-test("an empty folder starts a new run without any confirmation, and resume is what is sent by default", async () => {
-  const stub = server(undefined, { "training-preflight": preflightWith({ resume: { possible: false, summary: "No saved run." }, fresh: { needsConfirmation: false, wouldArchive: [], summary: "", consequences: [] } }, { hasRun: false }) });
-  await openTraining(stub, async ({ page, settle }) => {
-    page.type("training-max-episodes", "24");
-    page.type("training-minutes", "10");
-    page.type("training-explore", "0.2");
-    page.click("training-start");
-    await settle();
-    assert.deepEqual(stub.commands(), [{ type: "startTraining", payload: { directory: "training", fresh: false, confirmFresh: false, maxEpisodes: 24, maxMinutes: 10, explorationRate: 0.2 } }]);
-    assert.deepEqual(page.window.confirmations, [], "no confirmation is asked when nothing can be lost");
-  });
-});
-
-test("training budgets outside their limits are refused on the page, and stages are chosen only for a new run", async () => {
-  const stub = server(undefined, { "training-preflight": preflightWith({ resume: { possible: false, summary: "" }, fresh: { needsConfirmation: false, wouldArchive: [], summary: "", consequences: [] } }, { hasRun: false }) });
-  await openTraining(stub, async ({ page, settle }) => {
-    const limit = Number(page.byId("training-max-episodes").max);
-    for (const [id, bad] of [["training-max-episodes", String(limit + 1)], ["training-max-episodes", "0"], ["training-max-episodes", "1.5"], ["training-minutes", "100000"], ["training-explore", "3"]] as const) {
-      page.type(id, bad);
-      page.click("training-start");
-      await settle();
-      page.type(id, "");
-    }
-    assert.deepEqual(stub.commands(), []);
-    assert.match(page.visibleText("toasts"), /must be (a whole number|a number) from/);
-
-    const stages = page.all("input", "training-stages");
-    assert.ok(stages.length >= 3, "stages come from the runner's own curriculum");
-    assert.ok(stages.every((stage) => stage.checked && !stage.disabled));
-    for (const stage of stages) page.check(stage, false);
-    page.click("training-start");
-    await settle();
-    assert.match(page.visibleText("toasts"), /Choose at least one curriculum stage/);
-    assert.deepEqual(stub.commands(), []);
-    page.check(stages[1] as FakeElement, true);
-    page.click("training-start");
-    await settle();
-    assert.deepEqual((stub.commands()[0]?.payload as { stageIds: string[] }).stageIds, [stages[1]?.value]);
-  });
-});
-
-test("while a run is active the form cannot start another and pause, resume and stop follow the real state", async () => {
-  const states: Array<[string, Record<string, unknown>, Record<string, boolean>]> = [
-    ["running", { status: "running", processAlive: true, pid: 4242 }, { start: true, pause: false, resume: true, stop: false }],
-    ["paused", { status: "paused", processAlive: true, pid: 4242 }, { start: true, pause: true, resume: false, stop: false }],
-    ["interrupted", { status: "interrupted", processAlive: false, pid: null }, { start: false, pause: true, resume: false, stop: true }],
-    ["idle", { status: "idle", processAlive: false, pid: null }, { start: false, pause: true, resume: true, stop: true }],
-  ];
-  for (const [name, training, disabled] of states) {
-    const stub = server((snapshot) => {
-      Object.assign(snapshot.training, training);
-    }, { "training-preflight": preflightWith({ busy: training.processAlive === true, resume: { possible: true, summary: "Resumes the saved run." } }, { hasRun: true }) });
-    await openTraining(stub, async ({ page }) => {
-      assert.equal(page.byId("training-start").disabled, disabled.start, `${name}: start disabled`);
-      assert.equal(page.byId("training-pause").disabled, disabled.pause, `${name}: pause disabled`);
-      assert.equal(page.byId("training-resume").disabled, disabled.resume, `${name}: resume disabled`);
-      assert.equal(page.byId("training-stop").disabled, disabled.stop, `${name}: stop disabled`);
-    });
-  }
-});
-
-test("the buttons send the real training commands, and the folder picker selects through the server", async () => {
-  const stub = server((snapshot) => {
-    Object.assign(snapshot.training, { status: "paused", processAlive: true, pid: 4242 });
-  }, { "training-preflight": (params: URLSearchParams) => preflightWith({ directoryName: params.get("directory") ?? "training", directories: ["other-run", "training"], busy: true }) });
-  await openTraining(stub, async ({ page, settle }) => {
-    page.click("training-resume");
-    await settle();
-    page.window.confirmAnswer = true;
-    assert.deepEqual(stub.commands().map((c) => c.type), ["resumeTraining"]);
-    const folders = page.byId("training-directory").options.map((option) => option.value);
-    assert.deepEqual(folders, ["other-run", "training", "__new__"]);
-    page.choose("training-directory", "other-run");
-    await settle();
-    await settle();
-    assert.deepEqual(stub.commands().slice(1), [{ type: "selectTrainingDirectory", payload: "other-run" }]);
-    assert.ok(stub.requests.some((request) => request.url.includes("api/training-preflight?directory=other-run")), "the preflight is asked about the chosen folder");
-
-    page.choose("training-directory", "__new__");
-    assert.equal(page.byId("training-new-directory").hasAttribute("hidden"), false);
-    assert.equal(page.byId("training-start").disabled, true, "a new folder needs a name");
-  });
-});
-
 // ---- evaluation and live verification ----------------------------------------------------------------------
 
 async function openEvaluation(stub: StubServer, run: (booted: BootedPage) => Promise<void>): Promise<void> {
@@ -974,49 +740,6 @@ test("offline checks start through the job runner, one at a time, with the reaso
     assert.equal(page.byId("run-tests").disabled, true);
     assert.equal(page.byId("run-eval").disabled, true);
     assert.match(page.visibleText("eval-hint"), /A job is running/);
-  });
-});
-
-function checkpointReport(evaluationSet: Record<string, unknown> | null): Record<string, unknown> {
-  const measure = (successRate: number, wasted: number) => ({ successRate, runs: 260, interval: { low: 0.68, high: 0.78 }, meanWastedActions: wasted, medianActions: 5 });
-  return {
-    checkpointId: "ckpt-000003",
-    generatedAt: "2026-10-09T10:00:00.000Z",
-    verdict: "not-promotable",
-    conclusion: "identical-behaviour",
-    weightsId: "w-1",
-    learnedContexts: 2,
-    evaluationSet,
-    baseline: measure(0.7346, 0.64),
-    candidate: measure(0.7346, 0.64),
-    deltas: { successRate: 0, medianActions: 0, meanWastedActions: 0, unsafeActions: 0, deaths: 0 },
-    behaviour: { pairedRuns: 260, runsWithDifferentChoices: 0, scenariosWithDifferentChoices: 0 },
-    paired: { candidateBetter: 0, baselineBetter: 0, tied: 260 },
-    baselineStability: { evaluationSetId: "abc", stable: true, firstRecordedAt: "2026-10-09T10:00:00.000Z", note: "First baseline recorded for this evaluation set; later evaluations must reproduce it." },
-    reasons: ["No measured gain."],
-    heldOut: { seeds: 10, disjointFromTraining: true, note: "Held-out worlds." },
-    scenarios: [],
-  };
-}
-
-test("the checkpoint comparison says which definition of progress and waste its figures use, and flags reports that predate it", async () => {
-  const withDefinition = server(undefined, {
-    evaluation: { ...clone(real.queries.evaluation as object), offline: { checkpointReports: [checkpointReport({ id: "aaa111", scenarios: 26, seedsPerScenario: 10, runs: 260, decisionModel: "m", progressDefinition: "verified-world-progress.v2" })] } },
-  });
-  await openEvaluation(withDefinition, async ({ page }) => {
-    const text = page.visibleText("eval-compare");
-    assert.match(text, /Progress definition\s*verified-world-progress\.v2/);
-    assert.match(text, /no item or food gained, no new ground explored, not closer to the target, no healing, no retreat/, "the wasted-action note describes the current rules");
-    assert.doesNotMatch(text, /no inventory or hunger gain/, "the old definition is not described as current");
-    assert.match(text, /26 scenarios × 10 seeds = 260 runs \(id aaa111\)/);
-  });
-  const legacy = server(undefined, {
-    evaluation: { ...clone(real.queries.evaluation as object), offline: { checkpointReports: [checkpointReport({ id: "bbb222", scenarios: 26, seedsPerScenario: 10, runs: 260, decisionModel: "m" })] } },
-  });
-  await openEvaluation(legacy, async ({ page }) => {
-    const text = page.visibleText("eval-compare");
-    assert.match(text, /Progress definition\s*v1 · item and food gains only/);
-    assert.match(text, /not comparable with newer reports/);
   });
 });
 
@@ -1062,8 +785,7 @@ test("an offline result is never worded as live: the page keeps them in separate
   await openEvaluation(server(), async ({ page }) => {
     assert.match(page.visibleText("eval-notice"), /Offline and live results are kept apart/);
     assert.match(page.visibleText("eval-live"), /NOT VERIFIED LIVE|not been run|no live/i);
-    assert.match(page.visibleText("eval-compare"), /OFFLINE/);
-    assert.doesNotMatch(page.visibleText("eval-compare"), /\bLIVE\b/);
+    assert.equal(page.document.getElementById("eval-compare"), null, "checkpoint training comparisons are not part of normal evaluation");
   });
 });
 

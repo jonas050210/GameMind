@@ -15,7 +15,7 @@ import { redactText, type RedactionContext } from "./redact.js";
  *  - output is bounded and redacted before it is ever shown.
  */
 
-export type JobKind = "unit-tests" | "offline-eval" | "live-verification" | "benchmark";
+export type JobKind = "unit-tests" | "offline-eval" | "live-verification";
 export type JobSource = "offline" | "live";
 export type JobState = "running" | "succeeded" | "failed" | "cancelled" | "timed-out";
 
@@ -36,11 +36,6 @@ export interface EvalJobSummary {
   readonly reportPath: string | null;
 }
 
-export interface BenchmarkJobSummary {
-  readonly kind: "benchmark";
-  readonly reportPath: string | null;
-}
-
 export interface LiveJobSummary {
   readonly kind: "live";
   readonly reachedServer: boolean | null;
@@ -51,7 +46,7 @@ export interface LiveJobSummary {
   readonly server: string | null;
 }
 
-export type JobSummary = TestSummary | EvalJobSummary | BenchmarkJobSummary | LiveJobSummary;
+export type JobSummary = TestSummary | EvalJobSummary | LiveJobSummary;
 
 export interface JobSpec {
   readonly kind: JobKind;

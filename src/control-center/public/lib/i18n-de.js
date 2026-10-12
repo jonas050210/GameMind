@@ -491,6 +491,7 @@ export const GERMAN = {
   "Run live verification": "Live-Verifikation starten",
   "Run offline checks": "Offline-Prüfungen starten",
   "Run offline evaluation": "Offline-Evaluation starten",
+  "Run on this machine in the simulator": "Auf diesem Rechner im Simulator ausführen",
   "Run on this machine in the simulator and the unit-test suite": "Läuft auf diesem Rechner im Simulator und in der Unit-Test-Suite",
   "Run status": "Laufstatus",
   "Run the headless sweep explicitly to measure worker throughput, environment learning signals and held-out policy quality.": "Führe den Headless-Sweep ausdrücklich aus, um Worker-Durchsatz, Lernsignale der Umgebungen und die Qualität der zurückgehaltenen Policy zu messen.",

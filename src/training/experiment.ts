@@ -32,7 +32,7 @@ export interface HeadlessExperimentOptions {
   readonly evaluationSeeds: number;
   /** Episodes that run at the same time (one worker process each). Default 1. */
   readonly workers?: number;
-  /** The curriculum selected by the benchmark; omitted for the standard full curriculum. */
+  /** An optional curriculum override; omitted for the standard full curriculum. */
   readonly stages?: readonly CurriculumStage[];
   readonly logger?: { info(obj: unknown, msg?: string): void };
 }

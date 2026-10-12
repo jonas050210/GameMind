@@ -23,14 +23,16 @@ export const minecraftMineableBlockNames = [
   "deepslate_copper_ore",
   "iron_ore",
   "deepslate_iron_ore",
+  "diamond_ore",
+  "deepslate_diamond_ore",
 ] as const;
 
 export type MineableMinecraftBlock = (typeof minecraftMineableBlockNames)[number];
 
 export interface MinecraftMiningRequirement {
   readonly drop: string;
-  /** 0 = any hand, 1 = wooden pickaxe or better, 2 = stone pickaxe or better. */
-  readonly minPickaxeTier: 0 | 1 | 2;
+  /** 0 = hand, 1 = wood, 2 = stone, 3 = iron, 4 = diamond/netherite. */
+  readonly minPickaxeTier: 0 | 1 | 2 | 3 | 4;
   /** True when a pickaxe (not a hand) is needed at all, even for a soft drop. */
   readonly requiresPickaxe: boolean;
   /** Approximate seconds to dig with a correctly tiered wooden pickaxe. */
@@ -56,6 +58,8 @@ export const minecraftMiningRequirements: Readonly<Record<MineableMinecraftBlock
   deepslate_copper_ore: { drop: "raw_copper", minPickaxeTier: 2, requiresPickaxe: true, baseSeconds: 16, usefulFor: ["tools"] },
   iron_ore: { drop: "raw_iron", minPickaxeTier: 2, requiresPickaxe: true, baseSeconds: 15, usefulFor: ["tools", "armor"] },
   deepslate_iron_ore: { drop: "raw_iron", minPickaxeTier: 2, requiresPickaxe: true, baseSeconds: 16, usefulFor: ["tools", "armor"] },
+  diamond_ore: { drop: "diamond", minPickaxeTier: 3, requiresPickaxe: true, baseSeconds: 15, usefulFor: ["tools", "armor"] },
+  deepslate_diamond_ore: { drop: "diamond", minPickaxeTier: 3, requiresPickaxe: true, baseSeconds: 16, usefulFor: ["tools", "armor"] },
 };
 
 /** Unique, explicit item drops produced by the mining allowlist; pickup remains finite and never accepts arbitrary names. */
@@ -71,6 +75,7 @@ export const minecraftMiningDropNames = [
   "coal",
   "raw_copper",
   "raw_iron",
+  "diamond",
 ] as const;
 
 /** Blocks that may be placed from inventory by the shelter skill. */

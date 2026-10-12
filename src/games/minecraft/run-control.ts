@@ -115,8 +115,6 @@ export interface ControlCenterSource {
   readonly roadmap?: import("../../roadmap/service.js").RoadmapService | null;
   /** Operator-entered world seed (manual; never auto-detected). */
   readonly worldSeed?: import("./world-seed.js").WorldSeedStore | null;
-  /** Training and evaluation as separate processes; null when the host has no training support. */
-  readonly training?: import("../../training/manager.js").TrainingControl | null;
 }
 
 const BAND_LABELS = ["safety", "survival", "progress"] as const;
@@ -148,6 +146,7 @@ export function goalProgress(
   if (task.kind === "build_shelter") {
     return { have: shelterCardinalSolidCount(state), of: 4, unit: "closed sides" };
   }
+  if (task.kind === "excavate_volume" || task.kind === "build_house" || task.kind === "farm_wheat") return null;
   const item =
     task.kind === "gather_resource"
       ? task.resourceName
@@ -328,7 +327,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
     safety,
     control,
     learner,
-    training: source.training ?? null,
     worldSeed: source.worldSeed ?? null,
     advertisedCapabilities: runtime.adapter.capabilities.map((capability) => capability.name),
     combatSwitchAvailable: typeof (runtime.adapter as unknown as CombatGateAdapter).setCombatAllowed === "function",
@@ -418,18 +416,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
     },
-    async startTraining(options) {
-      if (!source.training) return { ok: false, message: "Training is not available in this host." };
-      return source.training.start(options ?? {});
-    },
-    async pauseTraining() {
-      if (!source.training) return { ok: false, message: "Training is not available in this host." };
-      return source.training.pause();
-    },
-    async resumeTraining() {
-      if (!source.training) return { ok: false, message: "Training is not available in this host." };
-      return source.training.resume();
-    },
     async refreshRoadmap() {
       if (!source.roadmap) return { ok: false, message: "The roadmap is not available in this host." };
       const snapshot = await source.roadmap.refresh();
@@ -438,14 +424,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
     async roadmapAction(payload) {
       if (!source.roadmap) return { ok: false, message: "The roadmap is not available in this host." };
       return source.roadmap.act(payload ?? {});
-    },
-    async stopTraining() {
-      if (!source.training) return { ok: false, message: "Training is not available in this host." };
-      return source.training.stop();
-    },
-    async evaluateTraining(checkpointId) {
-      if (!source.training) return { ok: false, message: "Training is not available in this host." };
-      return source.training.evaluate(checkpointId);
     },
     stopTask(reason) {
       if (!control.task) return { ok: false, message: "No task is running." };
@@ -858,7 +836,6 @@ export function createControlCenterSource(source: ControlCenterSource): {
               ?? "Entered by the operator. It is not auto-detected or checked against the server, so anything derived from it is a prediction until verified.",
           }
         : null,
-      training: source.training ? await source.training.snapshot() : null,
       roadmap: source.roadmap ? roadmapView(source.roadmap, source.metrics?.summary() ?? null) : null,
       library: {
         catalog: library.catalog,

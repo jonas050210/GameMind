@@ -27,7 +27,6 @@
           </summary>
           <nav id="tabs" class="tabs" role="tablist" aria-label="Sections">
             <button type="button" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview">Overview</button>
-            <button type="button" role="tab" id="tab-training" data-tab="training" aria-controls="panel-training">Training</button>
             <button type="button" role="tab" id="tab-bots" data-tab="bots" aria-controls="panel-bots">Bots</button>
             <button type="button" role="tab" id="tab-tasks" data-tab="tasks" aria-controls="panel-tasks">Tasks</button>
             <button type="button" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Tests &amp; Evaluation</button>
@@ -82,7 +81,6 @@
           <div class="grid two">
             <div id="ov-activity"></div>
             <div class="stack">
-              <div id="ov-training"></div>
               <div id="ov-evaluation"></div>
               <div id="ov-legend"></div>
             </div>
@@ -90,66 +88,7 @@
         </details>
       </section>
 
-      <!-- B. TRAINING -->
-      <section id="panel-training" class="panel" role="tabpanel" aria-labelledby="tab-training" hidden>
-        <div id="training-notice"></div>
-        <div class="grid two">
-          <div id="training-metrics"></div>
-          <div id="training-reward"></div>
-        </div>
-        <div class="grid two">
-          <section class="card" aria-labelledby="training-form-title">
-            <header class="card-head"><div><h3 id="training-form-title">Start or resume training</h3><p class="muted small" id="training-headless">Headless: runs on the offline simulator in its own process, with no rendering and no Minecraft client.</p></div></header>
-            <div class="card-body">
-              <form id="training-form" class="form" autocomplete="off" novalidate>
-                <fieldset>
-                  <legend>Folder</legend>
-                  <label for="training-directory">Training folder (inside the data folder)</label>
-                  <select id="training-directory" name="directory"></select>
-                  <input id="training-new-directory" name="newDirectory" type="text" maxlength="48" placeholder="new folder name, e.g. experiment-2" hidden />
-                  <p class="hint">One run per folder at a time; a lock file enforces it even across separate processes.</p>
-                </fieldset>
-                <fieldset>
-                  <legend>Run</legend>
-                  <div class="field-row">
-                    <div><label for="training-max-episodes">Episode budget</label><input id="training-max-episodes" name="maxEpisodes" type="number" min="1" max="5000" step="1" placeholder="default" /></div>
-                    <div><label for="training-minutes">Time budget (minutes)</label><input id="training-minutes" name="maxMinutes" type="number" min="1" max="1440" step="1" placeholder="none" /></div>
-                    <div><label for="training-episodes-per-stage">Episodes per stage</label><input id="training-episodes-per-stage" name="episodesPerStage" type="number" min="1" max="200" step="1" placeholder="8" /></div>
-                    <div><label for="training-explore">Exploration</label><input id="training-explore" name="explore" type="number" min="0" max="1" step="0.05" placeholder="0.15" /></div>
-                  </div>
-                  <p class="hint">Exploration is the share of eligible decisions where training tries an alternative, so the learner can see how it would have gone. 0 is greedy.</p>
-                </fieldset>
-                <fieldset>
-                  <legend>Curriculum stages</legend>
-                  <div id="training-stages" class="check-grid"></div>
-                  <p class="hint">Stages can only be chosen for a new or fresh run: a saved run keeps its own.</p>
-                </fieldset>
-                <fieldset>
-                  <legend>If the folder already holds a run</legend>
-                  <label class="choice"><input type="radio" id="training-mode-resume" name="trainingMode" value="resume" checked /> <span><strong>Resume</strong> (default): continue from the saved state; keep all experience and checkpoints and add to them.</span></label>
-                  <label class="choice"><input type="radio" id="training-mode-fresh" name="trainingMode" value="fresh" /> <span><strong>Fresh run</strong>: archive the saved run (nothing is deleted) and start again at episode 0 with an empty policy. The consequences are listed on the right before anything happens.</span></label>
-                  <label class="choice confirm" id="training-confirm-row" hidden><input type="checkbox" id="training-confirm-fresh" name="confirmFresh" /> <span>I have read what a fresh run archives and I want to start fresh.</span></label>
-                </fieldset>
-                <div class="button-row">
-                  <button type="submit" class="btn primary" id="training-start">Start training</button>
-                  <button type="button" class="btn" id="training-pause" data-command="pauseTraining">Pause</button>
-                  <button type="button" class="btn" id="training-resume" data-command="resumeTraining">Resume paused run</button>
-                  <button type="button" class="btn warn" id="training-stop" data-command="stopTraining">Stop</button>
-                  <button type="button" class="btn" id="training-evaluate" data-command="evaluateTraining">Evaluate latest checkpoint</button>
-                </div>
-                <p id="training-start-hint" class="hint" aria-live="polite"></p>
-              </form>
-            </div>
-          </section>
-          <div id="training-preflight"></div>
-        </div>
-        <div id="training-eval"></div>
-        <div id="training-benchmarks"></div>
-        <div id="training-checkpoints"></div>
-        <div id="training-episodes-table"></div>
-      </section>
-
-      <!-- C. BOTS -->
+      <!-- B. BOTS -->
       <section id="panel-bots" class="panel" role="tabpanel" aria-labelledby="tab-bots" hidden>
         <div id="bots-list"></div>
         <div id="bots-testserver"></div>
@@ -204,7 +143,7 @@
         <div id="bots-history"></div>
       </section>
 
-      <!-- D. TASKS -->
+      <!-- C. TASKS -->
       <section id="panel-tasks" class="panel" role="tabpanel" aria-labelledby="tab-tasks" hidden>
         <div class="grid two">
           <div id="tasks-active"></div>
@@ -237,7 +176,7 @@
         <div id="tasks-progression"></div>
       </section>
 
-      <!-- E. TESTS & EVALUATION -->
+      <!-- D. TESTS & EVALUATION -->
       <section id="panel-evaluation" class="panel" role="tabpanel" aria-labelledby="tab-evaluation" hidden>
         <div id="eval-notice"></div>
         <div class="grid two">
@@ -258,7 +197,6 @@
           </section>
           <div id="eval-jobs"></div>
         </div>
-        <div id="eval-compare"></div>
         <div id="eval-offline-report"></div>
         <div class="live-zone">
           <div id="eval-live"></div>
@@ -290,7 +228,7 @@
         <div id="roadmap-items"></div>
       </section>
 
-      <!-- F. LEARNING & POLICY -->
+      <!-- E. LEARNING & POLICY -->
       <section id="panel-learning" class="panel" role="tabpanel" aria-labelledby="tab-learning" hidden>
         <div class="grid two">
           <div id="learn-store"></div>
@@ -300,12 +238,11 @@
         <div id="learn-contexts"></div>
         <div class="grid two">
           <div id="learn-failures"></div>
-          <div id="learn-checkpoints"></div>
         </div>
         <div id="learn-runs"></div>
       </section>
 
-      <!-- G. WORLD MEMORY & EVENTS -->
+      <!-- F. WORLD MEMORY & EVENTS -->
       <section id="panel-memory" class="panel" role="tabpanel" aria-labelledby="tab-memory" hidden>
         <div class="grid two">
           <div id="mem-identity"></div>
