@@ -62,7 +62,9 @@ test("Ollama output is rejected when it claims or promises Minecraft actions", a
     "Du darfst jetzt pflanzen.",
     "完成了。",
   ];
+  // A high rejection limit keeps every pattern exercised; the pause itself is tested separately.
   const responder = new OllamaChatResponder({
+    maxConsecutiveRejections: 100,
     fetcher: async () => jsonResponse(replies.shift() ?? "Fallback"),
   });
   while (replies.length > 0) {
@@ -118,6 +120,7 @@ test("unavailable Ollama is time-bounded and cooldown prevents repeated requests
     let calls = 0;
     const responder = new OllamaChatResponder({
       timeoutMs: 100,
+      coldTimeoutMs: 100,
       unavailableCooldownMs: 1_000,
       now: () => now,
       fetcher: async (_input, init) => {
@@ -165,4 +168,69 @@ test("environment factory defaults to the small qwen model and validates bounded
   assert.ok(responder instanceof OllamaChatResponder);
   assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_TIMEOUT_MS: "99999" }), /timeout/);
   assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_COOLDOWN_MS: "0" }), /cooldown/);
+  assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_COLD_TIMEOUT_MS: "999999" }), /cold-start timeout/);
+  assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_MAX_REJECTIONS: "0" }), /rejection limit/);
+});
+
+test("the cold-start timeout only applies until the first request has completed", async () => {
+  // The production request timeout is deliberately unref'd; keep this isolated test process open.
+  const keepAlive = setInterval(() => undefined, 1_000);
+  try {
+    let hang = false;
+    const responder = new OllamaChatResponder({
+      timeoutMs: 150,
+      coldTimeoutMs: 5_000,
+      unavailableCooldownMs: 1_000,
+      fetcher: async (_input, init) => {
+        if (!hang) return jsonResponse("Use help to see the available commands.");
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        });
+      },
+    });
+    assert.ok(await responder.reply("help"), "the first request completes and consumes the cold budget");
+    hang = true;
+    const started = Date.now();
+    assert.equal(await responder.reply("help again"), null);
+    assert.ok(Date.now() - started < 2_000, "later requests are bounded by the short timeout, not the cold one");
+    assert.match(responder.unavailableReason() ?? "", /did not answer within 150 ms/);
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test("an unreadable helper explains itself: missing model, dead server, healthy session", async () => {
+  const missingModel = new OllamaChatResponder({
+    fetcher: async () => jsonResponse("model 'qwen3:0.6b' not found", 404),
+  });
+  assert.equal(await missingModel.reply("help"), null);
+  assert.match(missingModel.unavailableReason() ?? "", /not installed/);
+  assert.match(missingModel.unavailableReason() ?? "", /ollama pull qwen3:0\.6b/);
+
+  const deadServer = new OllamaChatResponder({
+    baseUrl: "http://127.0.0.1:11434",
+    fetcher: async () => { throw new TypeError("fetch failed"); },
+  });
+  assert.equal(await deadServer.reply("help"), null);
+  assert.match(deadServer.unavailableReason() ?? "", /127\.0\.0\.1:11434 is not reachable/);
+
+  const healthy = new OllamaChatResponder({ fetcher: async () => jsonResponse("Send hilfe for the commands.") });
+  assert.ok(await healthy.reply("help"));
+  assert.equal(healthy.unavailableReason(), null, "a healthy session carries no reason");
+});
+
+test("answers the safety filter keeps refusing pause the helper for the session", async () => {
+  let calls = 0;
+  const responder = new OllamaChatResponder({
+    maxConsecutiveRejections: 3,
+    fetcher: async () => {
+      calls += 1;
+      return jsonResponse("I built the house for you.");
+    },
+  });
+  for (let index = 0; index < 3; index += 1) assert.equal(await responder.reply("Can you help?"), null);
+  assert.equal(calls, 3);
+  assert.equal(await responder.reply("Can you help?"), null);
+  assert.equal(calls, 3, "the paused helper stops calling the model instead of paying the timeout again");
+  assert.match(responder.unavailableReason() ?? "", /refused 3 times in a row by the safety filter/);
 });

@@ -35,6 +35,8 @@ The launcher checks Node.js 22+, project dependencies, the project path, an exis
 | `python3 main.py --control-center --no-connect` | Starts only the optional Control Center; connect from its **Bots** tab later |
 | `python3 main.py` | Persistent live Minecraft connection to the configured/default host; use only when explicitly intended and approved |
 | `python3 main.py --host HOST --port PORT --username BOT` | Persistent live connection to the explicitly named server/profile |
+| `python3 main.py --port 25524` | Same, with the default host: connects to the Minecraft server on port 25524 (`--port` is always the **Minecraft** port, `MINECRAFT_PORT` sets the default; the dashboard uses `--control-port`) |
+| `python3 main.py --port 25524 --control-center` | Connects to the server on 25524 and opens the Control Center (dashboard port `--control-port`, default 8787) |
 | `python3 main.py --task gather-logs --resource oak_log --count 2 --host HOST --port PORT` | Starts the bounded task first, then stays connected; this is a live-world command |
 | `python3 main.py --no-autonomy --host HOST --port PORT` | Connects live but accepts only explicit operator-started work; it still connects to Minecraft |
 | `python3 main.py -- --help` | Passes help through to the TypeScript CLI |
@@ -502,7 +504,7 @@ Environment variables may set connection defaults:
 - `GAMEMIND_TRACE_DIR` (default `data/traces`)
 - `GAMEMIND_LEARNING_DIR` (default `data/learning`)
 - `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the optional dashboard binds this interface)
-- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`), `GAMEMIND_OLLAMA_MODEL` (default `qwen3:0.6b`), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`) and `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`)
+- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`), `GAMEMIND_OLLAMA_MODEL` (default `qwen3:0.6b`), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
 - `GAMEMIND_LITEMATICA_BRIDGE_TOKEN` (required only for the optional review receiver; at least 32 UTF-8 bytes), `GAMEMIND_LITEMATICA_BRIDGE_HOST` (default `127.0.0.1`) and `GAMEMIND_LITEMATICA_BRIDGE_PORT` (default `39990`)
 - `GAMEMIND_NODE` or `NODE` (optional; the Node.js executable `python3 main.py` should run, version-checked before use)
 - `GAMEMIND_LOG_LEVEL` (the training CLI's log level, default `info`) and `LOG_LEVEL` (the agent's own log level, default `info`)
@@ -529,9 +531,31 @@ export MINECRAFT_OPERATOR="YourExactMinecraftUsername"
 
 No operator name or Ollama endpoint is configured by default. Do not run a live command until you have separately approved connecting to the specified server.
 
-Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is optional and prompt-constrained to brief English/German replies; it has a short timeout and never approves or issues actions. With no Ollama response, a deterministic fallback is used. The model is recommended at 0.6B parameters; do not use the model as a safety authority.
+Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is optional and prompt-constrained to brief English/German replies; it never approves or issues actions. With no Ollama response, a deterministic fallback is used. The model is recommended at 0.6B parameters; do not use the model as a safety authority.
 
-The current project grammar includes `status`, `help`, `stop`, `hold`, `follow me`/`folge mir`, `come`/`komm`, allowlisted resource requests, and bounded building/farm/excavation intents. Project approvals are time-limited and fail closed:
+If the helper cannot answer, the bot says so once in chat with the reason and keeps working with the fixed commands:
+
+- no Ollama server reachable → the bot notes that the optional chat helper is not ready and that `help` lists the commands;
+- model not installed (`ollama pull qwen3:0.6b` missing) → the note names the model and the `ollama pull` command;
+- answers the safety filter keeps refusing → the helper pauses for the session instead of paying the timeout on every message.
+
+Typo tolerance: a small typo in a short control word is corrected deterministically (`hikfe` → `hilfe`, `folg mir` → `folge mir`, `stoppp` → `stopp`), so it never has to guess its way through the language model. Ordinary conversation stays conversation.
+
+The current project grammar includes `status`, `help`/`hilfe`/`befehle`/`commands`, `stop`, `hold`, `follow me`/`folge mir`, `come`/`komm`, allowlisted resource requests, and bounded building/farm/excavation intents. `hilfe`/`help` answers with one short chat line per command group:
+
+```text
+Befehle: status | hilfe | stopp | bleib | folge mir | komm
+Ressourcen: hol/sammle/miniere [Anzahl] Stein, Eisen, Kohle, Kupfer, Holz, Diamanten (max 64)
+Craften: craft <Werkzeug>, z. B. craft Steinspitzhacke
+Bauen: baue Starterhaus [bei x y z] - feste 5×5, fragt vor Sammeln und Bau
+Planung: plane Haus A/B/C - reiner Entwurf aus Blöcken, Schichten und Material, kein Bau
+Farm: pflanze Weizenfeld [BxT] [bei x y z] - max 25×50 auf bewässertem Ackerboden
+Graben: grabe BxHxT [bei x y z] - max 10×10×10, hier oder bei Koordinaten
+Bestätigung: ja / nein - jeder Bau-, Grab- und Farmauftrag braucht Ja/Nein
+Unbekannte Eingaben werden kurz beantwortet; hilfe zeigt diese Liste
+```
+
+A message that is not a command is answered with the most-used commands instead of only pointing at `hilfe` (in the language the message was written in). Project approvals are time-limited and fail closed:
 
 - Excavation is limited to **10×10×10 (1,000 cells)**; it surveys and stops at unknown/unsafe cells rather than clearing them.
 - Wheat planting is limited to **25×50 (1,250 cells)** on existing hydrated farmland with enough seeds. It does not till soil, add water, or clear the area.

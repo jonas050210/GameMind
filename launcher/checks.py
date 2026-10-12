@@ -291,8 +291,10 @@ def check_optional_tools(
     system: str,
     which: Callable[[str], Optional[str]] = shutil.which,
     run: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    model: str = "qwen3:0.6b",
 ) -> list[Tool]:
-    """Java (only needed by a Minecraft client or server on this machine) and Docker (needed for the offline test server).
+    """Java (only needed by a Minecraft client or server on this machine), Docker (needed for the offline test
+    server) and Ollama (only needed by the optional local chat helper).
 
     Each probe has a short timeout, so a broken install cannot hang the launcher.
     """
@@ -345,6 +347,51 @@ def check_optional_tools(
                 version=docker_version,
                 needed_for="the offline test server",
                 hint="Install Docker Desktop with WSL integration, then start it.",
+            )
+        )
+
+    wanted = model.split(":", 1)[0] or model
+    ollama = find_executable(["ollama.exe", "ollama"] if windows else ["ollama"], which)
+    if not ollama:
+        tools.append(
+            Tool(
+                "Ollama",
+                found=False,
+                version=None,
+                needed_for="the optional local chat helper",
+                hint="Optional: install Ollama from ollama.com and run 'ollama pull " + model + "'. The deterministic chat commands work without it.",
+            )
+        )
+        return tools
+    installed: list[str] = []
+    try:
+        result = run([ollama, "list"], capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode == 0:
+            for line in (result.stdout or "").splitlines()[1:]:
+                columns = line.split()
+                if columns:
+                    installed.append(columns[0])
+    except (OSError, subprocess.SubprocessError):
+        installed = []
+    matching = [name for name in installed if name == model or name.split(":", 1)[0] == wanted]
+    if matching:
+        tools.append(
+            Tool(
+                "Ollama",
+                found=True,
+                version=str(len(installed)) + " model(s), including " + matching[0],
+                needed_for="the optional local chat helper",
+                hint="",
+            )
+        )
+    else:
+        tools.append(
+            Tool(
+                "Ollama",
+                found=False,
+                version="installed, no matching chat model",
+                needed_for="the optional local chat helper",
+                hint="Install the small helper model: ollama pull " + model + ". The deterministic chat commands work without it.",
             )
         )
     return tools

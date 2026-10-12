@@ -270,6 +270,24 @@ test("the Overview is an operator summary with navigation and secondary detail c
   });
 });
 
+test("the Overview carries the chat command reference, in English and in German", async () => {
+  await withPage(server(idleSession), async ({ page }) => {
+    // The reference is secondary detail: it stays collapsed until the operator asks for it.
+    assert.doesNotMatch(page.visibleText("panel-overview"), /Chat commands/);
+    page.click("overview-details-summary");
+    const chat = page.visibleText("ov-chat");
+    assert.match(chat, /Chat commands/);
+    assert.match(chat, /plan house A\/B\/C/);
+    assert.match(chat, /max 10\u00d710\u00d710/);
+    assert.match(chat, /MINECRAFT_OPERATOR/);
+
+    page.click("lang-de");
+    assert.match(page.visibleText("ov-chat"), /Chatbefehle/);
+    assert.match(page.visibleText("ov-chat"), /plane Haus A\/B\/C/);
+    assert.match(page.visibleText("ov-chat"), /feste 5\u00d75/);
+  });
+});
+
 test("a live session is labelled live and carries no simulated banner", async () => {
   const stub = server((snapshot) => {
     idleSession(snapshot);

@@ -318,6 +318,8 @@ a { color: var(--accent); }
 .roadmap li { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin: 0; padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius-sm); }
 .live-zone { border: 1px dashed var(--warn); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 14px; background: color-mix(in srgb, var(--warn-soft) 40%, transparent); }
 .legend-list { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.chat-commands { list-style: none; padding: 0; margin: 0 0 10px; display: flex; flex-direction: column; gap: 6px; font-size: 0.92rem; }
+.chat-commands li { padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius, 6px); color: var(--text-2); overflow-wrap: anywhere; }
 .legend-list li { display: grid; grid-template-columns: 112px 1fr; gap: 10px; align-items: baseline; margin: 0; }
 .explanations details { border-top: 1px solid var(--border); padding: 8px 0; }
 .explanations details:first-child { border-top: 0; }

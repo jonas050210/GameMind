@@ -20,7 +20,7 @@ import type { CompanionController } from "./companion-controller.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { SkillRuntime } from "../../core/skill-runtime.js";
 import { verifySkillPostcondition } from "./skill-contracts.js";
-import { parseMinecraftChatCommand, describeMinecraftChatHelp, type MinecraftChatCommand } from "./chat-commands.js";
+import { parseMinecraftChatCommand, describeMinecraftChatHelp, describeUnknownChatFallback, describeChatHelperUnavailable, detectChatLanguage, type MinecraftChatCommand } from "./chat-commands.js";
 import { minecraftCraftTaskItemNames, minecraftFoodNames, minecraftPickupNames, minecraftLogNames } from "./capabilities.js";
 import { generateLargeHouseBlueprint } from "./house-blueprint.js";
 import { bestPickaxeTier, minecraftMiningRequirements } from "./mining.js";
@@ -152,6 +152,7 @@ export class MinecraftChatController {
   private deathPosition: { readonly x: number; readonly y: number; readonly z: number } | null = null;
   private deliveryGeneration = 0;
   private questionTimer: NodeJS.Timeout | null = null;
+  private helperUnavailableNoted = false;
 
   constructor(private readonly options: MinecraftChatControllerOptions) {
     if (!/^[A-Za-z0-9_]{3,16}$/.test(options.operatorUsername)) {
@@ -227,7 +228,14 @@ export class MinecraftChatController {
 
   private say(message: string): void {
     if (this.stopped) return;
-    let remainder = message.replace(/[\r\n\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
+    // Mineflayer chat has no line breaks: a multi-line reply becomes one chat message per line, so a
+    // command list arrives as a readable list instead of a run-on sentence.
+    for (const line of message.split(/\r\n|\r|\n/)) this.sayChunks(line);
+  }
+
+  private sayChunks(line: string): void {
+    if (this.stopped) return;
+    let remainder = line.replace(/[\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim();
     if (!remainder) return;
     const chunks: string[] = [];
     while (remainder.length > CHAT_REPLY_MAX_CHARS) {
@@ -249,6 +257,18 @@ export class MinecraftChatController {
   private clearQuestionTimer(): void {
     if (this.questionTimer) clearTimeout(this.questionTimer);
     this.questionTimer = null;
+  }
+
+  /**
+   * Tells the operator once per session why the optional local helper is silent (no Ollama server, missing
+   * model, or answers the safety filter refused), so terse deterministic replies do not look like a bug.
+   */
+  private noteChatHelperUnavailable(responder: MinecraftChatResponder, language: "de" | "en"): void {
+    if (this.helperUnavailableNoted) return;
+    const reason = responder.unavailableReason?.();
+    if (!reason) return;
+    this.helperUnavailableNoted = true;
+    this.say(describeChatHelperUnavailable(language, reason));
   }
 
   private scheduleQuestionTimeout(): void {
@@ -299,17 +319,26 @@ export class MinecraftChatController {
     await this.expirePendingQuestionIfNeeded();
     const command = parseMinecraftChatCommand(raw);
     if (!command) {
+      const language = detectChatLanguage(raw, "de");
       const responder = this.options.chatResponder;
-      if (!responder) return;
-      const reply = await responder.reply(raw);
-      if (!this.stopped) this.say(reply ?? "Ich habe das nicht sicher verstanden. Sende 'hilfe' für die erlaubten Befehle.");
+      if (responder) {
+        const reply = await responder.reply(raw);
+        if (this.stopped) return;
+        if (reply) {
+          this.say(reply);
+          return;
+        }
+      }
+      // No model answer (none configured, unavailable, or refused): the deterministic answer still
+      // teaches the operator the commands instead of only pointing at 'hilfe'.
+      for (const line of describeUnknownChatFallback(language)) this.say(line);
+      if (responder) this.noteChatHelperUnavailable(responder, language);
       return;
     }
     if (command.kind === "confirm") return this.handleConfirmation(command.yes);
     if (command.kind === "mode") return this.handleMode(command.mode);
     if (command.kind === "help") {
-      const language = /\b(?:hilfe|stopp|bleib|folge|komm|baue|pflanze|grabe|weizen)\b/i.test(raw) ? "de" : "en";
-      this.say(describeMinecraftChatHelp(language));
+      for (const line of describeMinecraftChatHelp(detectChatLanguage(raw, "en"))) this.say(line);
       return;
     }
     if (command.kind === "resource") {

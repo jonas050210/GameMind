@@ -592,9 +592,12 @@ class OptionalToolsTest(unittest.TestCase):
 
     def test_missing_tools_are_reported_but_never_block(self):
         tools = checks.check_optional_tools("Linux", which=lambda name: None, run=self._run({}))
-        self.assertEqual([t.name for t in tools], ["Java", "Docker"])
+        self.assertEqual([t.name for t in tools], ["Java", "Docker", "Ollama"])
         self.assertTrue(all(not t.found for t in tools))
         self.assertIn("not found", tools[1].render())
+        ollama = tools[2]
+        self.assertIn("ollama pull qwen3:0.6b", ollama.hint)
+        self.assertIn("deterministic chat commands work without it", ollama.hint)
 
     def test_java_version_is_read_from_stderr(self):
         which = {"java": "/usr/bin/java", "docker": None}
@@ -626,6 +629,39 @@ class OptionalToolsTest(unittest.TestCase):
         )
         self.assertTrue(tools[1].found)
         self.assertIn("27.3.1", tools[1].version)
+
+    def test_ollama_with_the_helper_model_is_found(self):
+        which = {"ollama": "/usr/bin/ollama"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"ollama": (0, "NAME ID SIZE MODIFIED\nqwen3:0.6b abc 397 MB 2 weeks ago\nllama3:8b def 4.7 GB 1 month ago\n", "")}),
+        )
+        ollama = tools[2]
+        self.assertTrue(ollama.found)
+        self.assertIn("qwen3:0.6b", ollama.version)
+
+    def test_ollama_without_the_helper_model_says_what_to_pull(self):
+        which = {"ollama": "/usr/bin/ollama"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"ollama": (0, "NAME ID SIZE MODIFIED\nllama3:8b def 4.7 GB 1 month ago\n", "")}),
+        )
+        ollama = tools[2]
+        self.assertFalse(ollama.found)
+        self.assertIn("ollama pull qwen3:0.6b", ollama.hint)
+
+    def test_a_configured_model_name_decides_what_the_ollama_check_looks_for(self):
+        which = {"ollama": "/usr/bin/ollama"}
+        tools = checks.check_optional_tools(
+            "Linux",
+            which=lambda name: which.get(name),
+            run=self._run({"ollama": (0, "NAME ID SIZE MODIFIED\nqwen3:1.7b abc 1.1 GB 1 week ago\n", "")}),
+            model="qwen3:1.7b",
+        )
+        self.assertTrue(tools[2].found)
+        self.assertIn("qwen3:1.7b", tools[2].version)
 
 
 if __name__ == "__main__":

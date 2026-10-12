@@ -184,6 +184,35 @@ function legend() {
   );
 }
 
+/** The same command groups the bot answers in Minecraft chat, as a reference on the page. */
+const CHAT_COMMAND_GROUPS = [
+  "status | stop | hold | follow me | come",
+  "Resources: get/mine [count] stone, iron, coal, copper, wood, diamond (max 64)",
+  "Crafting: craft <tool>, for example craft stone pickaxe",
+  "Build: build starter house [at x y z] - fixed 5×5, asks before gathering and building",
+  "Plan: plan house A/B/C - relative block, layer and material preview only, never a build",
+  "Farm: plant wheat field [WxD] [at x y z] - max 25×50 on hydrated farmland",
+  "Dig: dig WxHxD [at x y z] - max 10×10×10, here or at coordinates",
+  "Confirm: yes / no - every build, dig and farm job needs a yes/no answer",
+];
+
+function chatCommands() {
+  return card(
+    { title: "Chat commands", subtitle: "What the bot accepts in Minecraft chat" },
+    h("ul", { class: "chat-commands" }, CHAT_COMMAND_GROUPS.map((line) => h("li", null, line))),
+    h(
+      "p",
+      { class: "muted small" },
+      "Send with or without /gamemind; a small typo in a control word is corrected. An unknown message gets a short answer with the most-used commands.",
+    ),
+    h(
+      "p",
+      { class: "muted small" },
+      "Chat control needs MINECRAFT_OPERATOR set to your exact in-game name; messages from anyone else are ignored.",
+    ),
+  );
+}
+
 export function renderOverview(ctx) {
   const { snapshot, now } = ctx;
   
@@ -203,6 +232,7 @@ export function renderOverview(ctx) {
     // === PANEL 4: BENCHMARK & EVALUATION ===
     "ov-evaluation": evaluationSummary(snapshot),
     "ov-legend": legend(),
+    "ov-chat": chatCommands(),
   };
 }
 

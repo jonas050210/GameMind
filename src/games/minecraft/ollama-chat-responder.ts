@@ -3,13 +3,19 @@ import type { Logger } from "pino";
 export interface MinecraftChatResponder {
   /** Returns a short, non-actionable chat reply, or null when unavailable or unnecessary. */
   reply(message: string): Promise<string | null>;
+  /** Why the helper cannot answer right now (missing server, missing model, refused answers), or null when healthy. */
+  unavailableReason?(): string | null;
 }
 
 export interface OllamaChatResponderOptions {
   readonly baseUrl?: string;
   readonly model?: string;
   readonly timeoutMs?: number;
+  /** Longer budget for the very first request, while Ollama loads the model into memory. */
+  readonly coldTimeoutMs?: number;
   readonly unavailableCooldownMs?: number;
+  /** After this many answers in a row that the safety filter refuses, the helper pauses for the session. */
+  readonly maxConsecutiveRejections?: number;
   readonly logger?: Logger;
   readonly fetcher?: typeof fetch;
   readonly now?: () => number;
@@ -23,7 +29,9 @@ interface OllamaChatResponse {
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "qwen3:0.6b";
 const DEFAULT_TIMEOUT_MS = 1_800;
+const DEFAULT_COLD_TIMEOUT_MS = 8_000;
 const DEFAULT_COOLDOWN_MS = 30_000;
+const DEFAULT_MAX_REJECTIONS = 5;
 const MAX_REPLY_CHARS = 180;
 const MAX_PROMPT_CHARS = 500;
 const NON_ENGLISH_GERMAN_SCRIPT = /[\p{Script=Greek}\p{Script=Cyrillic}\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Devanagari}\p{Script=Thai}\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
@@ -90,24 +98,33 @@ function cleanReply(value: string): string | null {
 
 /**
  * Optional local Ollama chat helper. It is never used for recognized commands, approval decisions, movement,
- * safety, or block geometry. Requests are single-flight, bounded by a short timeout, and circuit-broken after
- * an unavailable Ollama server so a missing model cannot stall ordinary chat indefinitely.
+ * safety, or block geometry. Requests are single-flight; the first gets a longer budget while the model loads,
+ * an unavailable server is circuit-broken so it cannot stall ordinary chat, and answers the safety filter keeps
+ * refusing pause the helper for the session instead of paying the timeout on every message.
  */
 export class OllamaChatResponder implements MinecraftChatResponder {
   private readonly baseUrl: string;
   private readonly model: string;
   private readonly timeoutMs: number;
+  private readonly coldTimeoutMs: number;
   private readonly cooldownMs: number;
+  private readonly maxRejections: number;
   private readonly fetcher: typeof fetch;
   private readonly now: () => number;
   private unavailableUntil = 0;
+  private unavailable: string | null = null;
   private inFlight = false;
+  private completedRequest = false;
+  private consecutiveRejections = 0;
+  private paused = false;
 
   constructor(private readonly options: OllamaChatResponderOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.model = options.model ?? DEFAULT_MODEL;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.coldTimeoutMs = options.coldTimeoutMs ?? DEFAULT_COLD_TIMEOUT_MS;
     this.cooldownMs = options.unavailableCooldownMs ?? DEFAULT_COOLDOWN_MS;
+    this.maxRejections = options.maxConsecutiveRejections ?? DEFAULT_MAX_REJECTIONS;
     this.fetcher = options.fetcher ?? fetch;
     this.now = options.now ?? Date.now;
 
@@ -122,18 +139,36 @@ export class OllamaChatResponder implements MinecraftChatResponder {
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 100 || this.timeoutMs > 10_000) {
       throw new Error("Ollama timeout must be an integer from 100 to 10000 ms.");
     }
+    if (!Number.isInteger(this.coldTimeoutMs) || this.coldTimeoutMs < 100 || this.coldTimeoutMs > 60_000) {
+      throw new Error("Ollama cold-start timeout must be an integer from 100 to 60000 ms.");
+    }
     if (!Number.isInteger(this.cooldownMs) || this.cooldownMs < 1_000 || this.cooldownMs > 300_000) {
       throw new Error("Ollama unavailable cooldown must be an integer from 1000 to 300000 ms.");
     }
+    if (!Number.isInteger(this.maxRejections) || this.maxRejections < 1 || this.maxRejections > 100) {
+      throw new Error("Ollama rejection limit must be an integer from 1 to 100.");
+    }
+  }
+
+  /** Why the helper cannot answer right now, or null when the last exchange was healthy. */
+  unavailableReason(): string | null {
+    return this.unavailable;
   }
 
   async reply(message: string): Promise<string | null> {
     const text = message.trim().slice(0, MAX_PROMPT_CHARS);
     if (!text || this.inFlight || this.now() < this.unavailableUntil) return null;
+    if (this.paused) {
+      this.options.logger?.debug({ model: this.model }, "Local Ollama chat helper stays paused after repeated refusals; deterministic chat remains active");
+      return null;
+    }
 
     this.inFlight = true;
+    // Loading the model into memory is slower than one warm answer, so the first request gets the longer
+    // budget; a missing model is not mistaken for an outage and answered with the deterministic fallback.
+    const timeoutMs = this.completedRequest ? this.timeoutMs : Math.max(this.timeoutMs, this.coldTimeoutMs);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error("Ollama reply timed out.")), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(new Error("Ollama reply timed out.")), timeoutMs);
     timer.unref?.();
     try {
       const response = await this.fetcher(`${this.baseUrl}/api/chat`, {
@@ -153,16 +188,40 @@ export class OllamaChatResponder implements MinecraftChatResponder {
       });
       if (!response.ok) {
         this.unavailableUntil = this.now() + this.cooldownMs;
-        this.options.logger?.warn({ status: response.status, model: this.model }, "Local Ollama chat helper is unavailable; deterministic chat remains active");
+        this.unavailable = response.status === 404
+          ? `the model '${this.model}' is not installed on the Ollama server (run: ollama pull ${this.model})`
+          : `the Ollama server answered with HTTP ${response.status}`;
+        this.options.logger?.warn({ status: response.status, model: this.model, reason: this.unavailable }, "Local Ollama chat helper is unavailable; deterministic chat remains active");
         return null;
       }
       const payload = await response.json() as OllamaChatResponse;
+      this.completedRequest = true;
       const content = payload.message?.content;
-      return typeof content === "string" ? cleanReply(content) : null;
+      if (typeof content !== "string") {
+        this.unavailable = "it answered without a message";
+        return null;
+      }
+      const cleaned = cleanReply(content);
+      if (cleaned === null) {
+        this.consecutiveRejections += 1;
+        this.unavailable = `its last ${this.consecutiveRejections} answer(s) were refused by the safety filter`;
+        if (this.consecutiveRejections >= this.maxRejections) {
+          this.paused = true;
+          this.unavailable = `its answers were refused ${this.consecutiveRejections} times in a row by the safety filter, so it is paused for this session`;
+          this.options.logger?.warn({ model: this.model, rejections: this.consecutiveRejections }, "Local Ollama chat helper paused after repeated refusals; deterministic chat remains active");
+        }
+        return null;
+      }
+      this.consecutiveRejections = 0;
+      this.unavailable = null;
+      return cleaned;
     } catch (error) {
       this.unavailableUntil = this.now() + this.cooldownMs;
+      this.unavailable = controller.signal.aborted
+        ? `it did not answer within ${timeoutMs} ms`
+        : `the Ollama server at ${this.baseUrl} is not reachable`;
       if (!controller.signal.aborted) {
-        this.options.logger?.warn({ err: error, model: this.model }, "Local Ollama chat helper failed; deterministic chat remains active");
+        this.options.logger?.warn({ err: error, model: this.model, reason: this.unavailable }, "Local Ollama chat helper failed; deterministic chat remains active");
       }
       return null;
     } finally {
@@ -177,12 +236,16 @@ export function ollamaChatResponderFromEnv(
   logger?: Logger,
 ): OllamaChatResponder {
   const timeout = env.GAMEMIND_OLLAMA_TIMEOUT_MS === undefined ? DEFAULT_TIMEOUT_MS : Number(env.GAMEMIND_OLLAMA_TIMEOUT_MS);
+  const coldTimeout = env.GAMEMIND_OLLAMA_COLD_TIMEOUT_MS === undefined ? DEFAULT_COLD_TIMEOUT_MS : Number(env.GAMEMIND_OLLAMA_COLD_TIMEOUT_MS);
   const cooldown = env.GAMEMIND_OLLAMA_COOLDOWN_MS === undefined ? DEFAULT_COOLDOWN_MS : Number(env.GAMEMIND_OLLAMA_COOLDOWN_MS);
+  const maxRejections = env.GAMEMIND_OLLAMA_MAX_REJECTIONS === undefined ? DEFAULT_MAX_REJECTIONS : Number(env.GAMEMIND_OLLAMA_MAX_REJECTIONS);
   return new OllamaChatResponder({
     baseUrl: env.GAMEMIND_OLLAMA_URL ?? DEFAULT_BASE_URL,
     model: env.GAMEMIND_OLLAMA_MODEL ?? DEFAULT_MODEL,
     timeoutMs: timeout,
+    coldTimeoutMs: coldTimeout,
     unavailableCooldownMs: cooldown,
+    maxConsecutiveRejections: maxRejections,
     ...(logger ? { logger } : {}),
   });
 }
