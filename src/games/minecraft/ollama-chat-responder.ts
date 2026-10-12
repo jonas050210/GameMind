@@ -16,6 +16,12 @@ export interface OllamaChatResponderOptions {
   readonly unavailableCooldownMs?: number;
   /** After this many answers in a row that the safety filter refuses, the helper pauses for the session. */
   readonly maxConsecutiveRejections?: number;
+  /**
+   * Whether the model may spend tokens on hidden reasoning before answering. Off by default for the
+   * qwen3 family: with a bounded 80-token budget, "thinking" would consume the whole answer and the
+   * operator would only ever see the deterministic fallback.
+   */
+  readonly think?: boolean;
   readonly logger?: Logger;
   readonly fetcher?: typeof fetch;
   readonly now?: () => number;
@@ -28,7 +34,7 @@ interface OllamaChatResponse {
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:11434";
 const DEFAULT_MODEL = "qwen3:0.6b";
-const DEFAULT_TIMEOUT_MS = 1_800;
+const DEFAULT_TIMEOUT_MS = 3_000;
 const DEFAULT_COLD_TIMEOUT_MS = 8_000;
 const DEFAULT_COOLDOWN_MS = 30_000;
 const DEFAULT_MAX_REJECTIONS = 5;
@@ -97,10 +103,11 @@ function cleanReply(value: string): string | null {
 }
 
 /**
- * Optional local Ollama chat helper. It is never used for recognized commands, approval decisions, movement,
- * safety, or block geometry. Requests are single-flight; the first gets a longer budget while the model loads,
- * an unavailable server is circuit-broken so it cannot stall ordinary chat, and answers the safety filter keeps
- * refusing pause the helper for the session instead of paying the timeout on every message.
+ * Optional local Ollama chat helper, off unless a model or URL is configured. It is never used for recognized
+ * commands, approval decisions, movement, safety, or block geometry. Requests are single-flight; the first gets
+ * a longer budget while the model loads, an unavailable server is circuit-broken so it cannot stall ordinary
+ * chat, and answers the safety filter keeps refusing pause the helper for the session instead of paying the
+ * timeout on every message.
  */
 export class OllamaChatResponder implements MinecraftChatResponder {
   private readonly baseUrl: string;
@@ -109,6 +116,7 @@ export class OllamaChatResponder implements MinecraftChatResponder {
   private readonly coldTimeoutMs: number;
   private readonly cooldownMs: number;
   private readonly maxRejections: number;
+  private readonly think: boolean | undefined;
   private readonly fetcher: typeof fetch;
   private readonly now: () => number;
   private unavailableUntil = 0;
@@ -125,6 +133,9 @@ export class OllamaChatResponder implements MinecraftChatResponder {
     this.coldTimeoutMs = options.coldTimeoutMs ?? DEFAULT_COLD_TIMEOUT_MS;
     this.cooldownMs = options.unavailableCooldownMs ?? DEFAULT_COOLDOWN_MS;
     this.maxRejections = options.maxConsecutiveRejections ?? DEFAULT_MAX_REJECTIONS;
+    // qwen3 thinks by default; a bounded answer budget cannot afford it. Other model families do not
+    // know the parameter, so it is only sent when it is actually decided.
+    this.think = options.think ?? (this.model.toLowerCase().startsWith("qwen3") ? false : undefined);
     this.fetcher = options.fetcher ?? fetch;
     this.now = options.now ?? Date.now;
 
@@ -179,6 +190,7 @@ export class OllamaChatResponder implements MinecraftChatResponder {
           model: this.model,
           stream: false,
           keep_alive: "5m",
+          ...(this.think === undefined ? {} : { think: this.think }),
           options: { temperature: 0.1, num_predict: 80, num_ctx: 1_024 },
           messages: [
             { role: "system", content: NAVIGATION_PROMPT },
@@ -231,10 +243,18 @@ export class OllamaChatResponder implements MinecraftChatResponder {
   }
 }
 
+/**
+ * Builds the helper from the environment, or null when it is not configured: without an explicit
+ * `GAMEMIND_OLLAMA_MODEL` or `GAMEMIND_OLLAMA_URL` the deterministic chat stands alone and no local
+ * model is contacted at all.
+ */
 export function ollamaChatResponderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   logger?: Logger,
-): OllamaChatResponder {
+): OllamaChatResponder | null {
+  const configured = [env.GAMEMIND_OLLAMA_MODEL, env.GAMEMIND_OLLAMA_URL]
+    .some((value) => value !== undefined && value.trim() !== "");
+  if (!configured) return null;
   const timeout = env.GAMEMIND_OLLAMA_TIMEOUT_MS === undefined ? DEFAULT_TIMEOUT_MS : Number(env.GAMEMIND_OLLAMA_TIMEOUT_MS);
   const coldTimeout = env.GAMEMIND_OLLAMA_COLD_TIMEOUT_MS === undefined ? DEFAULT_COLD_TIMEOUT_MS : Number(env.GAMEMIND_OLLAMA_COLD_TIMEOUT_MS);
   const cooldown = env.GAMEMIND_OLLAMA_COOLDOWN_MS === undefined ? DEFAULT_COOLDOWN_MS : Number(env.GAMEMIND_OLLAMA_COOLDOWN_MS);

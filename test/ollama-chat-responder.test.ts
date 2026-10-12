@@ -29,12 +29,14 @@ test("Ollama uses the bounded English/German navigation prompt and returns a sho
     model: string;
     stream: boolean;
     keep_alive: string;
+    think?: boolean;
     options: { num_predict: number; num_ctx: number };
     messages: Array<{ role: string; content: string }>;
   };
   assert.equal(body.model, "qwen3:0.6b");
   assert.equal(body.stream, false);
   assert.equal(body.keep_alive, "5m");
+  assert.equal(body.think, false, "qwen3 must not spend the bounded answer budget on hidden reasoning");
   assert.equal(body.options.num_predict, 80);
   assert.equal(body.options.num_ctx, 1_024);
   assert.equal(body.messages[0]?.role, "system");
@@ -163,13 +165,40 @@ test("requests are single-flight and invalid configuration fails before any requ
   assert.throws(() => new OllamaChatResponder({ model: "bad model" }), /model name/);
 });
 
-test("environment factory defaults to the small qwen model and validates bounded settings", () => {
-  const responder = ollamaChatResponderFromEnv({});
-  assert.ok(responder instanceof OllamaChatResponder);
-  assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_TIMEOUT_MS: "99999" }), /timeout/);
-  assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_COOLDOWN_MS: "0" }), /cooldown/);
-  assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_COLD_TIMEOUT_MS: "999999" }), /cold-start timeout/);
-  assert.throws(() => ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_MAX_REJECTIONS: "0" }), /rejection limit/);
+test("the environment factory is opt-in and validates bounded settings once configured", () => {
+  assert.equal(ollamaChatResponderFromEnv({}), null, "nothing configured means no helper: the deterministic chat stands alone");
+  assert.equal(ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_MODEL: "" }), null, "an empty value is not a configuration");
+  assert.equal(ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_URL: "  " }), null, "a blank URL is not a configuration");
+  assert.ok(ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_MODEL: "qwen3:1.7b" }) instanceof OllamaChatResponder);
+  assert.ok(ollamaChatResponderFromEnv({ GAMEMIND_OLLAMA_URL: "http://127.0.0.1:11434" }) instanceof OllamaChatResponder);
+  const configured = { GAMEMIND_OLLAMA_MODEL: "qwen3:1.7b" };
+  assert.throws(() => ollamaChatResponderFromEnv({ ...configured, GAMEMIND_OLLAMA_TIMEOUT_MS: "99999" }), /timeout/);
+  assert.throws(() => ollamaChatResponderFromEnv({ ...configured, GAMEMIND_OLLAMA_COOLDOWN_MS: "0" }), /cooldown/);
+  assert.throws(() => ollamaChatResponderFromEnv({ ...configured, GAMEMIND_OLLAMA_COLD_TIMEOUT_MS: "999999" }), /cold-start timeout/);
+  assert.throws(() => ollamaChatResponderFromEnv({ ...configured, GAMEMIND_OLLAMA_MAX_REJECTIONS: "0" }), /rejection limit/);
+});
+
+test("the think parameter is only sent for the qwen3 family", async () => {
+  let body: Record<string, unknown> = {};
+  const qwen = new OllamaChatResponder({
+    model: "qwen3:1.7b",
+    fetcher: async (_input, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse("Sende hilfe für die Befehle.");
+    },
+  });
+  assert.ok(await qwen.reply("Welche Befehle gibt es?"));
+  assert.equal(body.think, false);
+
+  const other = new OllamaChatResponder({
+    model: "llama3.2:3b",
+    fetcher: async (_input, init) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse("Send help for the commands.");
+    },
+  });
+  assert.ok(await other.reply("What can I do?"));
+  assert.equal("think" in body, false, "another model family is not sent a parameter it does not know");
 });
 
 test("the cold-start timeout only applies until the first request has completed", async () => {

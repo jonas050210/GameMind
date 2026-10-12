@@ -504,7 +504,7 @@ Environment variables may set connection defaults:
 - `GAMEMIND_TRACE_DIR` (default `data/traces`)
 - `GAMEMIND_LEARNING_DIR` (default `data/learning`)
 - `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the optional dashboard binds this interface)
-- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`), `GAMEMIND_OLLAMA_MODEL` (default `qwen3:0.6b`), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
+- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`; the helper stays **off** until this or `GAMEMIND_OLLAMA_MODEL` is set), `GAMEMIND_OLLAMA_MODEL` (no default; `qwen3:1.7b` recommended), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
 - `GAMEMIND_LITEMATICA_BRIDGE_TOKEN` (required only for the optional review receiver; at least 32 UTF-8 bytes), `GAMEMIND_LITEMATICA_BRIDGE_HOST` (default `127.0.0.1`) and `GAMEMIND_LITEMATICA_BRIDGE_PORT` (default `39990`)
 - `GAMEMIND_NODE` or `NODE` (optional; the Node.js executable `python3 main.py` should run, version-checked before use)
 - `GAMEMIND_LOG_LEVEL` (the training CLI's log level, default `info`) and `LOG_LEVEL` (the agent's own log level, default `info`)
@@ -515,28 +515,45 @@ For an offline-mode server, keep `MINECRAFT_AUTH=offline`. Use Microsoft authent
 
 Chat control is created only when `MINECRAFT_OPERATOR` is set to the **exact, case-sensitive in-game username** (3–16 letters, digits, or underscores). No username is configured by default. Messages from anyone else—including case-different look-alikes—are ignored. `status`, `stop`/`stopp`, and `hold`/`bleib` bypass model and queued work. Recognized commands are parsed deterministically; only unrecognized chat from the authorized username may be sent to Ollama.
 
-Optional local Ollama setup (not run by the launcher):
-
-```bash
-ollama pull qwen3:0.6b
-export GAMEMIND_OLLAMA_URL="http://127.0.0.1:11434" # use the address reachable from the GameMind process
-export GAMEMIND_OLLAMA_MODEL="qwen3:0.6b"
-```
-
 For a separately approved live session, set the authorized **human operator's** exact in-game name (not the bot account name):
 
 ```bash
 export MINECRAFT_OPERATOR="YourExactMinecraftUsername"
 ```
 
-No operator name or Ollama endpoint is configured by default. Do not run a live command until you have separately approved connecting to the specified server.
+No operator name is configured by default. Do not run a live command until you have separately approved connecting to the specified server.
 
-Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is optional and prompt-constrained to brief English/German replies; it never approves or issues actions. With no Ollama response, a deterministic fallback is used. The model is recommended at 0.6B parameters; do not use the model as a safety authority.
+#### The optional local chat helper (Ollama) — off by default
+
+The chat helper is **opt-in**: without `GAMEMIND_OLLAMA_MODEL` or `GAMEMIND_OLLAMA_URL` no local model is contacted at all and the deterministic chat stands alone (typo correction, command list, most-used-commands fallback). To switch it on:
+
+```bash
+ollama pull qwen3:1.7b
+export GAMEMIND_OLLAMA_URL="http://127.0.0.1:11434" # use the address reachable from the GameMind process
+export GAMEMIND_OLLAMA_MODEL="qwen3:1.7b"           # setting either variable enables the helper
+```
+
+Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is prompt-constrained to brief English/German replies; it never approves or issues actions and never invents world state. Do not use the model as a safety authority.
+
+Model choice (measured warm on a 6 GB-class GPU; answers are bounded to ~80 tokens):
+
+| Model | VRAM (Q4) | Generation | Use it when |
+| --- | --- | --- | --- |
+| `qwen3:1.7b` | ~1.4 GB | ~150 tokens/s | **Recommended.** Small talk while playing on the same GPU. |
+| `gemma2:2b` | ~1.6 GB | ~100 tokens/s | Alternative, slightly better German. |
+| `qwen3:4b` | ~2.6 GB | ~60 tokens/s | Minecraft is minimised; noticeably better at the safety rules. |
+| `qwen3:8b` | ~5.2 GB | ~40 tokens/s | Not while gaming on an 8 GB card. |
+| not configured | 0 | – | Default: deterministic chat only. |
+
+Two things matter more than the size:
+
+- **Thinking must be off.** qwen3 spends tokens on hidden reasoning by default, which consumes the whole bounded answer budget and the operator would only ever see the fallback. The request therefore sends `think: false` for the qwen3 family; check with `ollama run qwen3:1.7b --verbose` whether your Ollama honours it (no `Thinking...` block).
+- **Speed vs. timeout.** The warm request timeout is 3 s (`GAMEMIND_OLLAMA_TIMEOUT_MS`); the first request gets 8 s (`GAMEMIND_OLLAMA_COLD_TIMEOUT_MS`) while the model loads, and `keep_alive` keeps it warm for 5 minutes. At ~50 tokens/s an 80-token answer fits the warm timeout; below that, raise `GAMEMIND_OLLAMA_TIMEOUT_MS`.
 
 If the helper cannot answer, the bot says so once in chat with the reason and keeps working with the fixed commands:
 
 - no Ollama server reachable → the bot notes that the optional chat helper is not ready and that `help` lists the commands;
-- model not installed (`ollama pull qwen3:0.6b` missing) → the note names the model and the `ollama pull` command;
+- model not installed → the note names the model and the `ollama pull` command;
 - answers the safety filter keeps refusing → the helper pauses for the session instead of paying the timeout on every message.
 
 Typo tolerance: a small typo in a short control word is corrected deterministically (`hikfe` → `hilfe`, `folg mir` → `folge mir`, `stoppp` → `stopp`), so it never has to guess its way through the language model. Ordinary conversation stays conversation.
