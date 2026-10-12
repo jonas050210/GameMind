@@ -104,7 +104,6 @@ async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
     // Tests drive the agent by explicit command; the autonomous loop would otherwise start tasks on its own.
     autonomous: false,
     worldConfigPath: path.join(directory, "world-config.json"),
-    trainingDirectory: path.join(directory, "training"),
     dataDirectory: path.join(directory, "data"),
     port: 0,
     bindHost: "127.0.0.1",
@@ -172,7 +171,7 @@ test("the Library is wired end to end: snapshot catalog, typed execution, and ho
   try {
     const before = await fixture.snapshots();
     assert.ok(before.library, "the snapshot carries the Library");
-    assert.equal(before.library?.catalog.length, 54);
+    assert.equal(before.library?.catalog.length, 49);
     const follow = before.library?.catalog.find((entry) => entry.id === "follow.player");
     assert.equal(follow?.status, "implemented");
     assert.deepEqual(follow?.params.map((param) => param.name), ["player"]);
@@ -506,11 +505,7 @@ test("the HTTP surface refuses unknown commands, unauthenticated writes and unkn
     // Every element id the page controller looks up must exist in the served page: the dashboard has no type
     // checker over its DOM, so a control that is renamed in the HTML fails silently at runtime in the browser.
     const declared = new Set([...bundle.html.matchAll(/id="([^"]+)"/g)].map((match) => match[1] ?? ""));
-    const OPTIONAL_IDS = new Set([
-      "theme-toggle",
-      // These controls are generated with the Training manager's curriculum snapshot, not static HTML.
-      "benchmark-start", "benchmark-start-hint", "benchmark-environment-cases", "benchmark-environment-seconds", "benchmark-worker-limit", "benchmark-estimate",
-    ]);
+    const OPTIONAL_IDS = new Set(["theme-toggle"]);
     const lookedUp = [...new Set([...bundle.app.matchAll(/\bel\("([^"]+)"\)/g)].map((match) => match[1] ?? ""))];
     assert.ok(lookedUp.length > 30, "the controller looks its elements up through el(\"id\"), which this check can read");
     assert.deepEqual(
@@ -712,17 +707,15 @@ test("the Control Center shows the new panels and no longer offers an action cap
     const bundle = await loadPageBundle(base);
     const html = bundle.html;
     const script = bundle.all;
-    for (const heading of ["Objective & subgoal", "World seed", "Training", "Observation rate", "Observation age", "Reaction p95"]) {
+    for (const heading of ["Objective & subgoal", "World seed", "Observation rate", "Observation age", "Reaction p95"]) {
       assert.ok(script.includes(heading) || script.includes(heading.replace("&", "&amp;")), `the UI shows ${heading}`);
     }
     assert.ok(!script.includes("budget-input") && !script.includes("budget-form"), "the action-cap input is gone");
     assert.ok(!script.includes("setActionBudget") && !script.includes("Action cap"), "no UI path sets an action cap");
-    for (const id of ["training-form", "training-metrics", "training-episodes-table", "loop-targets", "seed-form", "objective-panel"]) {
+    for (const id of ["loop-targets", "seed-form", "objective-panel"]) {
       assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
     }
-    for (const command of ["pauseTraining", "resumeTraining", "stopTraining", "evaluateTraining"]) {
-      assert.ok(html.includes(`data-command="${command}"`), `${command} is a button on the page`);
-    }
+    assert.ok(!bundle.all.includes("training-form") && !bundle.all.includes("benchmark-form"), "the operator UI has no training or benchmark surface");
   } finally {
     await fixture.close();
   }
@@ -754,7 +747,7 @@ test("the world seed is entered by hand, validated, and always labelled unverifi
   }
 });
 
-test("the snapshot carries the fast loop's measured state and the training section, without invented numbers", async () => {
+test("the snapshot carries live loop metrics without a training UI section", async () => {
   const fixture = await startFixture();
   try {
     const snapshot = await fixture.snapshots();
@@ -762,25 +755,7 @@ test("the snapshot carries the fast loop's measured state and the training secti
     assert.equal(snapshot.agentLoop?.targets.length, 4, "each performance target is reported with its goal");
     assert.equal(snapshot.agentLoop?.observation.frequencyHz === null || typeof snapshot.agentLoop?.observation.frequencyHz === "number", true);
     assert.ok(snapshot.objective === null || typeof snapshot.objective === "object");
-    assert.equal(snapshot.training?.status, "idle", "no training has run in this directory");
-    assert.equal(snapshot.training?.episodesTotal, 0);
-    assert.equal(snapshot.training?.checkpoints.length, 0);
-    assert.equal(snapshot.training?.lastEvaluation ?? null, null, "no evaluation is invented before one runs");
-  } finally {
-    await fixture.close();
-  }
-});
-
-test("training commands refuse what cannot honestly happen yet", async () => {
-  const fixture = await startFixture();
-  try {
-    const pause = await fixture.command("pauseTraining");
-    assert.equal(pause.body.ok, false, "nothing to pause");
-    const stop = await fixture.command("stopTraining");
-    assert.equal(stop.body.ok, false, "nothing to stop");
-    const evaluate = await fixture.command("evaluateTraining");
-    assert.equal(evaluate.body.ok, false);
-    assert.match(evaluate.body.message ?? "", /No checkpoint/, "an evaluation needs a checkpoint to score");
+    assert.ok(!("training" in snapshot), "training is not exposed through the Control Center API");
   } finally {
     await fixture.close();
   }
@@ -820,26 +795,16 @@ test("the roadmap is built from recorded evidence and its actions are saved or r
   }
 });
 
-test("training refuses an out-of-range time budget at the endpoint, and the page serves the headless controls", async () => {
-  const fixture = await startFixture();
+test("invalid optional Ollama settings do not affect a session when the exact chat operator is not configured", async () => {
+  const previousUrl = process.env.GAMEMIND_OLLAMA_URL;
+  process.env.GAMEMIND_OLLAMA_URL = "not a valid URL";
+  let fixture: Fixture | null = null;
   try {
-    const refused = await fixture.command("startTraining", { maxMinutes: 0 });
-    assert.equal(refused.status, 409);
-    assert.match(refused.body.message ?? "", /Time budget \(minutes\) must be a whole number/);
-    const snapshot = await fixture.snapshots();
-    assert.equal(snapshot.training?.execution, "offline-simulator");
-    assert.equal(snapshot.training?.render, "none");
-    assert.equal(snapshot.training?.processAlive, false, "the refused request started nothing");
-
-    const base = new URL(fixture.host.handle?.url ?? "", "http://127.0.0.1").toString();
-    const html = (await loadPageBundle(base)).html;
-    for (const id of ["training-headless", "training-minutes", "training-max-episodes", "roadmap-items", "roadmap-refresh", "training-reward"]) {
-      assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
-    }
-    const policy = await fetch(`${base}/policy.js`);
-    assert.equal(policy.status, 200, "the policy module the page imports is served");
-    assert.match(policy.headers.get("content-type") ?? "", /javascript/);
+    fixture = await startFixture({ companion: true });
+    assert.equal(fixture.host.chat, null, "chat and its model helper stay disabled without an operator transport allowlist");
   } finally {
-    await fixture.close();
+    await fixture?.close();
+    if (previousUrl === undefined) delete process.env.GAMEMIND_OLLAMA_URL;
+    else process.env.GAMEMIND_OLLAMA_URL = previousUrl;
   }
 });

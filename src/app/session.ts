@@ -5,7 +5,6 @@ import type { SkillRuntime } from "../core/skill-runtime.js";
 import type { SafetyBroker } from "../core/safety-broker.js";
 import type { RingBufferTraceSink } from "../core/trace.js";
 import type { ExperienceLearner } from "../core/learning/learner.js";
-import type { TrainingControl } from "../training/manager.js";
 import { attachMinecraftRunHost, type MinecraftRunHost, type MinecraftRunHostOptions } from "../games/minecraft/attach-control-center.js";
 import type { MinecraftObservation } from "../games/minecraft/observation.js";
 import type { WorldMemory } from "../games/minecraft/world-memory.js";
@@ -39,7 +38,7 @@ export interface SessionResources {
   readonly source: SessionSource;
   readonly adapter: GameAdapter<MinecraftObservation>;
   readonly runtime: GameMindRuntime<MinecraftObservation>;
-  readonly skills: SkillRuntime;
+  readonly skills: SkillRuntime<MinecraftObservation>;
   readonly safety: SafetyBroker | null;
   readonly ring: RingBufferTraceSink;
   readonly createRunner: MinecraftRunHostOptions["createRunner"];
@@ -67,11 +66,9 @@ export const DEFAULT_RECONNECT_POLICY: ReconnectPolicy = { enabled: true, maxAtt
 
 export interface SessionHostSettings {
   readonly dataDirectory?: string;
-  readonly trainingDirectory?: string;
   readonly worldConfigPath?: string;
   readonly companionMemoryDirectory?: string | null;
   readonly evaluationReportPath?: string | null;
-  readonly training?: TrainingControl | null;
 }
 
 export interface SessionOptions {
@@ -345,11 +342,9 @@ export class MinecraftSession {
       autonomous: this.request.autonomy !== false,
       ...(this.request.startupTask ? { startupTask: this.request.startupTask } : {}),
       ...(settings.dataDirectory ? { dataDirectory: settings.dataDirectory } : {}),
-      ...(settings.trainingDirectory ? { trainingDirectory: settings.trainingDirectory } : {}),
       ...(settings.worldConfigPath ? { worldConfigPath: settings.worldConfigPath } : {}),
       ...(settings.companionMemoryDirectory !== undefined ? { companionMemoryDirectory: settings.companionMemoryDirectory } : {}),
       ...(settings.evaluationReportPath !== undefined ? { evaluationReportPath: settings.evaluationReportPath } : {}),
-      ...(settings.training !== undefined ? { training: settings.training } : {}),
       scheduler: { onEvent: (event) => this.onSchedulerEvent(event) },
       createRunner: this.resources.createRunner,
       ...(this.resources.onTaskFinished ? { onTaskFinished: this.resources.onTaskFinished } : {}),

@@ -14,7 +14,7 @@ import {
   type RoadmapDecision,
 } from "../src/roadmap/model.js";
 import { RoadmapService } from "../src/roadmap/service.js";
-import { filterRoadmap, groupByCategory, renderingSuspended, roadmapActionsFor, parseHeadless } from "../src/control-center/public/policy.js";
+import { filterRoadmap, groupByCategory, roadmapActionsFor } from "../src/control-center/public/policy.js";
 
 const T0 = "2026-10-10T08:00:00.000Z";
 const T1 = "2026-10-10T09:00:00.000Z";
@@ -43,7 +43,6 @@ function bundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
   return {
     profiles: [],
     tests: null,
-    training: null,
     episodes: null,
     liveVerification: null,
     runtime: null,
@@ -221,35 +220,6 @@ test("rules: a failing test becomes a defect, and no live verification record ke
   assert.equal(gap?.measuredAt, null, "a documented gap is not a measurement");
 });
 
-test("rules: training without a measured gain becomes a hypothesis that states its cause is open", () => {
-  const candidates = deriveCandidates(
-    bundle({
-      training: {
-        measuredAt: T0,
-        status: "completed",
-        episodes: 24,
-        evaluation: {
-          checkpointId: "ckpt-000024",
-          measuredAt: T0,
-          verdict: "not-promotable",
-          baselineSuccess: 0.73,
-          candidateSuccess: 0.73,
-          successDelta: 0,
-          baselineFailureCodes: { TASK_BLOCKED_TARGETS: 30, TASK_BLOCKED_HUNGER: 16, TASK_BLOCKED_HEALTH: 10, TASK_BLOCKED_TOOL: 10 },
-          candidateFailureCodes: {},
-        },
-      },
-    }),
-  );
-  const gain = candidates.find((item) => item.fingerprint === "training.no-measured-gain");
-  assert.equal(gain?.kind, "hypothesis");
-  assert.match(gain!.explanation, /does not show why/);
-  const blocked = candidates.find((item) => item.fingerprint === "training.eval-blocked");
-  assert.equal(blocked?.kind, "hypothesis");
-  assert.equal(blocked?.evidence.length, 4, "four blocked codes are grouped into one item");
-  assert.match(blocked!.title, /66 runs/);
-});
-
 test("rules: recurring episode failures and low skill success are defects only above their thresholds", () => {
   const candidates = deriveCandidates(
     bundle({
@@ -297,7 +267,6 @@ test("evidence: reads real report files, and marks absent sources unavailable in
     const loaded = await loadEvidence({
       profileDirectory: path.join(directory, "profile"),
       testRecordPath: path.join(directory, "tests.json"),
-      trainingRoot: path.join(directory, "no-training"),
       episodeFiles: [path.join(directory, "no-episodes.jsonl")],
       liveVerificationPath: path.join(directory, "no-live.json"),
       runtime: null,
@@ -305,7 +274,6 @@ test("evidence: reads real report files, and marks absent sources unavailable in
     assert.equal(loaded.bundle.profiles.length, 1);
     assert.equal(loaded.bundle.profiles[0]!.measuredAt, T0);
     assert.equal(loaded.bundle.tests?.failed, 0);
-    assert.equal(loaded.bundle.training, null);
     assert.equal(loaded.bundle.episodes, null);
     assert.equal(loaded.sources.find((source) => source.name === "live runtime")?.available, false);
     assert.equal(loaded.evidenceAt, T1, "the evidence timestamp is the newest measurement read");
@@ -321,7 +289,6 @@ test("service: decisions survive a restart, concurrent refreshes share one run, 
       root: path.join(directory, "roadmap"),
       profileDirectory: path.join(directory, "profile"),
       testRecordPath: path.join(directory, "tests.json"),
-      trainingRoot: path.join(directory, "training"),
       episodeFiles: [],
       liveVerificationPath: path.join(directory, "live.json"),
     };
@@ -361,22 +328,6 @@ test("service: decisions survive a restart, concurrent refreshes share one run, 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
-});
-
-test("UI policy: rendering is suspended only while headless training runs, and headless defaults on", () => {
-  const running = { training: { status: "running" } };
-  const paused = { training: { status: "paused" } };
-  const idle = { training: { status: "idle" } };
-  const interrupted = { training: { status: "interrupted" } };
-  assert.equal(renderingSuspended(running, true), true);
-  assert.equal(renderingSuspended(paused, true), true);
-  assert.equal(renderingSuspended(running, false), false, "with headless off, the 3D view keeps drawing");
-  assert.equal(renderingSuspended(idle, true), false, "no active training, nothing to suspend");
-  assert.equal(renderingSuspended(interrupted, true), false, "an interrupted run has no live process");
-  assert.equal(renderingSuspended(null, true), false);
-  assert.equal(parseHeadless(null), true, "headless is the default");
-  assert.equal(parseHeadless("0"), false);
-  assert.equal(parseHeadless("1"), true);
 });
 
 test("UI policy: filters hide closed items by default and actions match the status", () => {

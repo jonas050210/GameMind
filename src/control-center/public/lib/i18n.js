@@ -10,7 +10,7 @@
 // in; a captured value that is itself a known sentence is matched once more, never deeper.
 //
 // The catalog also carries the short notes the host process writes into the panels (learning and failure
-// explanations, the training state, world memory), because a reader cannot tell them apart from the page's own
+// explanations, world memory), because a reader cannot tell them apart from the page's own
 // text. What is *not* translated, on purpose: the runtime's own catalog (action, skill, scenario and task
 // descriptions and their labels), event-log lines, ids, codes, names and numbers, and code samples. Those are
 // not in the catalog, so they pass through untouched.

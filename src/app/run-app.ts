@@ -9,6 +9,7 @@ import { AppEventLog } from "./event-log.js";
 import { defaultRedactionContext } from "./redact.js";
 import { MinecraftSession, SessionStartError, DEFAULT_RECONNECT_POLICY } from "./session.js";
 import { createSessionFactory } from "./session-factory.js";
+import { ProjectInstanceLock } from "./instance-lock.js";
 import type { TaskReporter } from "./task-report.js";
 import type { ConnectRequest, SessionMode } from "./types.js";
 
@@ -261,12 +262,38 @@ export async function runCommandLine(request: RunAppRequest): Promise<number> {
 
 /** The run without a Control Center: one session, no server, ended by the task (one-shot) or by a signal. */
 async function runHeadless(request: RunAppRequest, out: (line: string) => void): Promise<number> {
-  if (!request.connect) {
-    out("Nothing to do: --no-connect needs the Control Center. Remove --no-control-center to use it.");
+  const connect = request.connect;
+  if (!connect) {
+    out("Nothing to do: --no-connect needs the Control Center. Add --control-center or connect to a server.");
     return 2;
   }
   const root = path.resolve(request.root);
   const dataDirectory = path.resolve(request.dataDirectory ?? path.join(root, "data"));
+  const projectLock = new ProjectInstanceLock(dataDirectory, new Date().toISOString(), request.instanceLock);
+  try {
+    projectLock.acquire();
+  } catch (error) {
+    if (error instanceof AppAlreadyRunningError) {
+      out(`GameMind did not start: ${error.message}`);
+      return 3;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    out(`GameMind did not start: ${message}`);
+    return 2;
+  }
+  try {
+    return await runHeadlessSession({ ...request, connect }, out, root, dataDirectory);
+  } finally {
+    projectLock.release();
+  }
+}
+
+async function runHeadlessSession(
+  request: RunAppRequest & { readonly connect: ConnectRequest },
+  out: (line: string) => void,
+  root: string,
+  dataDirectory: string,
+): Promise<number> {
   const redaction = defaultRedactionContext(root);
   const events = new AppEventLog({ redaction, directory: path.join(dataDirectory, "events") });
   const live = request.connect.source === "live";
@@ -294,7 +321,7 @@ async function runHeadless(request: RunAppRequest, out: (line: string) => void):
     events,
     logger: request.logger,
     reconnect: { ...DEFAULT_RECONNECT_POLICY, ...(request.reconnectAttempts !== undefined ? { enabled: request.reconnectAttempts > 0, maxAttempts: Math.max(1, request.reconnectAttempts) } : {}) },
-    host: { dataDirectory, trainingDirectory: path.join(dataDirectory, "training"), worldConfigPath: path.join(dataDirectory, "world-config.json"), companionMemoryDirectory: path.join(dataDirectory, "companion"), training: null },
+    host: { dataDirectory, worldConfigPath: path.join(dataDirectory, "world-config.json"), companionMemoryDirectory: path.join(dataDirectory, "companion") },
   });
   const unregister = (request.signals ?? processSignalHub(request.logger)).onShutdown((reason) => {
     void session.stop(reason);

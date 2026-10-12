@@ -14,7 +14,7 @@ import {
   type RoadmapItem,
   type RoadmapStatus,
 } from "./model.js";
-import { writeJsonAtomic } from "../training/state.js";
+import { writeFileAtomic } from "../core/atomic-file.js";
 
 export const ROADMAP_SCHEMA_VERSION = 1;
 /** How old the evidence may be before a snapshot request starts a background refresh. */
@@ -25,7 +25,6 @@ export interface RoadmapServiceOptions {
   readonly root: string;
   readonly profileDirectory: string;
   readonly testRecordPath: string;
-  readonly trainingRoot: string;
   readonly episodeFiles: readonly string[];
   readonly liveVerificationPath: string;
   readonly now?: () => Date;
@@ -101,7 +100,7 @@ export class RoadmapService {
 
   private async persist(): Promise<void> {
     if (!this.saved) return;
-    await writeJsonAtomic(this.statePath, this.saved);
+    await writeFileAtomic(this.statePath, `${JSON.stringify(this.saved, null, 2)}\n`);
   }
 
   /** Records the newest live runtime measurement. The next refresh uses it; nothing is refreshed here. */
@@ -145,7 +144,6 @@ export class RoadmapService {
       const loaded = await loadEvidence({
         profileDirectory: this.options.profileDirectory,
         testRecordPath: this.options.testRecordPath,
-        trainingRoot: this.options.trainingRoot,
         episodeFiles: this.options.episodeFiles,
         liveVerificationPath: this.options.liveVerificationPath,
         runtime: this.runtime,
@@ -247,7 +245,6 @@ export function defaultRoadmapOptions(dataRoot = "data", now?: () => Date): Road
     root: join(dataRoot, "roadmap"),
     profileDirectory: join(dataRoot, "profile"),
     testRecordPath: join(dataRoot, "evidence", "tests.json"),
-    trainingRoot: join(dataRoot, "training"),
     episodeFiles: [join(dataRoot, "training", "experience", "episodes.jsonl"), join(dataRoot, "learning", "episodes.jsonl")],
     liveVerificationPath: join(dataRoot, "evidence", "live-verification.json"),
     ...(now ? { now } : {}),

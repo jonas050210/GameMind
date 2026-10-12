@@ -1,7 +1,6 @@
 import { h } from "../lib/h.js";
 import { badge, button, card, empty, kv, notice, sourceBadge, statusBadge, table, unknown } from "../lib/ui.js";
-import { fmtAgo, fmtDateTime, fmtDuration, fmtNumber, fmtPercent, fmtSigned, fmtTime, orUnknown } from "../lib/format.js";
-import { conclusionNotice } from "./training.js";
+import { fmtAgo, fmtDateTime, fmtDuration, fmtNumber, fmtPercent, fmtTime, orUnknown } from "../lib/format.js";
 import { ROADMAP_ACTION_LABELS, ROADMAP_ACTIONS_WITH_NOTE, ROADMAP_CATEGORY_ORDER, ROADMAP_KIND_LABELS, ROADMAP_STATUS_LABELS, filterRoadmap, groupByCategory, roadmapActionsFor } from "../policy.js";
 
 function jobCard(job, title) {
@@ -54,65 +53,10 @@ function offlineJobs(ctx) {
   const jobs = ctx.snapshot.jobs?.items ?? [];
   const tests = jobs.find((job) => job.kind === "unit-tests") ?? null;
   const run = jobs.find((job) => job.kind === "offline-eval") ?? null;
-  const benchmark = jobs.find((job) => job.kind === "benchmark") ?? null;
   return card(
-    { title: "Offline tests, evaluation and benchmark", subtitle: "Run on this machine in the simulator", actions: sourceBadge("offline") },
+    { title: "Offline tests and evaluation", subtitle: "Run on this machine in the simulator", actions: sourceBadge("offline") },
     jobCard(tests, "Unit and integration tests"),
     jobCard(run, "Offline evaluation run"),
-    jobCard(benchmark, "Benchmark"),
-  );
-}
-
-function deltaTone(value, goodWhenNegative = false) {
-  if (value === 0 || value === null || value === undefined) return "neutral";
-  return (value < 0) === goodWhenNegative ? "good" : "bad";
-}
-
-function compare(ctx) {
-  const resource = ctx.data.evaluation;
-  const reports = resource?.value?.offline?.checkpointReports ?? [];
-  if (!reports.length) {
-    return card({ title: "Baseline versus candidate", actions: sourceBadge("offline") }, empty("No checkpoint has been evaluated yet", "Train in the Training tab, then evaluate a checkpoint. The comparison runs both policies on the same held-out seeds."));
-  }
-  const index = Math.min(ctx.ui.evalReportIndex ?? 0, reports.length - 1);
-  const report = reports[index];
-  const rows = [
-    ["Success rate", fmtPercent(report.baseline.successRate), fmtPercent(report.candidate.successRate), `${fmtSigned(report.deltas.successRate * 100, 1, " pts")}`, deltaTone(report.deltas.successRate), report.baseline.interval ? `95% interval ${fmtPercent(report.baseline.interval.low, 0)}–${fmtPercent(report.baseline.interval.high, 0)} → ${fmtPercent(report.candidate.interval.low, 0)}–${fmtPercent(report.candidate.interval.high, 0)}` : ""],
-    ["Median actions per run (efficiency)", fmtNumber(report.baseline.medianActions, 1), fmtNumber(report.candidate.medianActions, 1), fmtSigned(report.deltas.medianActions, 1), deltaTone(report.deltas.medianActions, true), "fewer is better"],
-    ["Mean wasted actions", fmtNumber(report.baseline.meanWastedActions, 2), fmtNumber(report.candidate.meanWastedActions, 2), fmtSigned(report.deltas.meanWastedActions, 2), deltaTone(report.deltas.meanWastedActions, true), "actions whose result the next observation does not show helping: no item or food gained, no new ground explored, not closer to the target, no healing, no retreat"],
-    ["Unsafe actions", "—", "—", fmtSigned(report.deltas.unsafeActions, 0), deltaTone(report.deltas.unsafeActions, true), "any increase blocks promotion"],
-    ["Deaths", "—", "—", fmtSigned(report.deltas.deaths, 0), deltaTone(report.deltas.deaths, true), "any increase blocks promotion"],
-  ];
-  const changed = report.scenarios.filter((entry) => entry.successDelta !== 0 || entry.actionsDelta !== 0 || entry.unsafeDelta !== 0 || entry.deathsDelta !== 0);
-  return card(
-    { title: "Baseline versus candidate", subtitle: `${report.checkpointId} · evaluated ${fmtDateTime(report.generatedAt)}`, actions: sourceBadge("offline") },
-    reports.length > 1 ? h("p", { class: "small" }, "Report: ", reports.map((entry, i) => button(entry.checkpointId, { action: "pick-report", data: { index: i }, tone: i === index ? "primary" : "" }))) : null,
-    conclusionNotice(report.conclusion),
-    kv([
-      ["Verdict from the existing gate", report.verdict === "promotable" ? badge("PROMOTABLE", "good") : badge("NOT PROMOTABLE", "neutral"), "The label comes only from the gate's criteria; nothing here promotes anything."],
-      ["Evaluation set", report.evaluationSet ? `${report.evaluationSet.scenarios} scenarios × ${report.evaluationSet.seedsPerScenario} seeds = ${report.evaluationSet.runs} runs (id ${report.evaluationSet.id})` : null],
-      ["Progress definition", report.evaluationSet ? (report.evaluationSet.progressDefinition ?? "v1 · item and food gains only (this report was written before the current definition, so its wasted-action figures are not comparable with newer reports)") : null],
-      ["Held-out seeds", `${report.heldOut.seeds} seeds, disjoint from training: ${report.heldOut.disjointFromTraining ? "yes" : "no"}`],
-      ["Learned contexts in candidate", orUnknown(report.learnedContexts, fmtNumber)],
-      ["Runs where the candidate chose differently", report.behaviour ? `${fmtNumber(report.behaviour.runsWithDifferentChoices)} of ${fmtNumber(report.behaviour.pairedRuns)} (${fmtNumber(report.behaviour.scenariosWithDifferentChoices)} scenarios)` : null],
-      ["Paired outcomes on identical worlds", report.paired ? `candidate better ${fmtNumber(report.paired.candidateBetter)} · baseline better ${fmtNumber(report.paired.baselineBetter)} · tied ${fmtNumber(report.paired.tied)}` : null],
-      ["Baseline stable", report.baselineStability ? h("span", null, report.baselineStability.stable ? badge("reproduced", "good") : badge("changed", "warn"), " ", report.baselineStability.note) : null],
-    ]),
-    table({
-      caption: "Baseline versus candidate metrics",
-      columns: [{ label: "Metric", cell: (r) => r[0] }, { label: "Baseline", align: "right", cell: (r) => r[1] }, { label: "Candidate", align: "right", cell: (r) => r[2] }, { label: "Change", align: "right", cell: (r) => badge(r[3], r[4]) }, { label: "Note", cell: (r) => h("span", { class: "small muted" }, r[5]) }],
-      rows: rows.map((value, i) => ({ key: i, value })),
-    }),
-    h("h4", null, "Scenario deltas"),
-    changed.length
-      ? table({
-          dense: true,
-          columns: [{ label: "Scenario", cell: (e) => e.scenarioId }, { label: "Success", align: "right", cell: (e) => `${fmtPercent(e.baselineSuccess, 0)} → ${fmtPercent(e.candidateSuccess, 0)}` }, { label: "Median actions", align: "right", cell: (e) => `${fmtNumber(e.baselineMedianActions, 1)} → ${fmtNumber(e.candidateMedianActions, 1)}` }, { label: "Unsafe Δ", align: "right", cell: (e) => fmtSigned(e.unsafeDelta, 0) }, { label: "Deaths Δ", align: "right", cell: (e) => fmtSigned(e.deathsDelta, 0) }],
-          rows: changed.map((value) => ({ key: value.scenarioId, value })),
-        })
-      : h("p", { class: "muted" }, `No scenario differs from the baseline (${report.scenarios.length} compared). ${report.conclusion === "no-learned-contexts" ? "That is because the checkpoint is the baseline." : "See the conclusion above for what that means."}`),
-    report.reasons.length ? h("details", null, h("summary", null, "Reasons the gate gave"), h("ul", null, report.reasons.map((reason) => h("li", null, reason)))) : null,
-    h("p", { class: "small muted" }, report.heldOut.note),
   );
 }
 
@@ -181,7 +125,6 @@ export function renderEvaluation(ctx) {
   return {
     "eval-notice": notice("info", "Offline and live results are kept apart", "Everything under “offline” ran in the simulator or in unit tests. A result counts as live only if it came from the live verification section, with a server that was actually reached."),
     "eval-jobs": offlineJobs(ctx),
-    "eval-compare": compare(ctx),
     "eval-offline-report": offlineReport(ctx),
     "eval-live": live(ctx),
     "roadmap-items": roadmap(ctx),

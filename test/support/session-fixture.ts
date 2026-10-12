@@ -68,11 +68,9 @@ export async function createSessionFixture(options: SessionFixtureOptions = {}):
     logger: logs.logger,
     host: {
       dataDirectory: path.join(directory, "data"),
-      trainingDirectory: path.join(directory, "training"),
       worldConfigPath: path.join(directory, "world-config.json"),
       companionMemoryDirectory: path.join(directory, "companion"),
       evaluationReportPath: path.join(directory, "no-report.json"),
-      training: null,
     },
     ...(options.reconnect ? { reconnect: options.reconnect } : {}),
     sleep: options.sleep ?? (async () => undefined),

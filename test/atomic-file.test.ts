@@ -90,7 +90,7 @@ test("writes to different files do not wait for each other and the file mode is 
   });
 });
 
-test("the training state writer (used by the roadmap, training state and reports) survives concurrent saves", async () => {
+test("the training JSON writer survives concurrent saves", async () => {
   await withDirectory(async (directory) => {
     const target = path.join(directory, "roadmap", "state.json");
     await Promise.all(Array.from({ length: 25 }, (_, index) => writeJsonAtomic(target, { index })));
@@ -104,7 +104,6 @@ test("roadmap: operator decisions saved while a refresh is writing never fail an
       root: path.join(directory, "roadmap"),
       profileDirectory: path.join(directory, "profile"),
       testRecordPath: path.join(directory, "tests.json"),
-      trainingRoot: path.join(directory, "training"),
       episodeFiles: [],
       liveVerificationPath: path.join(directory, "live.json"),
     };

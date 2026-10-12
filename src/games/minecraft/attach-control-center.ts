@@ -5,7 +5,6 @@ import { DEFAULT_OBSERVATION_INTERVAL_MS, FastObservationLoop, type ObservationT
 import { RuntimeMetrics } from "./runtime-metrics.js";
 import { describeReflex } from "./reflex.js";
 import { DEFAULT_WORLD_CONFIG_PATH, WorldSeedStore } from "./world-seed.js";
-import { TrainingManager, type TrainingControl } from "../../training/manager.js";
 import { RoadmapService, defaultRoadmapOptions } from "../../roadmap/service.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { WorldState } from "../../core/types.js";
@@ -47,6 +46,8 @@ import {
 import { ProgressTracker } from "./progress-tracker.js";
 import { CompanionMemory } from "./companion-memory.js";
 import { CompanionController } from "./companion-controller.js";
+import { MinecraftChatController, type MinecraftChatTransport } from "./minecraft-chat-controller.js";
+import { ollamaChatResponderFromEnv, type MinecraftChatResponder } from "./ollama-chat-responder.js";
 import {
   MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
   MINECRAFT_SWIM_TO_SURFACE_CAPABILITY,
@@ -138,7 +139,13 @@ export function taskFromControlCenterRequest(request: {
 export interface MinecraftRunHostOptions {
   readonly runtime: GameMindRuntime<MinecraftObservation>;
   /** When supplied, enables the persistent companion coordinator over the same gated skills. */
-  readonly skills?: SkillRuntime;
+  readonly skills?: SkillRuntime<MinecraftObservation>;
+  /** Exact authorized in-game username; absent or null keeps live chat control disabled. */
+  readonly operatorUsername?: string | null;
+  /** Optional chat transport for live adapters and deterministic integration tests. */
+  readonly chatTransport?: MinecraftChatTransport | null;
+  /** Optional conversational helper; null disables Ollama even when a live chat is configured. */
+  readonly chatResponder?: MinecraftChatResponder | null;
   readonly companionMemoryDirectory?: string | null;
   readonly logger: Logger;
   readonly safety: SafetyBroker | null;
@@ -169,11 +176,6 @@ export interface MinecraftRunHostOptions {
     readonly maxQueue?: number;
     readonly reservationTtlMs?: number;
   };
-  /**
-   * Training manager to use. Left unset the host creates one for `trainingDirectory` and disposes it on close;
-   * a supervisor that shares one manager across sessions passes it (or null) and keeps ownership.
-   */
-  readonly training?: TrainingControl | null;
   /** How long close() waits for the running task to stop before closing anyway. Defaults to 10 s. */
   readonly drainTimeoutMs?: number;
   /** The CLI owns runner construction (it knows the clock); the host only asks for another one. */
@@ -195,8 +197,6 @@ export interface MinecraftRunHostOptions {
   readonly autonomous?: boolean;
   /** Where the operator's world seed is stored. Defaults to data/world-config.json. */
   readonly worldConfigPath?: string;
-  /** Root directory for training state, checkpoints and evaluation reports. Defaults to data/training. */
-  readonly trainingDirectory?: string;
   /** Root of the data directory (evidence, roadmap). Defaults to data. */
   readonly dataDirectory?: string;
   /** Period of the fast observation loop. Defaults to one second; tests shorten or stretch it. */
@@ -219,6 +219,8 @@ export interface MinecraftRunHost {
   readonly autonomy: AutonomyController;
   readonly memory: WorldMemory;
   readonly companion: CompanionController | null;
+  /** Authorized live chat controller; null unless an exact operator allowlist is configured. */
+  readonly chat: MinecraftChatController | null;
   /** The one authority over which task runs; every origin goes through it. */
   readonly scheduler: TaskScheduler;
   /** Snapshot and command surface computed from the live objects; served by the host's own server or a supervisor's. */
@@ -268,6 +270,11 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   const sessionAdapter = options.runtime.adapter as unknown as {
     readonly sessionChange?: { readonly at: string; readonly kind: string; readonly detail: string } | null;
     readonly combatAllowed?: boolean;
+    readonly operatorUsername?: string | null;
+    onChatMessage?: MinecraftChatTransport["onChatMessage"];
+    sendChat?: MinecraftChatTransport["sendChat"];
+    onDeath?: MinecraftChatTransport["onDeath"];
+    onRespawn?: MinecraftChatTransport["onRespawn"];
     setCombatAllowed?(allowed: boolean): void;
   };
   const companionMemory = options.skills
@@ -330,8 +337,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   // subgoal at once.
   const metrics = new RuntimeMetrics(options.loopClock ?? (() => Date.now()));
   const worldSeed = new WorldSeedStore(options.worldConfigPath ?? DEFAULT_WORLD_CONFIG_PATH);
-  const ownsTraining = options.training === undefined;
-  const training = options.training === undefined ? new TrainingManager({ root: options.trainingDirectory ?? "data/training" }) : options.training;
   const roadmap = new RoadmapService(defaultRoadmapOptions(options.dataDirectory ?? "data"));
   // Build the roadmap once at start; the Control Center refreshes it in the background afterwards.
   void roadmap.refresh().catch(() => undefined);
@@ -442,6 +447,37 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       })
     : null;
 
+  const operatorUsername = options.operatorUsername === undefined ? sessionAdapter.operatorUsername ?? null : options.operatorUsername;
+  const defaultTransport = typeof sessionAdapter.onChatMessage === "function" && typeof sessionAdapter.sendChat === "function"
+    ? sessionAdapter as MinecraftChatTransport
+    : null;
+  const chatTransport = options.chatTransport === undefined ? defaultTransport : options.chatTransport;
+  let chat: MinecraftChatController | null = null;
+  if (options.skills && companion && operatorUsername && chatTransport) {
+    let chatResponder = options.chatResponder;
+    if (chatResponder === undefined) {
+      try {
+        chatResponder = ollamaChatResponderFromEnv(process.env, options.logger);
+      } catch (error) {
+        options.logger.warn({ err: error }, "Invalid optional Ollama settings; deterministic Minecraft chat remains active");
+        chatResponder = null;
+      }
+    }
+    chat = new MinecraftChatController({
+      operatorUsername,
+      transport: chatTransport,
+      runtime: options.runtime,
+      skills: options.skills,
+      companion,
+      logger: options.logger,
+      runTask: (task) => runTask(task, "chat"),
+      currentTask: () => control.task,
+      taskRunning: () => scheduler.busy,
+      requestTaskStop: (reason) => { scheduler.stopActive(reason); },
+      ...(chatResponder ? { chatResponder } : {}),
+    });
+  }
+
   const startAutonomousIfIdle = (world: WorldState<MinecraftObservation>): void => {
     if (closing || !autonomyEnabled) return;
     if (!scheduler.canStartNow("autonomy")) return;
@@ -523,7 +559,6 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     autonomy,
     loop,
     worldSeed,
-    training,
     roadmap,
     scheduler,
     submitTask,
@@ -564,6 +599,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     control,
     memory,
     companion,
+    chat,
     metrics,
     loop,
     autonomy,
@@ -587,12 +623,12 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
       // Idempotent: a signal handler, the UI and the CLI's own finally may all ask, and the teardown must run once.
       closePromise ??= (async () => {
         closing = true;
-        // Stop deciding and stop the running task before anything it depends on goes away.
+        // Stop accepting chat work before draining the scheduler, then stop the running task before its dependencies go away.
+        chat?.stop();
         const drained = await scheduler.drain("run host closing", options.drainTimeoutMs ?? 10_000);
         if (!drained.settled) options.logger.warn("A task did not stop within the shutdown window; closing anyway");
         companion?.stop();
         loop.stop();
-        if (ownsTraining) await training?.dispose();
         await roadmap.idle();
         if (handle) await handle.stop("run host closing");
         if (memory instanceof PersistentWorldMemory) {
@@ -608,6 +644,11 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
   };
 
   // Only now, with the host and the scheduler fully built, does anything start acting on its own.
+  if (chat && companion && operatorUsername) {
+    const follow = await companion.setMode("follow", { targetPlayer: operatorUsername });
+    if (!follow.ok) options.logger.warn({ message: follow.message }, "Could not enter the configured operator's default follow mode");
+    chat.start();
+  }
   companion?.start();
   if (options.startFastLoop !== false) loop.start();
 

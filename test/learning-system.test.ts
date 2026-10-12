@@ -380,6 +380,7 @@ test("the episode store appends, tolerates damaged lines and compacts past its c
   const directory = await mkdtemp(path.join(tmpdir(), "gamemind-store-"));
   const store = new ExperienceStore({ directory, maxEpisodes: 12 });
   await store.appendMany(Array.from({ length: 10 }, (_unused, index) => episode({ sequence: index })));
+  await store.flush();
   await writeFile(store.filePath, `${await readFile(store.filePath, "utf8")}not json at all\n`, "utf8");
   const loaded = await store.load();
   assert.equal(loaded.episodes.length, 10);
@@ -392,6 +393,7 @@ test("the episode store appends, tolerates damaged lines and compacts past its c
   assert.equal(stats.firstRunId, "run-1");
 
   await store.appendMany(Array.from({ length: 8 }, (_unused, index) => episode({ runId: `run-${index}` })));
+  await store.flush();
   const compacted = await store.load();
   assert.ok(compacted.episodes.length <= 12, `compaction failed: ${compacted.episodes.length} episodes kept`);
   assert.equal(compacted.episodes.at(-1)?.runId, "run-7", "the most recent experience survives");

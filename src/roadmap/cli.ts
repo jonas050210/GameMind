@@ -10,7 +10,7 @@ const USAGE = `GameMind improvement roadmap
   npm run roadmap -- act FINGERPRINT ACTION [--value 1-5] [--note TEXT]
       ACTION: ${ROADMAP_ACTIONS.join(", ")}
 
-Evidence is read from data/ (profiles, evidence/tests.json, training, episodes). Decisions are saved in data/roadmap/state.json.`;
+Evidence is read from data/ (profiles, evidence/tests.json, episodes and live verification). Decisions are saved in data/roadmap/state.json.`;
 
 function print(snapshot: RoadmapSnapshot): void {
   console.log(`Evidence measured: ${snapshot.evidenceAt ?? "none"}`);

@@ -1,7 +1,7 @@
 /**
  * Environment settings and the README must not drift apart.
  *
- * The settings a run honours are read in several places (the CLI, the adapter, the training CLI, the
+ * The settings a run honours are read in several places (the CLI, the adapter, the
  * Python launcher) and the README documents them in one list. Both directions are checked here: a
  * setting the code reads has to be documented, and a `MINECRAFT_*`/`GAMEMIND_*` name the README shows
  * has to be something the code actually reads. The list used to be a hand-kept subset — the navigation
@@ -18,7 +18,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** Read from the environment, but not a setting a user configures; each is set and used inside one process tree. */
 const INTERNAL = new Set([
   "GAMEMIND_EPISODE_SCRATCH", // set by the episode pool for its own workers
-  "GAMEMIND_TERMINATION_MARKER", // set by the training manager for its own child process
   "WSLENV", // read for platform detection
   "WSL_DISTRO_NAME",
   "WSL_INTEROP",
@@ -85,8 +84,13 @@ test("every MINECRAFT_/GAMEMIND_ name the README shows is a name the code knows"
   for (const file of sourceFiles()) {
     for (const match of readFileSync(file, "utf8").matchAll(NAME_PATTERN)) names.add(match[0]);
   }
+  // Count only an exact inline-code token as a setting; file names such as
+  // `docs/MINECRAFT_COMPANION_PLAN.md` are paths, not environment-variable names.
   const documented = new Set(
-    [...readme.matchAll(NAME_PATTERN)].map((match) => match[0]).filter((name) => !DOCUMENTED_ABSENT.has(name)),
+    [...readme.matchAll(/`([^`]+)`/g)]
+      .map((match) => match[1] ?? "")
+      .filter((token) => /^(?:MINECRAFT|GAMEMIND)_[A-Z0-9_]+$/.test(token))
+      .filter((name) => !DOCUMENTED_ABSENT.has(name)),
   );
   const unknown = [...documented].filter((name) => !names.has(name)).sort();
   assert.deepEqual(unknown, [], `README documents names the code never mentions: ${unknown.join(", ")}`);

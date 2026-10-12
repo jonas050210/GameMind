@@ -3,7 +3,6 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { episodeProvenanceOf, type EpisodeProvenance } from "../core/learning/episode.js";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { readTrainingState, trainingPaths } from "../training/state.js";
 import type { AgentLoopPerformance } from "../games/minecraft/runtime-metrics.js";
 
 /**
@@ -30,22 +29,6 @@ export interface TestRunEvidence {
   readonly command: string;
 }
 
-export interface TrainingEvidence {
-  readonly measuredAt: string;
-  readonly status: string;
-  readonly episodes: number;
-  readonly evaluation: {
-    readonly checkpointId: string;
-    readonly measuredAt: string;
-    readonly verdict: string;
-    readonly baselineSuccess: number;
-    readonly candidateSuccess: number;
-    readonly successDelta: number;
-    readonly baselineFailureCodes: Readonly<Record<string, number>>;
-    readonly candidateFailureCodes: Readonly<Record<string, number>>;
-  } | null;
-}
-
 export interface EpisodeEvidence {
   readonly measuredAt: string | null;
   readonly total: number;
@@ -67,7 +50,6 @@ export interface RuntimeEvidence {
 export interface EvidenceBundle {
   readonly profiles: readonly AutonomyProfileEvidence[];
   readonly tests: TestRunEvidence | null;
-  readonly training: TrainingEvidence | null;
   readonly episodes: EpisodeEvidence | null;
   readonly liveVerification: { readonly measuredAt: string; readonly summary: string } | null;
   readonly runtime: RuntimeEvidence | null;
@@ -85,8 +67,6 @@ export interface EvidenceLoadOptions {
   readonly profileDirectory: string;
   /** Test record written by `npm run test:record` (data/evidence/tests.json). */
   readonly testRecordPath: string;
-  /** Training root (data/training). */
-  readonly trainingRoot: string;
   /** Learning stores whose episodes are counted. */
   readonly episodeFiles: readonly string[];
   /** Hand-written or scripted record of a live verification run (data/evidence/live-verification.json). */
@@ -158,47 +138,6 @@ async function loadTests(path: string): Promise<TestRunEvidence | null> {
   };
 }
 
-function countsOf(value: unknown): Record<string, number> {
-  if (!isRecord(value)) return {};
-  const counts: Record<string, number> = {};
-  for (const [code, count] of Object.entries(value)) if (typeof count === "number") counts[code] = count;
-  return counts;
-}
-
-async function loadTraining(root: string): Promise<TrainingEvidence | null> {
-  const paths = trainingPaths(root);
-  const state = await readTrainingState(paths).catch(() => null);
-  if (!state) return null;
-  let evaluation: TrainingEvidence["evaluation"] = null;
-  if (state.lastEvaluation) {
-    const report = await readJson(state.lastEvaluation.reportPath);
-    if (isRecord(report) && isRecord(report.baseline) && isRecord(report.candidate)) {
-      const baseline = report.baseline as Record<string, unknown>;
-      const candidate = report.candidate as Record<string, unknown>;
-      const baseMetrics = (baseline.metrics ?? {}) as Record<string, unknown>;
-      const candMetrics = (candidate.metrics ?? {}) as Record<string, unknown>;
-      const baselineSuccess = Number(baseMetrics.successRate);
-      const candidateSuccess = Number(candMetrics.successRate);
-      evaluation = {
-        checkpointId: state.lastEvaluation.checkpointId,
-        measuredAt: state.lastEvaluation.generatedAt,
-        verdict: state.lastEvaluation.verdict,
-        baselineSuccess,
-        candidateSuccess,
-        successDelta: candidateSuccess - baselineSuccess,
-        baselineFailureCodes: countsOf(baseline.failureCodes),
-        candidateFailureCodes: countsOf(candidate.failureCodes),
-      };
-    }
-  }
-  return {
-    measuredAt: state.updatedAt,
-    status: state.status,
-    episodes: state.totalEpisodes,
-    evaluation,
-  };
-}
-
 async function loadEpisodes(files: readonly string[]): Promise<{ evidence: EpisodeEvidence | null; sources: EvidenceSource[] }> {
   const sources: EvidenceSource[] = [];
   const failureCodes: Record<string, number> = {};
@@ -262,7 +201,6 @@ async function loadLiveVerification(path: string): Promise<EvidenceBundle["liveV
 export async function loadEvidence(options: EvidenceLoadOptions): Promise<{ bundle: EvidenceBundle; sources: EvidenceSource[]; evidenceAt: string | null }> {
   const profiles = await loadProfiles(options.profileDirectory);
   const tests = await loadTests(options.testRecordPath);
-  const training = await loadTraining(options.trainingRoot);
   const episodeResult = await loadEpisodes(options.episodeFiles);
   const live = await loadLiveVerification(options.liveVerificationPath);
 
@@ -274,7 +212,6 @@ export async function loadEvidence(options: EvidenceLoadOptions): Promise<{ bund
       measuredAt: profiles.map((p) => p.measuredAt).sort().at(-1) ?? null,
     },
     { name: "test record", path: options.testRecordPath, available: tests !== null, measuredAt: tests?.measuredAt ?? null },
-    { name: "training state", path: trainingPaths(options.trainingRoot).state, available: training !== null, measuredAt: training?.measuredAt ?? null },
     ...episodeResult.sources,
     { name: "live verification", path: options.liveVerificationPath, available: live !== null, measuredAt: live?.measuredAt ?? null },
     {
@@ -287,7 +224,6 @@ export async function loadEvidence(options: EvidenceLoadOptions): Promise<{ bund
   const times = [
     ...profiles.map((p) => p.measuredAt),
     tests?.measuredAt,
-    training?.measuredAt,
     episodeResult.evidence?.measuredAt,
     live?.measuredAt,
     options.runtime?.measuredAt,
@@ -298,7 +234,6 @@ export async function loadEvidence(options: EvidenceLoadOptions): Promise<{ bund
     bundle: {
       profiles,
       tests,
-      training,
       episodes: episodeResult.evidence,
       liveVerification: live,
       runtime: options.runtime,

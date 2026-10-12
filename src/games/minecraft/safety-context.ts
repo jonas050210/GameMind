@@ -60,10 +60,12 @@ export function minecraftSafetyContext(
 const MINECRAFT_STATIONARY_CAPABILITIES = [
   "minecraft.mine_block",
   "minecraft.place_block",
+  "minecraft.plant_wheat",
   "minecraft.build_shelter",
   "minecraft.attack_hostile",
   "minecraft.rest",
   "minecraft.craft_item",
+  "minecraft.give_item",
 ] as const;
 
 export const MINECRAFT_SAFETY_POLICY: SafetyPolicy = {
@@ -90,7 +92,7 @@ export const MINECRAFT_SAFETY_POLICY: SafetyPolicy = {
   // agent in place. Fleeing, looking, eating and dropping stay allowed: escaping is what it must do then.
   hazardMaxDistance: 2.5,
   hazardBlockedCapabilities: [...MINECRAFT_STATIONARY_CAPABILITIES],
-  drowningBlockedCapabilities: ["minecraft.rest", "minecraft.mine_block", "minecraft.build_shelter"],
+  drowningBlockedCapabilities: ["minecraft.rest", "minecraft.mine_block", "minecraft.plant_wheat", "minecraft.build_shelter", "minecraft.give_item"],
   voidBlockedCapabilities: [...MINECRAFT_STATIONARY_CAPABILITIES],
 };
 

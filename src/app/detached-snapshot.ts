@@ -1,7 +1,6 @@
 import type {
   ControlCenterRuntimePerformance,
   ControlCenterSnapshot,
-  ControlCenterTraining,
   EvaluationSummary,
 } from "../control-center/types.js";
 import type { ExperienceLearner } from "../core/learning/learner.js";
@@ -12,14 +11,12 @@ import { buildLearningView } from "../games/minecraft/run-control.js";
  * The snapshot of an app that has no live game session: before the first connection, between sessions, and after
  * one ended. Everything that comes from a session is reported as unknown (null) or empty, never as a default that
  * looks like a measurement: health is not 20, the position is not 0,0,0, and the world is "not observed".
- * What does exist without a session is real and is included: the training state, the policy store and the last
- * evaluation report all live on disk.
+ * What does exist without a session is real and is included: the policy store and the last evaluation report live on disk.
  */
 export interface DetachedInputs {
   readonly performance: ControlCenterRuntimePerformance;
   readonly session: SessionView;
   readonly learner: ExperienceLearner | null;
-  readonly training: ControlCenterTraining | null;
   readonly evaluation: EvaluationSummary | null;
   /** Whether this process was started to talk to a live server or to the simulator, for the connection label. */
   readonly gameId?: string;
@@ -108,7 +105,6 @@ export function buildDetachedSnapshot(input: DetachedInputs): ControlCenterSnaps
     recentFailures: [],
     recentDecisions: [],
     skillMetrics: [],
-    training: input.training,
     offlineNote: null,
     scheduler: null,
     autonomyEnabled: null,

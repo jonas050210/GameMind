@@ -4,7 +4,7 @@ import { fmtAgo, fmtDateTime, fmtNumber, fmtTime, humanise } from "../lib/format
 import { worldSource } from "../lib/model.js";
 import { eventRow } from "./overview.js";
 
-export const EVENT_CATEGORIES = ["session", "connection", "task", "decision", "action", "safety", "training", "evaluation", "learning", "memory", "browser", "shutdown", "app", "error"];
+export const EVENT_CATEGORIES = ["session", "connection", "task", "decision", "action", "safety", "evaluation", "learning", "memory", "browser", "shutdown", "app", "error"];
 
 function identity(ctx) {
   const { snapshot } = ctx;

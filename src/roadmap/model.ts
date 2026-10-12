@@ -13,7 +13,6 @@ export const ROADMAP_CATEGORIES = [
   "autonomy",
   "performance",
   "observation",
-  "training",
   "navigation",
   "survival",
   "world-knowledge",

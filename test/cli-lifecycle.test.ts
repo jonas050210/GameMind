@@ -4,13 +4,13 @@
  * waits for is printed, the browser opens once, and a second copy of the app is refused. Nothing here touches a real server.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { BrowserOpener, type SpawnOpener } from "../src/app/browser.js";
 import { READY_MARKER, runCommandLine, type ReadyInfo, type RunAppRequest, type SignalHub } from "../src/app/run-app.js";
-import { parseArgs } from "../src/cli.js";
+import { liveRunShape, parseArgs } from "../src/cli.js";
 import { evaluationScenarios } from "../src/testing/eval/scenarios.js";
 import type { MinecraftTaskResult } from "../src/games/minecraft/task-runner.js";
 import { captureLogger, waitFor } from "./support/lifecycle-fixture.js";
@@ -246,6 +246,31 @@ test("a second app in the same project is refused with the first one's address",
   });
 });
 
+test("a terminal-only persistent session holds and releases the project lock", async () => {
+  await withDirectory(async (directory) => {
+    const first = harness(directory);
+    const running = runCommandLine(first.request({ controlCenter: false, instanceLock: true }));
+    const lockFile = path.join(directory, "data", "run", "gamemind.lock.json");
+    let completed = false;
+    try {
+      await waitFor(() => first.lines.some((line) => /stays connected/.test(line)), "terminal session connected and stayed up");
+      const saved = JSON.parse(await readFile(lockFile, "utf8")) as { pid: number; url: string | null };
+      assert.equal(saved.pid, process.pid);
+      assert.equal(saved.url, null, "a terminal-only lock has no dashboard address");
+
+      const second = harness(directory);
+      assert.equal(await runCommandLine(second.request({ controlCenter: false, instanceLock: true })), 3);
+      assert.match(second.lines.join("\n"), /already running in this project/);
+    } finally {
+      first.signals.send("SIGINT");
+      assert.equal(await running, 0);
+      completed = true;
+    }
+    assert.equal(completed, true);
+    await assert.rejects(readFile(lockFile, "utf8"), { code: "ENOENT" }, "the project lock is released after terminal shutdown");
+  });
+});
+
 test("--no-connect starts only the Control Center, which waits for a connection from the page", async () => {
   await withDirectory(async (directory) => {
     const h = harness(directory);
@@ -279,13 +304,41 @@ test("the flag parser separates persistent from one-shot, keeps loopback by defa
   assert.equal(scripted.reconnectAttempts, 3);
   assert.equal(scripted.dataDirectory, "elsewhere");
 
-  assert.equal(parseArgs(["--no-connect"]).connect, false);
-  assert.throws(() => parseArgs(["--no-connect", "--task", "gather-logs"]), /--no-connect starts only the Control Center/);
+  assert.equal(live.controlCenter, false, "the dashboard is not enabled by default");
+  assert.deepEqual(liveRunShape(live), { mode: "persistent", serve: false }, "persistent live sessions default to terminal mode");
+  assert.deepEqual(liveRunShape(parseArgs(["--control-center"])), { mode: "persistent", serve: true }, "the dashboard is opt-in");
+  assert.equal(parseArgs(["--no-connect", "--control-center"]).connect, false);
+  assert.throws(() => parseArgs(["--no-connect"]), /--no-connect needs --control-center/);
+  assert.throws(() => parseArgs(["--no-connect", "--control-center", "--task", "gather-logs"]), /--no-connect starts only the Control Center/);
   assert.throws(() => parseArgs(["--no-control-center", "--open-browser"]), /--open-browser needs the Control Center/);
   assert.throws(() => parseArgs(["--no-control-center", "--control-center"]), /cannot be combined/);
   assert.throws(() => parseArgs(["--reconnect-attempts", "99"]), /0 through 20/);
   assert.throws(() => parseArgs(["--allow-host", "bad host!"]), /host name/);
   assert.throws(() => parseArgs(["--demo-task", "--one-shot"]), /offline fixture demos/);
+
+  const housePlan = parseArgs(["--house-plan", "a"]);
+  assert.equal(housePlan.housePlanConcept, "A");
+  const housePlanJson = parseArgs(["--house-plan", "B", "--house-plan-json", "./blueprints/house-b.json"]);
+  assert.equal(housePlanJson.housePlanConcept, "B");
+  assert.equal(housePlanJson.housePlanJsonPath, "./blueprints/house-b.json");
+  assert.throws(() => parseArgs(["--house-plan", "D"]), /concept A, B, or C/);
+  assert.throws(() => parseArgs(["--house-plan-json", "./blueprints/house.json"]), /requires --house-plan/);
+  assert.throws(() => parseArgs(["--house-plan", "A", "--host", "127.0.0.1"]), /offline-only/);
+  assert.throws(() => parseArgs(["--house-plan", "A", "--litematic-plan", "x.litematic"]), /offline-only/);
+
+  const litematicPlan = parseArgs(["--litematic-plan", "./blueprints/test.litematic"]);
+  assert.equal(litematicPlan.litematicPlanPath, "./blueprints/test.litematic");
+  const litematicLayer = parseArgs(["--litematic-plan", "./blueprints/test.litematic", "--litematic-layer", "3"]);
+  assert.equal(litematicLayer.litematicLayer, 3);
+  assert.throws(() => parseArgs(["--litematic-layer", "3"]), /requires --litematic-plan/);
+  assert.throws(() => parseArgs(["--litematic-plan", "x.litematic", "--litematic-layer", "256"]), /0 through 255/);
+  const litematicBridge = parseArgs(["--litematic-bridge", "./blueprints/test.litematic"]);
+  assert.equal(litematicBridge.litematicBridgePath, "./blueprints/test.litematic");
+  assert.equal(litematicBridge.allowNonLoopbackBridge, false);
+  assert.equal(parseArgs(["--litematic-bridge", "x.litematic", "--litematic-bridge-host", "0.0.0.0", "--allow-nonloopback-litematic-bridge"]).allowNonLoopbackBridge, true);
+  assert.throws(() => parseArgs(["--litematic-plan", "x.litematic", "--host", "127.0.0.1"]), /offline-only/);
+  assert.throws(() => parseArgs(["--litematic-bridge", "x.litematic", "--task", "gather-logs"]), /cannot be combined/);
+  assert.throws(() => parseArgs(["--litematic-bridge-host", "127.0.0.1"]), /require --litematic-bridge/);
 });
 
 test("--look-yaw is a one-shot probe and refuses the options that would have it keep a session or serve the page", () => {

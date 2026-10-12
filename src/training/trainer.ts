@@ -66,7 +66,7 @@ export interface TrainingRunOptions {
   readonly episodePool?: EpisodePool;
   /** Called once per finished episode, in order. Used for experiment logs and throughput measurement. */
   readonly onEpisode?: (event: TrainingEpisodeEvent) => void;
-  /** When true, suppresses most logging to improve performance. Useful for benchmark runs. */
+  /** When true, suppresses most logging to improve performance. Useful for batch runs. */
   readonly quiet?: boolean;
 }
 
@@ -441,8 +441,9 @@ async function choosePool(
   logger: Pick<Logger, "info" | "warn"> | undefined,
 ): Promise<EpisodePool | null> {
   if (options.episodePool) return options.episodePool;
-  // Use all available CPU cores by default (max MAX_WORKERS for safety)
-  const requested = options.workers ?? DEFAULT_WORKERS;
+  // Injected runners are a test seam and cannot execute in child processes. Keep them serial by default; callers
+  // may still set workers: 1 explicitly, while requesting parallel workers remains a configuration error.
+  const requested = options.workers ?? (options.episodeRunner ? 1 : DEFAULT_WORKERS);
   if (!Number.isInteger(requested) || requested < 1 || requested > MAX_WORKERS) {
     throw new Error(`Workers must be a whole number from 1 through ${MAX_WORKERS}.`);
   }
@@ -451,10 +452,10 @@ async function choosePool(
     throw new Error("Parallel workers run the simulator in their own processes; a custom episode runner can only run with one worker.");
   }
   if (learner.activeWeights !== null) {
-    log("warn", { workers: requested }, "A promoted policy is in force; parallel workers cannot reproduce it, so this run uses one worker.");
+    logger?.warn({ workers: requested }, "A promoted policy is in force; parallel workers cannot reproduce it, so this run uses one worker.");
     return null;
   }
-  log("info", { workers: requested }, "Using parallel worker pool for faster training");
+  logger?.info({ workers: requested }, "Using parallel worker pool for faster training");
   return createProcessEpisodePool({ workers: requested, stages, experienceDirectory });
 }
 

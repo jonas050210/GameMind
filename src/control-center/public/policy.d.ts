@@ -1,8 +1,4 @@
 // Types for the browser policy module, so the TypeScript tests can import it. The browser loads policy.js directly.
-export declare const HEADLESS_STORAGE_KEY: string;
-export declare function parseHeadless(stored: unknown): boolean;
-export declare function isTrainingActive(training: unknown): boolean;
-export declare function renderingSuspended(snapshot: unknown, headless: boolean): boolean;
 export declare const ROADMAP_CATEGORY_ORDER: readonly string[];
 export declare const ROADMAP_KIND_LABELS: Readonly<Record<string, string>>;
 export declare const ROADMAP_STATUS_LABELS: Readonly<Record<string, string>>;

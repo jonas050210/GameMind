@@ -14,15 +14,15 @@ import { minecraftObservationSchema } from "../src/games/minecraft/observation.j
 import { MinecraftAdapter } from "../src/games/minecraft/minecraft-adapter.js";
 import { createLiveMock, connectAdapter, attemptCollection, run, config, NO_PATH_X, PLAN_TIMEOUT_X, type MockOptions, type MockBlock, Vec } from "./support/minecraft-double.js";
 
-test("Minecraft chat is not wired to any control path", async () => {
+test("Minecraft chat transport is available but remains unauthorized without an exact operator allowlist", async () => {
   const mock = createLiveMock();
   const adapter = await connectAdapter(mock);
-  // The chat-command system was removed: the adapter exposes no chat subscription or send path,
-  // and emitting chat must not throw, move the agent, or change any state.
-  assert.equal("onCompanionChat" in adapter, false);
-  assert.equal("sendCompanionChat" in adapter, false);
-  assert.equal(typeof (adapter as unknown as Record<string, unknown>).onCompanionChat, "undefined");
-  (mock.bot as unknown as EventEmitter).emit("chat", "Alex", "#follow");
+  const received: Array<{ username: string; message: string }> = [];
+  assert.equal(adapter.operatorUsername, null);
+  const unsubscribe = adapter.onChatMessage((message) => received.push(message));
+  (mock.bot as unknown as EventEmitter).emit("chat", "Alex", "follow me");
+  assert.deepEqual(received, [{ username: "Alex", message: "follow me" }]);
+  unsubscribe();
   await adapter.disconnect("test");
 });
 
@@ -598,6 +598,23 @@ test("collecting a log 18 blocks away walks there, digs it, and confirms the ite
   assert.ok(mock.goals.length >= 1, "the bot walked toward the log");
   assert.deepEqual(digs, [{ x: 12, y: 64, z: 0 }]);
   await adapter.disconnect("test");
+});
+
+test("collection refuses to dig a log that is blocked from the current line of sight", async () => {
+  const mock = createLiveMock({ lineOfSight: (block) => block.name === "oak_log" ? "blocked" : "clear" });
+  mock.setPlayer(12.5, 64, 2.5);
+  mock.blocks.set("12,64,0", { name: "oak_log", type: 1, boundingBox: "block" });
+  mock.blocks.set("12,65,1", { name: "stone", type: 1, boundingBox: "block" });
+  const { digs } = bindReachAndDig(mock);
+  const adapter = await connectAdapter(mock);
+
+  await assert.rejects(
+    run(adapter, MINECRAFT_COLLECT_BLOCK_CAPABILITY, { x: 12, y: 64, z: 0, blockName: "oak_log", dangerRadius: 6 }),
+    (error: unknown) => (error as { code?: string }).code === "RESOURCE_TARGET_NOT_VISIBLE",
+  );
+  assert.deepEqual(digs, [], "a solid occluder must be detected before the irreversible dig");
+  assert.equal(mock.countItem("oak_log"), 0);
+  await adapter.disconnect("line-of-sight collection test complete");
 });
 
 test("collection re-reads the target after navigation and refuses to dig a vanished log", async () => {

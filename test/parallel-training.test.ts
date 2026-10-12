@@ -13,7 +13,6 @@ import { createEpisodePool, createInProcessEpisodePool, createProcessEpisodePool
 import { trainingSeed, type CurriculumStage } from "../src/training/curriculum.js";
 import type { EpisodeJob, EpisodeJobResult, JobSync } from "../src/training/episode-job.js";
 import { runTraining } from "../src/training/trainer.js";
-import { probeWorkerCounts } from "../src/training/throughput-probe.js";
 import { trainingPaths } from "../src/training/state.js";
 
 const STAGES: CurriculumStage[] = [
@@ -153,23 +152,6 @@ test("parallel workers cannot run a custom episode runner, and the error says so
     );
   } finally {
     await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("the throughput probe measures each worker count over the same timed window", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "par-probe-"));
-  try {
-    const results = await probeWorkerCounts({ workerCounts: [1, 2], seconds: 3, warmupSeconds: 1, workDir: dir, stages: STAGES });
-    assert.deepEqual(results.map((result) => result.workers), [1, 2]);
-    for (const result of results) {
-      assert.equal(result.status, "measured", result.error ?? "");
-      assert.ok(result.episodesMeasured > 0, "episodes were measured");
-      assert.ok(result.episodesPerMinute > 0);
-      assert.ok(result.eligible, result.reason);
-    }
-    assert.equal(results[1]!.respawns, 0);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
   }
 });
 

@@ -103,8 +103,7 @@ test("the Control Center is up before any session exists, and its snapshot says 
     assert.equal(snapshot.world.freshness.reason, "no-observation");
     assert.equal(snapshot.app?.bind.localOnly, true);
     assert.equal(snapshot.app?.platform.node, process.version);
-    assert.ok(snapshot.training, "training exists without a session");
-    assert.equal(snapshot.training?.execution, "offline-simulator");
+    assert.ok(!("training" in snapshot), "the operator API no longer exposes a training UI section");
     assert.equal(snapshot.scheduler ?? null, null);
   } finally {
     await fixture.close();
@@ -362,7 +361,7 @@ test("the event log records the lifecycle, is searchable, and never contains abs
   }
 });
 
-test("detail endpoints are served: tasks, learning, memory, evaluation, training preflight", async () => {
+test("detail endpoints are served: tasks, learning, memory and evaluation", async () => {
   const fixture = await startApp();
   try {
     const tasks = await fixture.get<{ tasks: Array<{ kind: string; limits: { maxActions: number; maxConsecutiveFailures: number }; parameters: Record<string, unknown> }> }>("api/tasks");
@@ -393,39 +392,7 @@ test("detail endpoints are served: tasks, learning, memory, evaluation, training
     assert.equal(evaluation.live.latest, null, "no live verification result exists unless one was run");
     assert.equal(evaluation.live.confirmation.required, true);
 
-    const preflight = await fixture.get<{ directory: string; fresh: { needsConfirmation: boolean }; directoryName: string; directories: string[] }>("api/training-preflight");
-    assert.equal(preflight.directoryName, "training");
-    assert.equal(preflight.fresh.needsConfirmation, false);
-    assert.ok(preflight.directories.includes("training"));
-    assert.ok(!JSON.stringify(preflight).includes(fixture.directory));
-  } finally {
-    await fixture.close();
-  }
-});
 
-test("training commands go to the real hub: invalid input is refused and a fresh start needs the confirmation the form collects", async () => {
-  const fixture = await startApp();
-  try {
-    assert.equal((await fixture.command("startTraining", { maxMinutes: 0 })).status, 409);
-    assert.equal((await fixture.command("startTraining", { directory: "../escape" })).status, 409);
-    const dir = await fixture.command("startTraining", { directory: "bad/name" });
-    assert.equal(dir.status, 409);
-    assert.match(dir.body.message ?? "", /not a valid training folder name/);
-    // Folders GameMind keeps for other things are never a training folder: a run would overwrite their state.json.
-    await mkdir(path.join(fixture.directory, "data", "roadmap"), { recursive: true });
-    await writeFile(path.join(fixture.directory, "data", "roadmap", "state.json"), '{"items":[]}\n', "utf8");
-    for (const reserved of ["roadmap", "learning", "world-memory", "Roadmap"]) {
-      const refused = await fixture.command("startTraining", { directory: reserved });
-      assert.equal(refused.status, 409, `'${reserved}' must be refused as a training folder`);
-      assert.match(refused.body.message ?? "", /folder GameMind uses for something else/);
-      assert.equal((await fixture.command("selectTrainingDirectory", reserved)).status, 409);
-    }
-    const offered = await fixture.get<{ directories: string[] }>("api/training-preflight");
-    assert.ok(!offered.directories.includes("roadmap"), "a folder with a state.json that is not a training run is not offered");
-    assert.equal(await readFile(path.join(fixture.directory, "data", "roadmap", "state.json"), "utf8"), '{"items":[]}\n', "the refused requests changed nothing");
-    assert.equal((await fixture.command("selectTrainingDirectory", "experiment-a")).status, 200);
-    assert.equal((await fixture.snapshot()).training?.root, "data/experiment-a");
-    assert.equal((await fixture.command("pauseTraining")).status, 409, "pausing with nothing running is refused, not acknowledged");
   } finally {
     await fixture.close();
   }

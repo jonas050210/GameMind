@@ -503,12 +503,13 @@ export class ExperienceLearner {
         outcome: draft.outcome,
       });
       this.runEpisodes.push(episode);
+      const evidenceEpisode = admitsProvenance(episode, this.evidenceProvenance ?? undefined);
 
-      // Compute the reward signal for this episode. It is derived from the *validated* episode with the same
-      // helper the log rebuild uses, so the live numbers and the numbers after a restart cannot diverge.
+      // Compute the reward signal only from evidence this learner trusts. The episode remains in the append-only
+      // log either way; filtering here keeps live counters aligned with the rebuild path and provenance contract.
       try {
         const rewardInput = rewardInputOf(episode);
-        if (rewardInput) {
+        if (rewardInput && evidenceEpisode) {
           const reward = computeReward(rewardInput, this.rewardConfig);
           this.rewardAggregate = updateRewardAggregate(this.rewardAggregate, reward.total);
           this.rewardSum += reward.total;
@@ -519,7 +520,7 @@ export class ExperienceLearner {
 
       // Update class-level failure memory for failures
       try {
-        if (draft.outcome.status !== "succeeded" && draft.outcome.failureCode && draft.targetKey) {
+        if (evidenceEpisode && draft.outcome.status !== "succeeded" && draft.outcome.failureCode && draft.targetKey) {
           const patternKey = deriveClassPatternKey(
             draft.features.skillId,
             draft.features.goalClass,
@@ -535,7 +536,7 @@ export class ExperienceLearner {
             targetKey: draft.targetKey,
             runIndex: this.state.runs,
           });
-        } else if (draft.outcome.status === "succeeded" && draft.outcome.progress && draft.targetKey) {
+        } else if (evidenceEpisode && draft.outcome.status === "succeeded" && draft.outcome.progress && draft.targetKey) {
           const patternKey = deriveClassPatternKey(
             draft.features.skillId,
             draft.features.goalClass,
@@ -572,7 +573,12 @@ export class ExperienceLearner {
       return this.emptyReport(context?.runId ?? "disabled", episodes.length, 0);
     }
     await this.load();
-    if (episodes.length > 0) await this.store.appendMany(episodes);
+    if (episodes.length > 0) {
+      await this.store.appendMany(episodes);
+      // A completed run is a persistence boundary. Do not write the state/checkpoint ahead of a buffered
+      // episode log: recovery and the provenance audit both treat that append-only log as their source of truth.
+      await this.store.flush();
+    }
 
     const state = this.state;
     const stats = { ...state.stats };

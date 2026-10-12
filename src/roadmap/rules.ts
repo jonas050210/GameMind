@@ -25,7 +25,6 @@ const EPISODE_FAILURE_MIN = 5;
 const EPISODE_FAILURE_RATIO_MIN = 0.05;
 const SKILL_MIN_ATTEMPTS = 10;
 const SKILL_SUCCESS_MAX = 0.9;
-const EVAL_BLOCK_MIN = 10;
 const LOOP_HZ_MIN = 0.8;
 const OBSERVATION_AGE_P95_MAX_MS = 2_000;
 const REACTION_P95_MAX_MS = 1_000;
@@ -166,69 +165,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
     }
   }
 
-  // 4. Training that measured no gain over the baseline on held-out seeds.
-  const evaluation = bundle.training?.evaluation ?? null;
-  if (bundle.training && evaluation && evaluation.verdict !== "promotable" && evaluation.successDelta === 0) {
-    candidates.push({
-      fingerprint: "training.no-measured-gain",
-      title: "Trained candidate shows no measured gain over the baseline",
-      category: "training",
-      kind: "hypothesis",
-      explanation:
-        "On the held-out evaluation seeds the candidate scores the same as the baseline. The data does not show why. Candidate causes to test, none established: reward terms that do not separate good from bad outcomes, too few episodes per stage, and candidate weights that rarely change a decision.",
-      evidence: [
-        {
-          source: "training evaluation",
-          metric: "success rate baseline → candidate",
-          value: `${pct(evaluation.baselineSuccess)} → ${pct(evaluation.candidateSuccess)}`,
-          measuredAt: evaluation.measuredAt,
-        },
-        { source: "training state", metric: "episodes trained", value: String(bundle.training.episodes), measuredAt: bundle.training.measuredAt },
-        { source: "training evaluation", metric: "verdict", value: evaluation.verdict, measuredAt: evaluation.measuredAt },
-      ],
-      expectedBenefit: "Either a measured improvement that can pass the promotion gate, or a clear negative result that closes this line of work.",
-      effort: 3,
-      impact: 3,
-      urgency: 2,
-      confidence: 0.6,
-      dependencies: ["Reward audit on episodes that failed", "A larger held-out evaluation set"],
-      severity: bundle.training.episodes,
-      measuredAt: evaluation.measuredAt,
-    });
-  }
-
-  // 5. Evaluation tasks that end blocked. Grouped into one item, because they share a cause to investigate.
-  if (evaluation) {
-    const blocked = Object.entries(evaluation.baselineFailureCodes).filter(([code, count]) => code.startsWith("TASK_BLOCKED") && count >= EVAL_BLOCK_MIN);
-    if (blocked.length > 0) {
-      const total = blocked.reduce((sum, [, count]) => sum + count, 0);
-      const categories = [...new Set(blocked.map(([code]) => BLOCKED_CODE_CATEGORY[code] ?? "reliability"))];
-      candidates.push({
-        fingerprint: "training.eval-blocked",
-        title: `Evaluation tasks end blocked (${total} runs)`,
-        category: categories.length === 1 ? categories[0]! : "reliability",
-        kind: "hypothesis",
-        explanation:
-          "Many baseline evaluation runs end in a blocked state before the task completes. Whether that is a defect depends on whether those scenarios are meant to have the target, which these numbers do not show.",
-        evidence: blocked.map(([code, count]) => ({
-          source: "training evaluation (baseline)",
-          metric: code,
-          value: `${count} runs`,
-          measuredAt: evaluation.measuredAt,
-        })),
-        expectedBenefit: "Separates real planning gaps from scenarios that cannot succeed by design, so the evaluation measures the right thing.",
-        effort: 2,
-        impact: 3,
-        urgency: 2,
-        confidence: 0.5,
-        dependencies: ["Scenario review against the curriculum"],
-        severity: total,
-        measuredAt: evaluation.measuredAt,
-      });
-    }
-  }
-
-  // 6. Recurring failure codes in recorded episodes (training and learning stores).
+  // 4. Recurring failure codes in recorded episodes.
   const episodes = bundle.episodes;
   if (episodes && episodes.total > 0) {
     for (const [code, count] of Object.entries(episodes.failureCodes)) {
@@ -243,7 +180,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
         evidence: [
           { source: `episode store (${provenanceMix(episodes)})`, metric: "episodes with this code", value: `${count} of ${episodes.total} (${pct(count / episodes.total)})`, measuredAt: episodes.measuredAt },
         ],
-        expectedBenefit: "Fewer episodes end in this failure, which raises training throughput and clarifies the policy's signal.",
+        expectedBenefit: "Fewer episodes end in this failure, which reduces recurring failures and clarifies the policy's signal.",
         effort: 2,
         impact: 3,
         urgency: 3,
@@ -254,7 +191,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
       });
     }
 
-    // 7. Skills whose recorded success rate is low. A measured defect, with the cause left open.
+    // 5. Skills whose recorded success rate is low. A measured defect, with the cause left open.
     for (const [skill, stats] of Object.entries(episodes.skills)) {
       if (stats.attempts < SKILL_MIN_ATTEMPTS) continue;
       const rate = stats.successes / stats.attempts;
@@ -281,7 +218,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
     }
   }
 
-  // 8. Live runtime measurements. Present only when a live host reports them; the CLI never invents them.
+  // 6. Live runtime measurements. Present only when a live host reports them; the CLI never invents them.
   const runtime = bundle.runtime;
   if (runtime) {
     if (runtime.loopHz !== null && runtime.loopHz < LOOP_HZ_MIN) {
@@ -342,7 +279,7 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
     }
   }
 
-  // 9. Documented gaps. These are facts about the code or the verification coverage, not measured failures.
+  // 7. Documented gaps. These are facts about the code or the verification coverage, not measured failures.
   if (bundle.liveVerification === null) {
     candidates.push({
       fingerprint: "reliability.live-verification",
@@ -364,23 +301,6 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
       measuredAt: null,
     });
   }
-  candidates.push({
-    fingerprint: "training.headless-live",
-    title: "Headless training against a live server",
-    category: "training",
-    kind: "idea",
-    explanation:
-      "Training runs only on the offline simulator. Running episodes against a live server would need a verified live loop first. Mineflayer connects without a game window, but this has not been run here.",
-    evidence: [{ source: "training manager", metric: "execution", value: "offline-simulator", measuredAt: null }],
-    expectedBenefit: "Training on the real server's physics, at the cost of live risk and speed.",
-    effort: 3,
-    impact: 2,
-    urgency: 1,
-    confidence: 0.5,
-    dependencies: ["Live verification of the autonomy loop"],
-    severity: 1,
-    measuredAt: null,
-  });
   candidates.push({
     fingerprint: "world-knowledge.seed-auto-detect",
     title: "Detect the world seed automatically",

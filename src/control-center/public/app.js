@@ -11,18 +11,16 @@ import { fmtDuration, fmtNumber, humanise } from "./lib/format.js";
 import { DEFAULT_LANGUAGE, LANGUAGES, applyTranslations, isLanguage, setLanguage as applyLanguage, translate } from "./lib/i18n.js";
 import { card, notice } from "./lib/ui.js";
 import { renderOverview } from "./views/overview.js";
-import { renderTraining } from "./views/training.js";
 import { renderBots } from "./views/bots.js";
 import { renderTasks } from "./views/tasks.js";
 import { renderEvaluation } from "./views/evaluation.js";
 import { renderLearning } from "./views/learning.js";
 import { renderMemory, EVENT_CATEGORIES } from "./views/memory.js";
 
-export const TABS = ["overview", "training", "bots", "tasks", "evaluation", "learning", "memory"];
+export const TABS = ["overview", "bots", "tasks", "evaluation", "learning", "memory"];
 
 const VIEWS = {
   overview: renderOverview,
-  training: renderTraining,
   bots: renderBots,
   tasks: renderTasks,
   evaluation: renderEvaluation,
@@ -30,7 +28,6 @@ const VIEWS = {
   memory: renderMemory,
 };
 
-const NEW_FOLDER = "__new__";
 const THEME_KEY = "gamemind.theme";
 const LANGUAGE_KEY = "gamemind.language";
 const EVENT_LIMIT = 300;
@@ -41,14 +38,12 @@ export function tabFromHash(hash) {
 }
 
 /** The detail queries the page needs for a tab, with how often each is worth asking again. */
-export function wantedResources(ui, folder) {
+export function wantedResources(ui) {
   const list = [{ name: "tasks", everyMs: 30000 }];
-  if (ui.tab === "training") list.push({ name: "training-preflight", params: folder ? { directory: folder } : {}, everyMs: 3000 });
   if (ui.tab === "bots") {
     list.push({ name: "diagnostics", everyMs: 30000 });
     list.push({ name: "testServer", everyMs: 4000 });
   }
-  if (ui.tab === "training") list.push({ name: "benchmarks", everyMs: 15000 });
   if (ui.tab === "evaluation") list.push({ name: "evaluation", everyMs: 4000 });
   if (ui.tab === "learning") list.push({ name: "learning", params: { store: ui.learningStore }, everyMs: 5000 });
   if (ui.tab === "memory") {
@@ -115,11 +110,9 @@ export function boot(env = {}) {
   const real = (text) => (typeof text === "string" && text.length > 0 && !text.startsWith("__") ? text : "");
 
   const api = createApi({ fetch: env.fetch ?? win.fetch?.bind(win), token: real(bootData.token) });
-  /** @type {{ tab: string, trainingMode: string, trainingDirectory: string | null, evalReportIndex: number, roadmapShowClosed: boolean, eventsPaused: boolean, learningStore: string, language: string, eventFilters: { q: string, level: string, scope: string, source: string, categories: string[] } }} */
+  /** @type {{ tab: string, evalReportIndex: number, roadmapShowClosed: boolean, eventsPaused: boolean, learningStore: string, language: string, eventFilters: { q: string, level: string, scope: string, source: string, categories: string[] } }} */
   const ui = {
     tab: "overview",
-    trainingMode: "resume",
-    trainingDirectory: null,
     evalReportIndex: 0,
     roadmapShowClosed: false,
     eventsPaused: false,
@@ -173,15 +166,10 @@ export function boot(env = {}) {
     setTimer,
     clearTimer,
     isHidden: () => document.hidden === true,
-    wanted: () => wantedResources(ui, trainingFolder()),
+    wanted: () => wantedResources(ui),
     onChange: () => render(),
   });
 
-  function trainingFolder() {
-    const select = el("training-directory");
-    if (select.value === NEW_FOLDER) return el("training-new-directory").value.trim();
-    return select.value || ui.trainingDirectory || "";
-  }
 
   function context() {
     const { state } = store;
@@ -194,10 +182,8 @@ export function boot(env = {}) {
         evaluation: data("evaluation"),
         tasks: data("tasks"),
         events: data("events"),
-        preflight: data("training-preflight"),
         diagnostics: data("diagnostics"),
         testServer: data("testServer"),
-        benchmarks: data("benchmarks"),
       },
       ui,
       now: now(),
@@ -435,71 +421,6 @@ export function boot(env = {}) {
     setText(el("task-hint"), text);
   }
 
-  function syncTrainingForm(ctx) {
-    const training = ctx.snapshot?.training ?? null;
-    const preflight = ctx.data.preflight.value;
-    const select = el("training-directory");
-    const names = preflight?.directories ?? (training ? [String(training.root).split("/").pop()] : []);
-    const changed = setOptions(select, [...names.map((name) => ({ value: name, label: name })), { value: NEW_FOLDER, label: "New folder…" }]);
-    const wanted = ui.trainingDirectory ?? preflight?.directoryName ?? null;
-    if (wanted && wanted !== select.value && names.includes(wanted) && (changed || ui.trainingDirectory !== null) && document.activeElement !== select) select.value = wanted;
-    const creating = select.value === NEW_FOLDER;
-    el("training-new-directory").hidden = !creating;
-
-    // Curriculum stages: offered exactly as the runner defines them.
-    const stages = training?.availableStages ?? [];
-    const box = el("training-stages");
-    const defaultStageIds = training?.defaultStageIds ?? null;
-    const stageKey = JSON.stringify({ ids: stages.map((stage) => stage.id), defaults: defaultStageIds });
-    if (box.__stageKey !== stageKey) {
-      while (box.firstChild) box.removeChild(box.firstChild);
-      for (const stage of stages) {
-        const label = document.createElement("label");
-        label.className = "choice";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.value = stage.id;
-        input.checked = defaultStageIds ? defaultStageIds.includes(stage.id) : true;
-        input.id = `training-stage-${stage.id}`;
-        const text = document.createElement("span");
-        text.textContent = `${stage.label} (${fmtNumber(stage.scenarioCount)} scenarios, at least ${fmtNumber(stage.minEpisodes)} episodes)`;
-        label.appendChild(input);
-        label.appendChild(document.createTextNode(" "));
-        label.appendChild(text);
-        box.appendChild(label);
-      }
-      box.__stageKey = stageKey;
-    }
-
-    const mode = el("training-mode-fresh").checked ? "fresh" : "resume";
-    ui.trainingMode = mode;
-    const existing = preflight?.existing;
-    const lockStages = Boolean(existing?.hasRun) && mode === "resume";
-    for (const stage of stages) el(`training-stage-${stage.id}`).disabled = lockStages;
-
-    const needsConfirm = mode === "fresh" && preflight?.fresh?.needsConfirmation === true;
-    el("training-confirm-row").hidden = !needsConfirm;
-    if (!needsConfirm) el("training-confirm-fresh").checked = false;
-
-    const status = training?.status ?? "idle";
-    const alive = training?.processAlive === true;
-    const busy = alive || preflight?.busy === true || status === "evaluating";
-    const folder = trainingFolder();
-    let reason = null;
-    if (!training) reason = "Training is not available in this run.";
-    else if (ctx.lost) reason = "No contact with GameMind.";
-    else if (busy) reason = "A run is already active here, so another cannot start. Stop it first: one run per folder, one run at a time.";
-    else if (folder === "") reason = "Enter a name for the new folder.";
-    else if (needsConfirm && !el("training-confirm-fresh").checked) reason = "Tick the box above to confirm the fresh start.";
-    else if (mode === "resume" && existing?.hasRun && preflight?.resume && !preflight.resume.possible) reason = preflight.resume.summary;
-    el("training-start").disabled = reason !== null;
-    setText(el("training-start-hint"), reason ?? (mode === "fresh" ? "Starting fresh archives the saved run first; nothing is deleted." : existing?.hasRun ? "Resuming adds to the saved run." : "This folder holds no run yet, so this starts a new one."));
-    el("training-pause").disabled = !(status === "running" && alive) || ctx.lost;
-    el("training-resume").disabled = !(status === "paused" || status === "interrupted") || ctx.lost;
-    el("training-stop").disabled = !(alive || status === "paused") || ctx.lost;
-    el("training-evaluate").disabled = busy || (training?.checkpoints?.length ?? 0) === 0 || ctx.lost;
-  }
-
   function syncEvalForm(ctx) {
     const busy = ctx.snapshot?.jobs?.busy === true;
     const available = Boolean(ctx.snapshot?.jobs);
@@ -565,43 +486,11 @@ export function boot(env = {}) {
     box.__built = true;
   }
 
-  function syncBenchmarkForm(ctx) {
-    const form = document.getElementById("benchmark-form");
-    if (!form) return;
-    const training = ctx.snapshot?.training;
-    const activeJob = (ctx.snapshot?.jobs?.items ?? []).some((job) => job.state === "running");
-    const trainingBusy = training?.processAlive === true || ["running", "paused", "evaluating"].includes(training?.status ?? "");
-    const disabled = ctx.lost || !training || trainingBusy || activeJob;
-    const reason = ctx.lost
-      ? "GameMind is out of contact."
-      : !training
-        ? "Offline training is unavailable in this run."
-        : trainingBusy
-          ? "Wait for training or evaluation to finish before benchmarking."
-          : activeJob
-            ? "Another offline job is running. Wait for it to finish before benchmarking."
-            : "No Minecraft server is used; only the built-in simulator runs, without rendering.";
-    for (const control of [...form.querySelectorAll("input"), ...form.querySelectorAll("select")]) control.disabled = disabled;
-    el("benchmark-start").disabled = disabled;
-    setText(el("benchmark-start-hint"), reason);
-    const cases = Number(el("benchmark-environment-cases").value || 0);
-    const seconds = Number(el("benchmark-environment-seconds").value || 0);
-    const workerLimit = Number(el("benchmark-worker-limit").value || 1);
-    const environmentSeconds = Math.max(0, cases * seconds);
-    const workerSeconds = Math.max(0, workerLimit * 20);
-    setText(
-      el("benchmark-estimate"),
-      `${cases} environment case(s) × ${seconds} s ≈ ${fmtDuration(environmentSeconds * 1000)}; worker probe up to ${workerLimit} × 20 s ≈ ${fmtDuration(workerSeconds * 1000)}. Candidate training and held-out comparisons add more time. 256 × 20 s is about 85 minutes.`,
-    );
-  }
-
   function syncForms(ctx) {
     syncEventForm();
     if (!ctx.snapshot) return;
     syncConnectForm(ctx);
     syncTaskForm(ctx);
-    syncTrainingForm(ctx);
-    syncBenchmarkForm(ctx);
     syncEvalForm(ctx);
     syncLiveForm(ctx);
     syncSeedForm(ctx);
@@ -804,52 +693,6 @@ export function boot(env = {}) {
     return payload;
   }
 
-  function trainingPayload() {
-    const training = store.state.snapshot?.training;
-    const fresh = el("training-mode-fresh").checked;
-    const folder = trainingFolder();
-    const payload = { directory: folder, fresh, confirmFresh: fresh && el("training-confirm-fresh").checked };
-    for (const [id, key, label, integer] of [
-      ["training-max-episodes", "maxEpisodes", "The episode budget", true],
-      ["training-minutes", "maxMinutes", "The time budget", true],
-      ["training-episodes-per-stage", "episodesPerStage", "Episodes per stage", true],
-      ["training-explore", "explorationRate", "Exploration", false],
-    ]) {
-      const value = numberOrUndefined(id);
-      if (value === undefined) continue;
-      const input = el(id);
-      if (!Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < Number(input.min) || value > Number(input.max)) {
-        return { error: `${label} must be ${integer ? "a whole number" : "a number"} from ${input.min} to ${input.max}.` };
-      }
-      payload[key] = value;
-    }
-    const stages = [...(store.state.snapshot?.training?.availableStages ?? [])];
-    const chosen = stages.filter((stage) => el(`training-stage-${stage.id}`).checked && !el(`training-stage-${stage.id}`).disabled).map((stage) => stage.id);
-    const editable = stages.length > 0 && !el(`training-stage-${stages[0].id}`).disabled;
-    if (editable) {
-      if (chosen.length === 0) return { error: "Choose at least one curriculum stage." };
-      const defaultIds = training?.defaultStageIds ?? stages.map((stage) => stage.id);
-      if (chosen.length !== defaultIds.length || chosen.some((id, index) => id !== defaultIds[index])) payload.stageIds = chosen;
-    }
-    return payload;
-  }
-
-  /** @typedef {{ error: string } | { error?: never, environmentCases: number, environmentSecondsPerCase: number, workerLimit: number, stageIds: string[] }} BenchmarkPayload */
-
-  /** @returns {BenchmarkPayload} */
-  function benchmarkPayload() {
-    const cases = numberOrUndefined("benchmark-environment-cases");
-    const seconds = numberOrUndefined("benchmark-environment-seconds");
-    const workerLimit = numberOrUndefined("benchmark-worker-limit");
-    if (cases === undefined || !Number.isInteger(cases) || cases < 1 || cases > 256) return { error: "Environment cases must be a whole number from 1 through 256." };
-    if (seconds === undefined || !Number.isInteger(seconds) || seconds < 1 || seconds > 600) return { error: "Seconds per environment must be a whole number from 1 through 600." };
-    if (workerLimit === undefined || !Number.isInteger(workerLimit) || workerLimit < 1 || workerLimit > 8) return { error: "Probe workers must be a whole number from 1 through 8." };
-    const stages = store.state.snapshot?.training?.availableStages ?? [];
-    const stageIds = stages.filter((stage) => el(`benchmark-stage-${stage.id}`).checked).map((stage) => stage.id);
-    if (stageIds.length === 0) return { error: "Choose at least one curriculum stage to probe." };
-    return { environmentCases: cases, environmentSecondsPerCase: seconds, workerLimit, stageIds };
-  }
-
   /** @typedef {{ error: string } | { scope: string, allowDig: boolean, allowCombat: boolean, confirmed: boolean, confirmedWorldChanges: boolean, host?: string, port?: number, username?: string }} LivePayload */
 
   /** @returns {LivePayload} */
@@ -905,11 +748,6 @@ export function boot(env = {}) {
         return send("connectSession", connectPayload());
       case "task-form":
         return send("startTask", taskPayload());
-      case "training-form": {
-        const payload = trainingPayload();
-        if (payload.fresh && !payload.error && !ask("Start a fresh run? The saved run in this folder is archived first (nothing is deleted) and training starts again from episode 0 with an empty policy.")) return;
-        return send("startTraining", payload);
-      }
       case "eval-form": {
         const seeds = numberOrUndefined("eval-seeds");
         if (seeds !== undefined && (!Number.isInteger(seeds) || seeds < 1 || seeds > 200)) return send("runOfflineEvaluation", { error: "Seeds per scenario must be a whole number from 1 to 200." });
@@ -922,16 +760,6 @@ export function boot(env = {}) {
         if ("error" in payload) return send("runLiveVerification", payload);
         if ((payload.allowDig || payload.allowCombat) && !ask(`This lets a verification bot ${[payload.allowDig ? "dig a block" : null, payload.allowCombat ? "attack a hostile mob" : null].filter(Boolean).join(" and ")} on ${liveTarget()}. This changes the world on that server. Continue?`)) return;
         return send("runLiveVerification", payload);
-      }
-      case "benchmark-form": {
-        const payload = benchmarkPayload();
-        if ("error" in payload) return send("runBenchmark", { error: payload.error });
-        const environmentSeconds = payload.environmentCases * payload.environmentSecondsPerCase;
-        const workerSeconds = payload.workerLimit * 20;
-        const estimate = fmtDuration((environmentSeconds + workerSeconds) * 1000);
-        const confirmation = `Start this headless offline benchmark? The environment sweep is about ${estimate} for ${payload.environmentCases} case(s) at ${payload.environmentSecondsPerCase} seconds each, plus candidate training and held-out comparisons. It uses only the built-in simulator, does not start automatically after training, and never changes the live policy.`;
-        if (!ask(confirmation)) return;
-        return send("runBenchmark", payload);
       }
       case "seed-form":
         el("seed-input").__edited = false;
@@ -959,17 +787,7 @@ export function boot(env = {}) {
     else if (id === "task-kind") {
       taskFormKind = null;
       render();
-    } else if (id === "task-queue" || id.startsWith("live-") || id === "training-confirm-fresh") render();
-    else if (id === "training-directory") {
-      ui.trainingDirectory = target.value === NEW_FOLDER ? null : target.value;
-      if (target.value !== NEW_FOLDER) {
-        void runCommand("selectTrainingDirectory", target.value, { silent: true }).then(() => store.refreshResource("training-preflight", { directory: target.value }).then(render));
-      }
-      render();
-    } else if (id === "training-mode-resume" || id === "training-mode-fresh") {
-      ui.trainingMode = el("training-mode-fresh").checked ? "fresh" : "resume";
-      render();
-    } else if (id.startsWith("benchmark-")) render();
+    } else if (id === "task-queue" || id.startsWith("live-")) render();
     else if (id.startsWith("event-") && id !== "event-q") void refreshEvents();
   }
 
@@ -981,15 +799,7 @@ export function boot(env = {}) {
         debounceTimer = null;
         void refreshEvents();
       }, 250);
-    } else if (id === "training-new-directory") {
-      if (debounceTimer !== null) clearTimer(debounceTimer);
-      debounceTimer = setTimer(() => {
-        debounceTimer = null;
-        void store.refreshResource("training-preflight", { directory: trainingFolder() }).then(render);
-      }, 300);
-      render();
     } else if (id === "seed-input") event.target.__edited = true;
-    else if (id.startsWith("benchmark-")) render();
     else if (id.startsWith("live-")) render();
   }
 

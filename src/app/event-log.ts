@@ -22,7 +22,6 @@ export type AppEventCategory =
   | "decision"
   | "action"
   | "safety"
-  | "training"
   | "evaluation"
   | "learning"
   | "memory"

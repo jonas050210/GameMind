@@ -84,6 +84,12 @@ export function subgoalSignature(task: MinecraftTask): string {
       return "secure-food";
     case "build_shelter":
       return "build-shelter";
+    case "build_house":
+      return `build-house:${task.origin.x},${task.origin.y},${task.origin.z}`;
+    case "farm_wheat":
+      return `farm-wheat:${task.origin.x},${task.origin.y},${task.origin.z}:${task.width}x${task.depth}`;
+    case "excavate_volume":
+      return `excavate-volume:${task.origin.x},${task.origin.y},${task.origin.z}:${task.width}x${task.height}x${task.depth}`;
   }
 }
 
@@ -108,6 +114,15 @@ export function describeSubgoal(task: MinecraftTask): { subgoal: string; complet
       return { subgoal: "Restore hunger with food", completion: `hunger reaches ${task.targetHunger}/20` };
     case "build_shelter":
       return { subgoal: "Close the four cardinal sides", completion: "all four cardinal sides are observed solid" };
+    case "build_house":
+      return { subgoal: "Build a fixed 5×5 starter house", completion: "all 80 planned house blocks are read back at their target cells" };
+    case "farm_wheat":
+      return { subgoal: `Plant a ${task.width}×${task.depth} wheat plot`, completion: "every requested cell is hydrated farmland with an observed wheat crop" };
+    case "excavate_volume":
+      return {
+        subgoal: `Excavate ${task.width}×${task.height}×${task.depth} at ${task.origin.x},${task.origin.y},${task.origin.z}`,
+        completion: "every cell in the approved volume has been inspected and is confirmed air",
+      };
   }
 }
 

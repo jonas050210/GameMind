@@ -117,10 +117,9 @@ export const COMMANDS_USED = [
   "connectSession", "stopSession", "shutdownApp",
   "pause", "resume", "trip", "resetTrip", "enableCombat", "panic",
   "startTask", "stopTask", "cancelQueuedTask", "clearTaskQueue", "setAutonomy",
-  "startTraining", "pauseTraining", "resumeTraining", "stopTraining", "evaluateTraining", "selectTrainingDirectory",
   "runUnitTests", "runOfflineEvaluation", "runLiveVerification", "cancelJob",
   "promotePolicy", "rejectPolicy", "setWorldSeed", "refreshRoadmap", "roadmapAction", "libraryExecute",
-  "startTestServer", "stopTestServer", "probeServer", "runBenchmark",
+  "startTestServer", "stopTestServer", "probeServer",
 ];
 
 /**

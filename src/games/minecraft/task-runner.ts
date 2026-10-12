@@ -32,6 +32,9 @@ import { combatEnabledForPlanner } from "./combat.js";
 import { observedMovementProgress } from "./progress-evidence.js";
 import type { RuntimeMetrics } from "./runtime-metrics.js";
 import { REFLEX_THRESHOLDS, urgentReflexesSince } from "./reflex.js";
+import { MinecraftExcavationRunner } from "./excavation-runner.js";
+import { MinecraftHouseRunner } from "./house-runner.js";
+import { MinecraftWheatFarmRunner } from "./wheat-farm-runner.js";
 
 /** Failure code of an action the fast loop stopped because an urgent condition appeared. */
 export const REFLEX_INTERRUPT_CODE = "REFLEX_INTERRUPT";
@@ -211,6 +214,11 @@ function taskTarget(task: MinecraftTask): { item: string; count: number } {
   if (task.kind === "mine_resource") {
     return { item: miningDropFor(task.resourceName) ?? task.resourceName, count: task.targetCount };
   }
+  if (task.kind === "excavate_volume") {
+    return { item: "minecraft:excavated_blocks", count: task.width * task.height * task.depth };
+  }
+  if (task.kind === "build_house") return { item: "minecraft:house_blocks", count: 80 };
+  if (task.kind === "farm_wheat") return { item: "minecraft:wheat_crops", count: task.width * task.depth };
   return { item: "minecraft.food", count: 0 };
 }
 
@@ -403,6 +411,30 @@ export class MinecraftTaskRunner {
   }
 
   async run(task: MinecraftTask): Promise<MinecraftTaskResult> {
+    if (task.kind === "excavate_volume") {
+      return new MinecraftExcavationRunner(this.runtime, this.skills, this.logger, {
+        ...(this.options.shouldStop ? { shouldStop: this.options.shouldStop } : {}),
+        ...(this.options.onAction ? { onAction: this.options.onAction } : {}),
+        ...(this.options.metrics ? { metrics: this.options.metrics } : {}),
+        clock: this.clock,
+      }).run(task);
+    }
+    if (task.kind === "build_house") {
+      return new MinecraftHouseRunner(this.runtime, this.skills, this.logger, {
+        ...(this.options.shouldStop ? { shouldStop: this.options.shouldStop } : {}),
+        ...(this.options.onAction ? { onAction: this.options.onAction } : {}),
+        ...(this.options.metrics ? { metrics: this.options.metrics } : {}),
+        clock: this.clock,
+      }).run(task);
+    }
+    if (task.kind === "farm_wheat") {
+      return new MinecraftWheatFarmRunner(this.runtime, this.skills, this.logger, {
+        ...(this.options.shouldStop ? { shouldStop: this.options.shouldStop } : {}),
+        ...(this.options.onAction ? { onAction: this.options.onAction } : {}),
+        ...(this.options.metrics ? { metrics: this.options.metrics } : {}),
+        clock: this.clock,
+      }).run(task);
+    }
     const startedClock = this.clock();
     const deadline = startedClock + task.maxDurationMs;
     const actions: TaskActionSummary[] = [];

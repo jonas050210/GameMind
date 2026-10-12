@@ -84,7 +84,7 @@ export function capturedData(): Promise<CapturedData> {
       await waitFor(() => fixture.app.session?.state === "idle", "the fixture session became idle");
       const snapshot = await fixture.get<Record<string, any>>("api/snapshot?fresh=1"); // eslint-disable-line @typescript-eslint/no-explicit-any
       const queries: Record<string, unknown> = {};
-      for (const name of ["tasks", "learning", "memory", "evaluation", "events", "jobs", "training-preflight", "diagnostics"]) {
+      for (const name of ["tasks", "learning", "memory", "evaluation", "events", "jobs", "diagnostics"]) {
         queries[name] = await fixture.get(`api/${name}`);
       }
       return { snapshot, queries };

@@ -1,5 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import type { Logger } from "pino";
 import { startControlCenter } from "../control-center/server.js";
@@ -21,22 +20,22 @@ import { evaluationScenarios } from "../testing/eval/scenarios.js";
 import { BrowserOpener, type BrowserOpenResult } from "./browser.js";
 import { buildDetachedSnapshot } from "./detached-snapshot.js";
 import { AppEventLog, type AppEventCategory, type AppEventLevel, type AppEventSource } from "./event-log.js";
-import { planBenchmark, planLiveVerification, planOfflineEval, planUnitTests, JobPlanError, type PlanContext } from "./job-plans.js";
+import { planLiveVerification, planOfflineEval, planUnitTests, JobPlanError, type PlanContext } from "./job-plans.js";
 import { JobRunner, type JobSpec } from "./jobs.js";
 import { detectPlatform, discoverWindowsHost, type PlatformInfo } from "./platform.js";
 import { buildLearningQuery, buildMemoryQuery, evaluationOverview } from "./queries.js";
 import { defaultRedactionContext, displayPath, redactStrings, type RedactionContext } from "./redact.js";
 import { DEFAULT_RECONNECT_POLICY, MinecraftSession, SessionStartError, type ReconnectPolicy } from "./session.js";
 import { DEFAULT_SIMULATED_SCENARIO, SessionRequestError, createSessionFactory, type SessionFactory, type SessionFactoryDeps } from "./session-factory.js";
-import { TrainingDirectoryNameError, TrainingHub } from "./training-hub.js";
 import { TestServerController, describeProbe, probePort } from "./test-server.js";
-import { readBenchmarkListing } from "./benchmark-view.js";
-import { defaultsPathFor } from "../training/defaults.js";
+import { AppAlreadyRunningError, InstanceLockUnreadableError, ProjectInstanceLock } from "./instance-lock.js";
 import { NO_SESSION_VIEW, type ConnectRequest, type SessionMode, type SessionView } from "./types.js";
+
+export { AppAlreadyRunningError, InstanceLockUnreadableError };
 
 /**
  * The process-level owner of the platform: the Control Center server (up for the whole life of the process), at most
- * one agent session at a time, the training hub, the job runner, the policy store and the event log.
+ * one agent session at a time, the job runner, the policy store and the event log.
  *
  * A session coming and going never touches the server, and the server being opened or refreshed never touches the
  * session: the page only reads snapshots and sends commands, so a refresh cannot restart, reconnect or reopen anything.
@@ -69,42 +68,6 @@ export interface AppOptions {
   readonly now?: () => number;
 }
 
-/** Lock files held by apps in this very process, so a second app in the same process is refused too. */
-const HELD_LOCKS = new Set<string>();
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export class AppAlreadyRunningError extends Error {
-  readonly code = "APP_ALREADY_RUNNING";
-  constructor(
-    readonly url: string | null,
-    readonly pid: number,
-  ) {
-    super(`GameMind is already running in this project (process ${pid}${url ? `, Control Center at ${url}` : ""}). Open that address, or stop that process first.`);
-    this.name = "AppAlreadyRunningError";
-  }
-}
-
-/**
- * The instance lock exists but cannot be read or understood. Starting anyway would risk two agents on one
- * Minecraft account and one data directory, so the operator is asked to look at the file — an unreadable lock is
- * not evidence that nothing is running.
- */
-export class InstanceLockUnreadableError extends Error {
-  readonly code = "INSTANCE_LOCK_UNREADABLE";
-  constructor(
-    readonly lockFile: string,
-    readonly problem: string,
-  ) {
-    super(
-      `Cannot tell whether GameMind is already running in this project: '${lockFile}' exists but could not be read (${problem}). ` +
-        "Stop any running GameMind and delete that file, then start again.",
-    );
-    this.name = "InstanceLockUnreadableError";
-  }
-}
 
 export interface ConnectOutcome {
   readonly ok: boolean;
@@ -137,7 +100,6 @@ const SESSION_COMMANDS = [
 
 export class GameMindApp {
   readonly events: AppEventLog;
-  readonly training: TrainingHub;
   readonly jobs: JobRunner;
   readonly learner: ExperienceLearner | null;
   readonly simulatedLearner: ExperienceLearner | null;
@@ -153,7 +115,7 @@ export class GameMindApp {
   private readonly sampler = createRuntimePerformanceSampler();
   private readonly makeSession: SessionFactory;
   private readonly sessionDefaults: { mode: SessionMode; autonomy: boolean; reconnect: ReconnectPolicy };
-  private readonly lockFile: string | null;
+  private readonly projectLock: ProjectInstanceLock;
   private handleValue: ControlCenterHandle | null = null;
   private readonly testServer = new TestServerController();
   private sessionValue: MinecraftSession | null = null;
@@ -172,10 +134,10 @@ export class GameMindApp {
     this.learningDirectory = options.learningDirectory === null ? null : path.resolve(options.learningDirectory ?? path.join(this.dataDirectory, "learning"));
     this.memoryDirectory = path.resolve(options.memoryDirectory ?? path.join(this.dataDirectory, "world-memory"));
     this.traceDirectory = path.resolve(options.traceDirectory ?? path.join(this.dataDirectory, "traces"));
-    this.lockFile = options.instanceLock ? path.join(this.dataDirectory, "run", "gamemind.lock.json") : null;
     this.redaction = defaultRedactionContext(root);
     this.platform = options.platform ?? detectPlatform();
     this.startedAt = new Date((options.now ?? Date.now)()).toISOString();
+    this.projectLock = new ProjectInstanceLock(this.dataDirectory, this.startedAt, options.instanceLock === true);
     this.events =
       options.events ??
       new AppEventLog({
@@ -183,7 +145,6 @@ export class GameMindApp {
         directory: path.join(this.dataDirectory, "events"),
         onPersistError: (error) => options.logger.warn({ err: error }, "Could not persist the event log"),
       });
-    this.training = new TrainingHub({ dataDirectory: this.dataDirectory, displayData: displayPath(this.dataDirectory, this.redaction) ?? "data", events: this.events });
     this.jobs =
       options.jobRunner ??
       new JobRunner({ redaction: this.redaction, events: this.events, historyDirectory: path.join(this.dataDirectory, "jobs") });
@@ -252,7 +213,7 @@ export class GameMindApp {
     mkdirSync(this.dataDirectory, { recursive: true });
     await this.events.loadHistory();
     await this.jobs.loadHistory();
-    this.acquireInstanceLock();
+    this.projectLock.acquire();
     this.event("app", "APP_STARTING", `GameMind ${this.options.version} starting`, "info", { pid: process.pid, os: this.platform.os, wsl: this.platform.wsl, node: process.version });
     try {
       await this.learner?.load();
@@ -328,11 +289,9 @@ export class GameMindApp {
         ...(this.options.stepTimeoutMs !== undefined ? { stepTimeoutMs: this.options.stepTimeoutMs } : {}),
         host: {
           dataDirectory: this.dataDirectory,
-          trainingDirectory: path.join(this.dataDirectory, "training"),
           worldConfigPath: path.join(this.dataDirectory, "world-config.json"),
           companionMemoryDirectory: path.join(this.dataDirectory, "companion"),
           evaluationReportPath: path.join(this.dataDirectory, "eval", "offline-report.json"),
-          training: this.training,
         },
       });
       this.sessionValue = session;
@@ -402,7 +361,6 @@ export class GameMindApp {
       await this.sessionValue?.stop(reason);
     });
     await step("jobs", async () => this.jobs.dispose());
-    await step("training", async () => this.training.dispose());
     await step("experience stores", async () => {
       // The learners persist after each run; nothing is buffered, so there is nothing to flush beyond the log below.
     });
@@ -460,7 +418,6 @@ export class GameMindApp {
         learning: displayPath(this.learningDirectory, this.redaction),
         worldMemory: displayPath(this.memoryDirectory, this.redaction) ?? "data/world-memory",
         traces: displayPath(this.traceDirectory, this.redaction) ?? "data/traces",
-        training: `${displayPath(this.dataDirectory, this.redaction) ?? "data"}/${this.training.selected}`,
       },
       defaultMode: this.sessionDefaults.mode,
       learning: { enabled: this.learner !== null, evidence: this.learner ? ["live"] : null },
@@ -474,14 +431,12 @@ export class GameMindApp {
     const session = this.sessionValue;
     const host = session?.host ?? null;
     const sessionView = this.sessionView();
-    const training = await this.training.snapshot();
     const base: ControlCenterSnapshot = host && session && session.isActive
       ? await host.source.snapshot()
       : buildDetachedSnapshot({
           performance: this.sampler(),
           session: sessionView,
           learner: sessionView.source === "simulated" ? this.simulatedLearner : this.learner,
-          training,
           evaluation: await readEvaluationSummary(path.join(this.dataDirectory, "eval", "offline-report.json")),
         });
     const recent = this.events.list({ limit: 60, minLevel: "info" });
@@ -491,7 +446,6 @@ export class GameMindApp {
     return redactStrings(
       {
         ...base,
-        training,
         app: this.appView(),
         session: sessionView,
         events: { latestSeq: recent.latestSeq, total: recent.total, items: recent.events },
@@ -553,12 +507,6 @@ export class GameMindApp {
         void this.shutdown("shut down from the Control Center");
         return { ok: true, message: "GameMind is shutting down; this page will stop responding." };
       },
-      startTraining: (payload: unknown) => this.training.start(typeof payload === "object" && payload !== null ? (payload as Parameters<TrainingHub["start"]>[0]) : {}),
-      pauseTraining: () => this.training.pause(),
-      resumeTraining: () => this.training.resume(),
-      stopTraining: () => this.training.stop(),
-      evaluateTraining: (payload: unknown) => this.training.evaluate(typeof payload === "string" && payload.length > 0 ? payload : undefined),
-      selectTrainingDirectory: (payload: unknown) => this.commandSelectTraining(payload),
       runUnitTests: () => this.commandJob(() => planUnitTests(this.planContext())),
       runOfflineEvaluation: (payload: unknown) => {
         const options = typeof payload === "object" && payload !== null ? (payload as { seeds?: unknown; scenarioId?: unknown }) : {};
@@ -568,21 +516,6 @@ export class GameMindApp {
         }));
       },
       runLiveVerification: (payload: unknown) => this.commandLive(payload),
-      runBenchmark: async (payload: unknown) => {
-        const [training, activeDirectory] = await Promise.all([this.training.snapshot(), this.training.activeDirectory()]);
-        if (activeDirectory !== null || training.processAlive || training.status === "running" || training.status === "paused" || training.status === "evaluating") {
-          return { ok: false, message: `Stop or wait for training/evaluation${activeDirectory ? ` in '${activeDirectory}'` : ""} to finish before benchmarking; the headless environment sweep is CPU-intensive and must not compete with it.` };
-        }
-        const raw = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
-        const options = {
-          ...(typeof raw.name === "string" ? { name: raw.name } : {}),
-          ...(typeof raw.environmentCases === "number" ? { environmentCases: raw.environmentCases } : {}),
-          ...(typeof raw.environmentSecondsPerCase === "number" ? { environmentSecondsPerCase: raw.environmentSecondsPerCase } : {}),
-          ...(typeof raw.workerLimit === "number" ? { workerLimit: raw.workerLimit } : {}),
-          ...(Array.isArray(raw.stageIds) ? { stageIds: raw.stageIds.filter((id): id is string => typeof id === "string") } : {}),
-        };
-        return this.commandJob(() => planBenchmark(this.planContext(), options));
-      },
       startTestServer: () => this.testServer.start(),
       stopTestServer: () => this.testServer.stop(),
       probeServer: async (payload: unknown) => {
@@ -619,16 +552,6 @@ export class GameMindApp {
     };
     const outcome = await this.connect(request);
     return { ok: outcome.ok, message: outcome.message, ...(outcome.code ? { data: { code: outcome.code, hints: outcome.hints ?? [] } } : {}) };
-  }
-
-  private async commandSelectTraining(payload: unknown): Promise<ControlCommandResult> {
-    const name = typeof payload === "string" ? payload : typeof payload === "object" && payload !== null ? String((payload as { directory?: unknown }).directory ?? "") : "";
-    try {
-      this.training.select(name.trim() === "" ? "training" : name.trim());
-      return { ok: true, message: `Showing the training folder '${this.training.selected}'.` };
-    } catch (error) {
-      return { ok: false, message: error instanceof TrainingDirectoryNameError || error instanceof Error ? error.message : String(error) };
-    }
   }
 
   private commandJob(plan: () => JobSpec): ControlCommandResult {
@@ -669,7 +592,6 @@ export class GameMindApp {
     const evaluationReportPath = path.join(this.dataDirectory, "eval", "offline-report.json");
     const raw: NonNullable<ControlCenterHost["queries"]> = {
       testServer: async () => this.testServer.refresh(),
-      benchmarks: () => readBenchmarkListing(path.join(this.dataDirectory, "experiments"), 5, defaultsPathFor(this.dataDirectory)),
       events: (params) => {
         const category = params.get("category");
         const level = params.get("level");
@@ -697,8 +619,6 @@ export class GameMindApp {
             evaluationReportPath,
             evaluationScenarioIds: evaluationScenarios().map((scenario) => scenario.id),
             redaction: this.redaction,
-            trainingReports: await this.training.evaluationReports(8),
-            trainingDirectory: `${displayPath(this.dataDirectory, this.redaction) ?? "data"}/${this.training.selected}`,
           })),
           store_kind: simulated ? "simulated" : "live",
         };
@@ -718,7 +638,6 @@ export class GameMindApp {
         evaluationOverview({
           summary: await readEvaluationSummary(evaluationReportPath),
           jobs: this.jobs.list(),
-          trainingReports: await this.training.evaluationReports(8),
           liveDefaults: this.liveDefaults(),
         }),
       jobs: (params) => {
@@ -726,7 +645,6 @@ export class GameMindApp {
         const jobs = this.jobs.list();
         return { busy: this.jobs.busy, jobs: id ? jobs.filter((job) => job.id === id) : jobs };
       },
-      "training-preflight": async (params) => this.training.preflight(params.get("directory") ?? undefined),
       tasks: () => taskCatalog(),
       diagnostics: async () => ({
         platform: { os: this.platform.os, wsl: this.platform.wsl, wslVersion: this.platform.wslVersion, distro: this.platform.distro },
@@ -741,87 +659,21 @@ export class GameMindApp {
 
   // ---- instance lock -------------------------------------------------------------------------------
 
-  /**
-   * The lock file is written to a unique temp name and renamed into place, so a reader never sees a half-written
-   * file; a missing file means free, and a file that cannot be read or parsed stops the start instead of being
-   * overwritten (that case used to be treated as "nothing is running", which is exactly the moment two agents
-   * could start on one account and one data directory).
-   */
-  private acquireInstanceLock(): void {
-    if (!this.lockFile) return;
-    let raw: string | null = null;
-    try {
-      raw = readFileSync(this.lockFile, "utf8");
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT") throw new InstanceLockUnreadableError(this.lockFile, errorMessage(error));
-      raw = null;
-    }
-    if (raw !== null) {
-      let existing: { pid?: unknown; url?: unknown; platform?: unknown } | null = null;
-      try {
-        const parsed = JSON.parse(raw) as unknown;
-        if (parsed && typeof parsed === "object" && typeof (parsed as { pid?: unknown }).pid === "number") {
-          existing = parsed as { pid: number; url?: unknown; platform?: unknown };
-        }
-      } catch {
-        existing = null;
-      }
-      if (!existing) throw new InstanceLockUnreadableError(this.lockFile, "it is not the expected JSON object");
-      const pid = existing.pid as number;
-      const foreign = typeof existing.platform === "string" && existing.platform !== "" && existing.platform !== process.platform;
-      if (foreign && pid !== process.pid) {
-        // The lock was written on the other side of the WSL/Windows boundary; its pid lives in a different
-        // process table, so this process can neither confirm nor deny it. Refusing to start is the only answer
-        // that cannot end in two bots on one account.
-        throw new InstanceLockUnreadableError(this.lockFile, `it was written on '${String(existing.platform)}'`);
-      }
-      const alive = pid === process.pid ? HELD_LOCKS.has(this.lockFile) : isProcessAlive(pid);
-      if (alive) throw new AppAlreadyRunningError(typeof existing.url === "string" ? existing.url : null, pid);
-    }
-    HELD_LOCKS.add(this.lockFile);
-    mkdirSync(path.dirname(this.lockFile), { recursive: true });
-    this.writeInstanceLockFile({ pid: process.pid, url: null, startedAt: this.startedAt });
-  }
-
   private writeInstanceLock(): void {
-    if (!this.lockFile || !this.handleValue) return;
+    const handle = this.handleValue;
+    if (!handle) return;
     try {
-      this.writeInstanceLockFile({ pid: process.pid, url: this.handleValue.url, port: this.handleValue.port, startedAt: this.startedAt });
+      this.projectLock.update(handle.url, handle.port);
     } catch {
       // The lock is a convenience for the launcher; the app works without it.
     }
   }
 
-  private writeInstanceLockFile(body: Record<string, unknown>): void {
-    if (!this.lockFile) return;
-    const temporary = `${this.lockFile}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-    // The platform travels with the lock: a project folder shared between WSL and Windows (a OneDrive desktop,
-    // for instance) can hold a pid from the other process table, where no check on this side means anything.
-    writeFileSync(temporary, `${JSON.stringify({ ...body, platform: process.platform })}\n`, "utf8");
-    renameSync(temporary, this.lockFile);
-  }
-
   private releaseInstanceLock(): void {
-    if (!this.lockFile) return;
-    HELD_LOCKS.delete(this.lockFile);
-    try {
-      const current = JSON.parse(readFileSync(this.lockFile, "utf8")) as { pid?: number };
-      if (current.pid === process.pid) rmSync(this.lockFile, { force: true });
-    } catch {
-      // already gone
-    }
+    this.projectLock.release();
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
 
 /** The tasks the agent genuinely implements and validates, with their limits as the schemas enforce them. */
 export function taskCatalog(): Record<string, unknown> {

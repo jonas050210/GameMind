@@ -22,7 +22,7 @@ export interface UiModules {
   readonly i18n: any;
   readonly german: any;
   readonly ui: any;
-  readonly views: Record<"overview" | "training" | "bots" | "tasks" | "evaluation" | "learning" | "memory", any>;
+  readonly views: Record<"overview" | "bots" | "tasks" | "evaluation" | "learning" | "memory", any>;
 }
 
 let loaded: Promise<UiModules> | null = null;
@@ -31,7 +31,7 @@ let loaded: Promise<UiModules> | null = null;
 export function loadUi(): Promise<UiModules> {
   loaded ??= (async () => {
     const load = (relative: string): Promise<any> => import(pathToFileURL(path.join(PUBLIC_DIRECTORY, relative)).href);
-    const [app, h, api, store, model, format, i18n, german, ui, overview, training, bots, tasks, evaluation, learning, memory] = await Promise.all([
+    const [app, h, api, store, model, format, i18n, german, ui, overview, bots, tasks, evaluation, learning, memory] = await Promise.all([
       load("app.js"),
       load("lib/h.js"),
       load("lib/api.js"),
@@ -42,14 +42,13 @@ export function loadUi(): Promise<UiModules> {
       load("lib/i18n-de.js"),
       load("lib/ui.js"),
       load("views/overview.js"),
-      load("views/training.js"),
       load("views/bots.js"),
       load("views/tasks.js"),
       load("views/evaluation.js"),
       load("views/learning.js"),
       load("views/memory.js"),
     ]);
-    return { app, h, api, store, model, format, i18n, german, ui, views: { overview, training, bots, tasks, evaluation, learning, memory } };
+    return { app, h, api, store, model, format, i18n, german, ui, views: { overview, bots, tasks, evaluation, learning, memory } };
   })();
   return loaded;
 }

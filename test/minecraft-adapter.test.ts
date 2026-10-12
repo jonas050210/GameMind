@@ -68,6 +68,19 @@ function createMockBot(
     health: 10,
     isValid: true,
   };
+  const operator = {
+    id: 3,
+    name: "Operator_1",
+    username: "Operator_1",
+    type: "player",
+    position: new MockVector(3.5, 64, 0.5),
+    velocity: new MockVector(0, 0, 0),
+    yaw: 0,
+    pitch: 0,
+    onGround: true,
+    health: 20,
+    isValid: true,
+  };
   const inventoryItems: Array<{
     slot: number;
     name: string;
@@ -78,9 +91,11 @@ function createMockBot(
   }> = [];
   const inventorySlots: unknown[] = Array.from({ length: 46 }, () => null);
   let hungerLevel = startingFood;
+  const chatMessages: string[] = [];
   const itemNames = [
     "oak_log", "oak_planks", "birch_planks", "stick", "crafting_table",
     "wooden_pickaxe", "wooden_axe", "wooden_shovel", "wooden_sword", "apple",
+    "diamond", "raw_iron", "coal", "iron_ingot", "bread",
   ];
   const itemTypes = new Map(itemNames.map((name, index) => [name, 1_000 + index]));
   const nameForType = new Map([...itemTypes].map(([name, id]) => [id, name]));
@@ -126,10 +141,12 @@ function createMockBot(
   const botLike = Object.assign(emitter, {
     __blocks: blocks,
     __inventoryItems: inventoryItems,
+    __chatMessages: chatMessages,
+    chat: (message: string) => chatMessages.push(message),
     username: "GameMind",
     version: "1.20.4",
     entity: playerEntity,
-    entities: { 1: playerEntity, 2: cow },
+    entities: { 1: playerEntity, 2: cow, 3: operator },
     // prismarine-world currently returns these chunk coordinates as strings at runtime.
     world: { getColumns: () => [
       { chunkX: "0", chunkZ: "0" },
@@ -168,6 +185,11 @@ function createMockBot(
       hungerLevel = Math.min(20, hungerLevel + 4);
       if ((held.count ?? 0) > 1) inventorySlots[36] = { ...held, count: (held.count ?? 0) - 1 };
       else inventorySlots[36] = null;
+    },
+    toss: async (itemType: number, _metadata: number | null, count: number | null) => {
+      const name = nameForType.get(itemType);
+      if (!name) throw new Error(`Unknown mock item type ${itemType}.`);
+      removeInventory(name, count ?? 1);
     },
     canSeeBlock: () => true,
     placeBlock: async (referenceBlock: { position: MockVector }, faceVector: MockVector) => {
@@ -307,14 +329,69 @@ function createTestAdapter(
   });
 }
 
-test("automatic respawn defaults on, is configurable from the environment, and rejects invalid values", () => {
+test("automatic respawn and exact chat operator are configurable from the environment", () => {
   assert.equal(minecraftAdapterConfigFromEnv({}).autoRespawn, true);
   assert.equal(minecraftAdapterConfigFromEnv({ MINECRAFT_AUTO_RESPAWN: "false" }).autoRespawn, false);
   assert.equal(minecraftAdapterConfigFromEnv({ MINECRAFT_AUTO_RESPAWN: "TRUE" }).autoRespawn, true);
+  assert.equal(minecraftAdapterConfigFromEnv({}).operatorUsername, null, "chat control is disabled without an operator allowlist");
+  assert.equal(minecraftAdapterConfigFromEnv({ MINECRAFT_OPERATOR: "Operator_1" }).operatorUsername, "Operator_1");
+  assert.equal(minecraftAdapterConfigFromEnv({ MINECRAFT_OPERATOR: " Operator_1 " }).operatorUsername, "Operator_1");
   assert.throws(
     () => minecraftAdapterConfigFromEnv({ MINECRAFT_AUTO_RESPAWN: "sometimes" }),
     /MINECRAFT_AUTO_RESPAWN must be 'true' or 'false'/,
   );
+  assert.throws(
+    () => minecraftAdapterConfigFromEnv({ MINECRAFT_OPERATOR: "operator name" }),
+    /MINECRAFT_OPERATOR must be the exact in-game username/,
+  );
+});
+
+test("Minecraft adapter forwards chat, respawn and replies only through an explicitly configured session", async () => {
+  const logger = pino({ level: "silent" });
+  const bot = createMockBot(true);
+  const adapter = new MinecraftAdapter(logger, config({ operatorUsername: "Operator_1" }), { botFactory: () => bot, installPlugins: () => undefined, configureSafeMovements: () => undefined });
+  const received: Array<{ username: string; message: string }> = [];
+  let deaths = 0;
+  let respawns = 0;
+  adapter.onChatMessage((message) => received.push(message));
+  adapter.onDeath(() => { deaths += 1; });
+  adapter.onRespawn(() => { respawns += 1; });
+  await adapter.connect();
+  (bot as unknown as EventEmitter).emit("chat", "Operator_1", "status");
+  bot.emit("death");
+  bot.emit("spawn");
+  adapter.sendChat("GameMind ready");
+  assert.throws(() => adapter.sendChat("/give @a diamond 64"), /refuses slash-prefixed text/);
+  assert.throws(() => adapter.sendChat("／op"), /refuses slash-prefixed text/);
+  assert.throws(() => adapter.sendChat("\u200B/give @a diamond 64"), /refuses slash-prefixed text/);
+  assert.deepEqual(received, [{ username: "Operator_1", message: "status" }]);
+  assert.equal(deaths, 1);
+  assert.equal(respawns, 1);
+  assert.deepEqual((bot as unknown as { __chatMessages: string[] }).__chatMessages, ["GameMind ready"]);
+  await adapter.disconnect("chat adapter test complete");
+});
+
+test("item hand-off is limited to the exact nearby operator and confirms inventory loss", async () => {
+  const logger = pino({ level: "silent" });
+  const trace = new TraceRecorder(new MemoryTraceSink(), logger);
+  const bot = createMockBot(true);
+  const adapter = new MinecraftAdapter(logger, config({ operatorUsername: "Operator_1" }), { botFactory: () => bot, installPlugins: () => undefined, configureSafeMovements: () => undefined });
+  const { runtime, skills } = createMinecraftAgent(adapter, trace, logger);
+  await runtime.connect();
+  const diamondType = (bot.registry.itemsByName as Record<string, { id: number }>).diamond?.id;
+  assert.ok(diamondType);
+  seedInventory(bot, "diamond", 5, diamondType);
+  const result = await skills.run("minecraft.give-item", { itemName: "diamond", count: 2, targetUsername: "Operator_1", maxDistance: 3, dangerRadius: 6 });
+  assert.equal(result.action.status, "succeeded");
+  assert.equal(result.action.confirmed, true);
+  assert.equal(result.action.details?.inventoryBefore, 5);
+  assert.equal(result.action.details?.inventoryAfter, 3);
+  assert.equal(result.observationAfter?.state.inventory.find((item) => item.name === "diamond")?.count, 3);
+
+  const refused = await skills.run("minecraft.give-item", { itemName: "diamond", count: 1, targetUsername: "Alex", maxDistance: 3, dangerRadius: 6 });
+  assert.equal(refused.action.status, "failed");
+  assert.equal(refused.action.failure?.code, "TRANSFER_TARGET_NOT_AUTHORIZED");
+  await runtime.shutdown("transfer test complete");
 });
 
 test("Minecraft adapter connects, structures observations, executes and confirms look, then shuts down", async () => {
@@ -367,10 +444,10 @@ test("Minecraft inspect, bounded navigation, single-log collection, and equip co
   assert.equal(inspected.action.confirmation, "local_block_state_read");
   assert.equal(inspected.action.details?.name, "grass_block");
 
-  const navigated = await skills.run("minecraft.navigate", { x: 3, y: 64, z: 3, range: 1 });
+  const navigated = await skills.run("minecraft.navigate", { x: 3, y: 64, z: 0, range: 1 });
   assert.equal(navigated.action.status, "succeeded");
   assert.equal(navigated.action.confirmation, "pathfinder_goal_reached_and_position_checked");
-  assert.deepEqual(navigated.observationAfter?.state.player.position, { x: 3.5, y: 64, z: 3.5 });
+  assert.deepEqual(navigated.observationAfter?.state.player.position, { x: 3.5, y: 64, z: 0.5 });
 
   const collected = await skills.run("minecraft.collect-log", {
     x: 2,

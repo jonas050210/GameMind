@@ -1,8 +1,11 @@
 import { readFileSync, realpathSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { runProbe, type ProbeRequest } from "./app/probe.js";
 import { runCommandLine } from "./app/run-app.js";
+import { AppAlreadyRunningError, ProjectInstanceLock } from "./app/instance-lock.js";
 import { failureClassification, liveTaskReport, simulatedTaskReport, type ReportDetails, type ReportSource } from "./app/task-report.js";
 import type { ConnectRequest } from "./app/types.js";
 import { createLogger } from "./core/logger.js";
@@ -28,6 +31,10 @@ import { policyPromotionRefusalReasons } from "./games/minecraft/policy-promotio
 import type { WorldMemory } from "./games/minecraft/world-memory.js";
 import { createFakeMinecraftFixture, FakeMinecraftAdapter } from "./testing/fake-minecraft-adapter.js";
 import { evaluationScenarios } from "./testing/eval/scenarios.js";
+import { formatLitematicBlueprintSummary, formatLitematicLayerPreview, readLitematicBlueprint } from "./games/minecraft/litematic-importer.js";
+import { formatLargeHouseBlueprint, generateLargeHouseBlueprint, isLargeHouseConceptId, type LargeHouseConceptId } from "./games/minecraft/house-blueprint.js";
+import { LitematicaBridgeServer } from "./games/minecraft/litematica-bridge-server.js";
+import { LitematicPlacementGuard, type LitematicPlacementSnapshot } from "./games/minecraft/litematica-placement-guard.js";
 import { loadScenario } from "./testing/scenario.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
 
@@ -52,6 +59,17 @@ interface CliOptions {
   readonly maxActions?: number;
   readonly maxDurationMs?: number;
   readonly sim?: string;
+  /** Offline-only import and material summary for a Java Edition .litematic file. */
+  readonly litematicPlanPath?: string;
+  readonly litematicLayer?: number;
+  /** Offline-only generated large-house blueprint; it never connects to Minecraft. */
+  readonly housePlanConcept?: LargeHouseConceptId;
+  readonly housePlanJsonPath?: string;
+  /** Start an authenticated, plan-only receiver for a future local Fabric client bridge. */
+  readonly litematicBridgePath?: string;
+  readonly litematicBridgeHost?: string;
+  readonly litematicBridgePort?: number;
+  readonly allowNonLoopbackBridge: boolean;
   readonly seed?: number;
   readonly host?: string;
   readonly port?: number;
@@ -107,6 +125,14 @@ export function parseArgs(args: readonly string[]): CliOptions {
   let maxActions: number | undefined;
   let maxDurationMs: number | undefined;
   let sim: string | undefined;
+  let litematicPlanPath: string | undefined;
+  let litematicLayer: number | undefined;
+  let housePlanConcept: LargeHouseConceptId | undefined;
+  let housePlanJsonPath: string | undefined;
+  let litematicBridgePath: string | undefined;
+  let litematicBridgeHost: string | undefined;
+  let litematicBridgePort: number | undefined;
+  let allowNonLoopbackBridge = false;
   let seed: number | undefined;
   let host: string | undefined;
   let port: number | undefined;
@@ -210,6 +236,45 @@ export function parseArgs(args: readonly string[]): CliOptions {
         break;
       case "--sim":
         sim = value();
+        break;
+      case "--litematic-plan":
+        litematicPlanPath = value();
+        if (!litematicPlanPath.trim()) throw new Error("--litematic-plan requires a non-empty file path.");
+        break;
+      case "--litematic-layer":
+        litematicLayer = Number(value());
+        if (!Number.isInteger(litematicLayer) || litematicLayer < 0 || litematicLayer > 255) {
+          throw new Error("--litematic-layer must be a normalized Y offset from 0 through 255.");
+        }
+        break;
+      case "--house-plan": {
+        const concept = value().toUpperCase();
+        if (!isLargeHouseConceptId(concept)) throw new Error("--house-plan requires concept A, B, or C.");
+        housePlanConcept = concept;
+        break;
+      }
+      case "--house-plan-json":
+        housePlanJsonPath = value();
+        if (!housePlanJsonPath.trim() || !housePlanJsonPath.toLowerCase().endsWith(".json")) {
+          throw new Error("--house-plan-json requires a non-empty path ending in .json.");
+        }
+        break;
+      case "--litematic-bridge":
+        litematicBridgePath = value();
+        if (!litematicBridgePath.trim()) throw new Error("--litematic-bridge requires a non-empty blueprint path.");
+        break;
+      case "--litematic-bridge-host":
+        litematicBridgeHost = value();
+        if (!litematicBridgeHost.trim()) throw new Error("--litematic-bridge-host requires a host name or IP address.");
+        break;
+      case "--litematic-bridge-port":
+        litematicBridgePort = Number(value());
+        if (!Number.isInteger(litematicBridgePort) || litematicBridgePort < 0 || litematicBridgePort > 65_535) {
+          throw new Error("--litematic-bridge-port must be an integer from 0 through 65535.");
+        }
+        break;
+      case "--allow-nonloopback-litematic-bridge":
+        allowNonLoopbackBridge = true;
         break;
       case "--seed":
         seed = Number(value());
@@ -344,6 +409,36 @@ export function parseArgs(args: readonly string[]): CliOptions {
     }
   }
 
+  const incompatibleOfflineOptions =
+    demo || demoTask || task || sim !== undefined || seed !== undefined || host !== undefined || port !== undefined ||
+    username !== undefined || version !== undefined || auth !== undefined || lookYaw !== undefined || lookPitchProvided ||
+    controlCenter || controlPort !== undefined || controlCenterDisabled || openBrowser || !connect || !autonomy ||
+    allowCombat || policy !== undefined || modeGiven || allowHosts.length > 0 || reconnectAttempts !== undefined ||
+    !instanceLock || dataDirectory !== undefined;
+  if (litematicPlanPath !== undefined && (
+    incompatibleOfflineOptions || housePlanConcept !== undefined || housePlanJsonPath !== undefined || litematicBridgePath !== undefined || litematicBridgeHost !== undefined ||
+    litematicBridgePort !== undefined || allowNonLoopbackBridge
+  )) {
+    throw new Error("--litematic-plan is an offline-only command and cannot be combined with a Minecraft session or other run mode.");
+  }
+  if (litematicLayer !== undefined && litematicPlanPath === undefined) {
+    throw new Error("--litematic-layer requires --litematic-plan PATH.");
+  }
+  if (housePlanConcept !== undefined && (
+    incompatibleOfflineOptions || litematicPlanPath !== undefined || litematicLayer !== undefined || litematicBridgePath !== undefined ||
+    litematicBridgeHost !== undefined || litematicBridgePort !== undefined || allowNonLoopbackBridge
+  )) {
+    throw new Error("--house-plan is an offline-only command and cannot be combined with a Minecraft session or other run mode.");
+  }
+  if (housePlanJsonPath !== undefined && housePlanConcept === undefined) {
+    throw new Error("--house-plan-json requires --house-plan A, B, or C.");
+  }
+  if (litematicBridgePath !== undefined && (incompatibleOfflineOptions || litematicPlanPath !== undefined || litematicLayer !== undefined || housePlanConcept !== undefined || housePlanJsonPath !== undefined)) {
+    throw new Error("--litematic-bridge is an isolated plan-only receiver and cannot be combined with a Minecraft session or other run mode.");
+  }
+  if (litematicBridgePath === undefined && (litematicBridgeHost !== undefined || litematicBridgePort !== undefined || allowNonLoopbackBridge)) {
+    throw new Error("Litematica bridge host, port, and non-loopback options require --litematic-bridge.");
+  }
   if (demo && (demoTask || task || sim !== undefined)) {
     throw new Error("--demo cannot be combined with --demo-task, --task, or --sim.");
   }
@@ -371,6 +466,9 @@ export function parseArgs(args: readonly string[]): CliOptions {
   }
   if (controlCenterDisabled && controlCenter) {
     throw new Error("--no-control-center cannot be combined with --control-center or --control-port.");
+  }
+  if (!connect && !controlCenter) {
+    throw new Error("--no-connect needs --control-center; otherwise start a session or choose --persistent.");
   }
   if (!connect && (task || lookYaw !== undefined)) {
     throw new Error("--no-connect starts only the Control Center, so it cannot be combined with --task or --look-yaw.");
@@ -417,6 +515,14 @@ export function parseArgs(args: readonly string[]): CliOptions {
     ...(maxActions !== undefined ? { maxActions } : {}),
     ...(maxDurationMs !== undefined ? { maxDurationMs } : {}),
     ...(sim !== undefined ? { sim } : {}),
+    ...(litematicPlanPath !== undefined ? { litematicPlanPath } : {}),
+    ...(litematicLayer !== undefined ? { litematicLayer } : {}),
+    ...(housePlanConcept !== undefined ? { housePlanConcept } : {}),
+    ...(housePlanJsonPath !== undefined ? { housePlanJsonPath } : {}),
+    ...(litematicBridgePath !== undefined ? { litematicBridgePath } : {}),
+    ...(litematicBridgeHost !== undefined ? { litematicBridgeHost } : {}),
+    ...(litematicBridgePort !== undefined ? { litematicBridgePort } : {}),
+    allowNonLoopbackBridge,
     ...(seed !== undefined ? { seed } : {}),
     ...(host !== undefined ? { host } : {}),
     ...(port !== undefined ? { port } : {}),
@@ -456,7 +562,10 @@ Usage:
   npm run dev -- --demo
   npm run dev -- --demo-task [gather-logs|craft-wooden-pickaxe|secure-food]
   npm run dev -- --sim food-remote-berries --seed 101
-  npm run dev -- --host 127.0.0.1                      (persistent session + Control Center)
+  npm run dev -- --house-plan A --house-plan-json ./blueprints/house-a.json (offline generated design; no world access)
+  npm run dev -- --litematic-plan ./blueprints/house.litematic --litematic-layer 0 (offline layer view; never connects to Minecraft)
+  npm run dev -- --litematic-bridge ./blueprints/house.litematic (authenticated placement receiver; no builder)
+  npm run dev -- --host 127.0.0.1                      (persistent terminal session; no dashboard)
   npm run dev -- --host 127.0.0.1 --one-shot           (connect, print the first observation, disconnect)
   npm run dev -- --task craft-wooden-pickaxe --host 127.0.0.1
   npm run dev -- --task mine-stone --resource iron_ore --count 4 --host 127.0.0.1 --open-browser
@@ -468,6 +577,14 @@ Offline:
   --demo-task [TASK]   Run gather-logs (default) or craft-wooden-pickaxe on the offline fixture, or
                        secure-food in the simulated world. Mining offline: npm run task:demo:mine
   --sim SCENARIO       Run one offline simulated scenario (see src/testing/eval/scenarios.ts; e.g. explore-remote-log)
+  --house-plan A|B|C    Generate an offline large-house block/layer/material plan; no world access or actions
+  --house-plan-json PATH  Write that selected house plan as new JSON; refuses to overwrite an existing file
+  --litematic-plan PATH  Import a bounded .litematic blueprint and print its dimensions/materials; no world access or actions
+  --litematic-layer Y    Render one normalized Y layer as a bounded top-down ASCII block map (requires --litematic-plan)
+  --litematic-bridge PATH  Start a plan-only authenticated receiver for a future Fabric bridge; token required
+  --litematic-bridge-host HOST  Receiver bind host (default 127.0.0.1; remote binding needs explicit opt-in)
+  --litematic-bridge-port PORT  Receiver port (default 39990; 0 selects a free port)
+  --allow-nonloopback-litematic-bridge  Permit non-loopback binding; use only on a trusted private network
   --seed N             Seed for --sim scenarios (default 101)
 
 Live Java server (requires an authorized private/local server):
@@ -490,18 +607,18 @@ Live Java server (requires an authorized private/local server):
   --trace-dir PATH     JSONL trace directory (default: data/traces)
 
 Session lifecycle (live and --sim sessions):
-  (default)            Persistent: connect, run the requested task (if any), then stay connected and idle until
-                       you stop the session from the Control Center or press Ctrl-C. The Control Center is served.
-  --persistent         Say so explicitly.
+  (default)            Persistent live session: connect, run the requested task (if any), then stay connected and idle
+                       until you stop it from the terminal with Ctrl-C. No dashboard or browser is started.
+  --persistent         Say so explicitly (default for live Minecraft sessions).
   --one-shot           End the session when the requested task finishes (exit code 1 if it did not succeed).
                        Serves no Control Center unless --control-center is also given.
   --no-autonomy        The agent acts only on tasks you start (safety limits are unchanged either way)
-  --no-connect         Start only the Control Center; connect to a server from the page
+  --no-connect         Start only the optional Control Center; requires --control-center
   --reconnect-attempts N  Retries after a dropped connection, 0 through 20 (default 5; 0 disables reconnecting)
 
 Control Center (real state, real controls; stays up for the whole process):
-  --control-center     Serve the dashboard (always on for persistent runs; opt-in for one-shot runs)
-  --no-control-center  Run with no dashboard (Ctrl-C is then the only way to stop a persistent session)
+  --control-center     Opt in to the optional dashboard (otherwise status and control stay in the terminal/chat)
+  --no-control-center  Explicitly disable the dashboard; cannot be combined with --control-center
   --control-port PORT  Port for the dashboard (default 8787, 0 picks a free one)
   --control-host HOST  Interface to bind (default 127.0.0.1, this machine only). 0.0.0.0 exposes the dashboard,
                        and the commands it accepts, to the whole network: use it only on a trusted network.
@@ -816,7 +933,7 @@ async function runSimulatedScenario(
     baseTask.kind === "secure_food" && options.targetHunger !== undefined
       ? secureFoodTaskSchema.parse({ ...baseTask, targetHunger: options.targetHunger })
       : baseTask;
-  const serve = options.controlCenterDisabled ? false : options.modeGiven ? (options.mode === "persistent" ? true : options.controlCenter) : options.controlCenter;
+  const serve = !options.controlCenterDisabled && options.controlCenter;
   const mode = options.modeGiven ? options.mode : serve ? "persistent" : "one-shot";
   const report = (result: MinecraftTaskResult, source: ReportSource, details?: ReportDetails): void => {
     console.log(
@@ -850,7 +967,7 @@ async function runSimulatedScenario(
     learningDirectory: options.learning ? resolve(options.learningDirectory) : null,
     memoryDirectory: resolve(options.memoryDirectory),
     traceDirectory: resolve(options.traceDirectory),
-    instanceLock: options.instanceLock && serve,
+    instanceLock: options.instanceLock,
     report,
     taskDescription: scenarioId,
     // The scenario's own expectation decides whether the demo is red: a scenario that expects only safety may end blocked.
@@ -859,10 +976,8 @@ async function runSimulatedScenario(
 }
 
 /** Persistent is the default for a live run: connecting and then leaving again is not what anyone starting an agent wants. */
-function liveRunShape(options: CliOptions): { mode: "persistent" | "one-shot"; serve: boolean } {
-  const mode = options.mode;
-  const serve = options.controlCenterDisabled ? false : mode === "persistent" ? true : options.controlCenter;
-  return { mode, serve };
+export function liveRunShape(options: CliOptions): { mode: "persistent" | "one-shot"; serve: boolean } {
+  return { mode: options.mode, serve: !options.controlCenterDisabled && options.controlCenter };
 }
 
 function taskReport(options: CliOptions) {
@@ -906,7 +1021,7 @@ async function runLive(options: CliOptions, logger: ReturnType<typeof createLogg
     memoryDirectory: resolve(options.memoryDirectory),
     traceDirectory: resolve(options.traceDirectory),
     ...(options.reconnectAttempts !== undefined ? { reconnectAttempts: options.reconnectAttempts } : {}),
-    instanceLock: options.instanceLock && serve,
+    instanceLock: options.instanceLock,
     report: taskReport(options),
     taskDescription: String(options.task ?? "requested"),
   });
@@ -918,11 +1033,20 @@ async function runLive(options: CliOptions, logger: ReturnType<typeof createLogg
  * observation. Both are one-shots by nature, so they never keep a session.
  */
 async function runProbeCommand(options: CliOptions, logger: ReturnType<typeof createLogger>, connect: ConnectRequest | null, probe: ProbeRequest): Promise<number> {
+  if (!connect) return 2;
+  const dataDirectory = resolve(options.dataDirectory ?? "data");
+  const projectLock = new ProjectInstanceLock(dataDirectory, new Date().toISOString(), options.instanceLock);
+  try {
+    projectLock.acquire();
+  } catch (error) {
+    console.error(`GameMind did not start: ${error instanceof Error ? error.message : String(error)}`);
+    return error instanceof AppAlreadyRunningError ? 3 : 2;
+  }
+  try {
   const { createSessionFactory } = await import("./app/session-factory.js");
   const { MinecraftSession } = await import("./app/session.js");
   const { AppEventLog } = await import("./app/event-log.js");
   const { defaultRedactionContext } = await import("./app/redact.js");
-  if (!connect) return 2;
   const events = new AppEventLog({ redaction: defaultRedactionContext(process.cwd()) });
   const factory = createSessionFactory({
     logger,
@@ -938,9 +1062,11 @@ async function runProbeCommand(options: CliOptions, logger: ReturnType<typeof cr
     resources: factory(request),
     events,
     logger,
-    host: { training: null },
   });
-  return runProbe(session, probe);
+  return await runProbe(session, probe);
+  } finally {
+    projectLock.release();
+  }
 }
 
 function packageVersion(): string {
@@ -952,10 +1078,156 @@ function packageVersion(): string {
   }
 }
 
+function printLitematicPlacement(snapshot: LitematicPlacementSnapshot, changed: boolean): void {
+  const report = snapshot.report;
+  console.log(`\n${changed ? "Placement changed; previous review invalidated." : "Authenticated active Litematica placement received."}`);
+  console.log(`World: ${report.worldId} (${report.dimension})`);
+  console.log(`Placement: ${report.placementId}; blueprint SHA-256: ${report.blueprintSha256}`);
+  console.log(`Origin / minimum corner: ${report.origin.x}, ${report.origin.y}, ${report.origin.z}`);
+  console.log(`Rotation: ${report.rotation}°; mirror: ${report.mirror}`);
+  console.log(`Bounds: ${report.bounds.min.x},${report.bounds.min.y},${report.bounds.min.z} through ${report.bounds.max.x},${report.bounds.max.y},${report.bounds.max.z}`);
+  console.log(`Review fingerprint: ${snapshot.fingerprint}`);
+  console.log(`State: ${snapshot.approved ? "reviewed" : "waiting for operator review"}; expires ${new Date(snapshot.expiresAtMs).toISOString()}`);
+  console.log("This receiver is plan-only: it cannot place blocks, gather materials, or issue Minecraft actions.");
+  if (!snapshot.approved) console.log(`Type exactly: confirm ${snapshot.fingerprint}`);
+}
+
+async function runLitematicBridge(options: CliOptions): Promise<void> {
+  if (options.litematicBridgePath === undefined) throw new Error("Internal error: bridge mode has no blueprint path.");
+  const token = process.env.GAMEMIND_LITEMATICA_BRIDGE_TOKEN;
+  if (!token || Buffer.byteLength(token, "utf8") < 32) {
+    throw new Error("Set GAMEMIND_LITEMATICA_BRIDGE_TOKEN to a random secret of at least 32 UTF-8 bytes before starting the bridge.");
+  }
+  const environmentPort = process.env.GAMEMIND_LITEMATICA_BRIDGE_PORT;
+  const port = options.litematicBridgePort ?? (environmentPort === undefined ? 39_990 : Number(environmentPort));
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) {
+    throw new Error("GAMEMIND_LITEMATICA_BRIDGE_PORT must be an integer from 0 through 65535.");
+  }
+  const host = options.litematicBridgeHost ?? process.env.GAMEMIND_LITEMATICA_BRIDGE_HOST ?? "127.0.0.1";
+  const blueprint = await readLitematicBlueprint(resolve(options.litematicBridgePath));
+  const guard = new LitematicPlacementGuard(blueprint, token);
+  let lastPrintedFingerprint: string | null = null;
+  let hadFreshSnapshot = false;
+  const server = new LitematicaBridgeServer(guard, {
+    host,
+    port,
+    token,
+    allowNonLoopback: options.allowNonLoopbackBridge,
+    onPlacement: (snapshot) => {
+      const changed = lastPrintedFingerprint !== null && lastPrintedFingerprint !== snapshot.fingerprint;
+      if (lastPrintedFingerprint === snapshot.fingerprint) return;
+      lastPrintedFingerprint = snapshot.fingerprint;
+      hadFreshSnapshot = true;
+      printLitematicPlacement(snapshot, changed);
+    },
+  });
+  const address = await server.start();
+  console.log(`Litematic blueprint loaded: ${blueprint.sourceName} (${blueprint.dimensions.x}×${blueprint.dimensions.y}×${blueprint.dimensions.z}, ${blueprint.blocks.length} non-air blocks).`);
+  console.log(`Authenticated bridge receiver listening on ${address.host}:${address.port}/v1/placement.`);
+  console.log("No Minecraft connection or build executor is started. Reports are HMAC-authenticated and expire after 5 seconds without a heartbeat.");
+  if (address.host === "127.0.0.1" || address.host === "::1" || address.host === "localhost") {
+    console.log("For a Windows Modrinth client, use the WSL localhost-forwarded address when available; keep this receiver on loopback.");
+  } else {
+    console.log("WARNING: non-loopback bind is enabled. Keep it on a trusted private network and firewall the port.");
+  }
+
+  const terminal = process.stdin.isTTY
+    ? createInterface({ input: process.stdin, output: process.stdout })
+    : null;
+  if (terminal) {
+    console.log("Terminal controls: status | confirm <full fingerprint> | cancel | help. Confirmation only records plan review; it cannot start a build.");
+    terminal.on("line", (line) => {
+      const command = line.trim();
+      if (command === "help") {
+        console.log("Type status to inspect the fresh placement, confirm <full fingerprint> to approve this exact preview for review, or cancel to clear it. No Minecraft action is available.");
+        return;
+      }
+      if (command === "status") {
+        const snapshot = guard.snapshot();
+        if (snapshot) printLitematicPlacement(snapshot, false);
+        else console.log(`No fresh placement report. ${guard.invalidationReason ?? "Waiting for a bridge heartbeat."}`);
+        return;
+      }
+      if (command === "cancel") {
+        guard.invalidate("operator cancelled the current placement review");
+        lastPrintedFingerprint = null;
+        hadFreshSnapshot = false;
+        console.log("Current placement review cleared. No world action was taken.");
+        return;
+      }
+      const match = command.match(/^confirm ([a-f0-9]{64})$/i);
+      if (match?.[1]) {
+        try {
+          const approval = guard.approve(match[1].toLowerCase());
+          console.log(`Exact placement review recorded for ${approval.fingerprint}; it remains valid only while authenticated heartbeats match. No block action was taken.`);
+        } catch (error) {
+          console.log(`Review refused: ${error instanceof Error ? error.message : "placement could not be confirmed"}`);
+        }
+        return;
+      }
+      console.log("Unrecognized terminal command. Type help.");
+    });
+  } else {
+    console.log("No interactive terminal is attached; placement approvals are disabled. Press Ctrl-C to stop the receiver.");
+  }
+
+  const leaseTimer = setInterval(() => {
+    const snapshot = guard.snapshot();
+    if (snapshot) {
+      hadFreshSnapshot = true;
+      return;
+    }
+    if (hadFreshSnapshot) {
+      hadFreshSnapshot = false;
+      lastPrintedFingerprint = null;
+      console.log(`\nPlacement heartbeat expired; preview and any review approval are invalid. ${guard.invalidationReason ?? "Waiting for a new report."}`);
+    }
+  }, 1_000);
+  leaseTimer.unref?.();
+
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    let stopping = false;
+    const stop = (): void => {
+      if (stopping) return;
+      stopping = true;
+      clearInterval(leaseTimer);
+      process.off("SIGINT", onSignal);
+      process.off("SIGTERM", onSignal);
+      terminal?.close();
+      void server.close().then(resolvePromise, rejectPromise);
+    };
+    const onSignal = (): void => stop();
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    terminal?.once("close", stop);
+  });
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
     printHelp();
+    return;
+  }
+  if (options.housePlanConcept !== undefined) {
+    const blueprint = generateLargeHouseBlueprint(options.housePlanConcept);
+    console.log(formatLargeHouseBlueprint(blueprint));
+    if (options.housePlanJsonPath !== undefined) {
+      const outputPath = resolve(options.housePlanJsonPath);
+      await mkdir(dirname(outputPath), { recursive: true });
+      await writeFile(outputPath, `${JSON.stringify(blueprint, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+      console.log(`Full relative block blueprint written to ${outputPath}. No Minecraft connection or world action was performed.`);
+    }
+    return;
+  }
+  if (options.litematicPlanPath !== undefined) {
+    const blueprint = await readLitematicBlueprint(resolve(options.litematicPlanPath));
+    console.log(formatLitematicBlueprintSummary(blueprint));
+    if (options.litematicLayer !== undefined) console.log(formatLitematicLayerPreview(blueprint, options.litematicLayer));
+    return;
+  }
+  if (options.litematicBridgePath !== undefined) {
+    await runLitematicBridge(options);
     return;
   }
 

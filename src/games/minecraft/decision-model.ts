@@ -307,6 +307,9 @@ const TASK_SKILL_ROUTES: Record<string, readonly string[]> = {
   mine_resource: ["minecraft.mine-block", "minecraft.pickup-item"],
   secure_food: ["minecraft.eat-food", "minecraft.harvest-berries", "minecraft.pickup-item"],
   build_shelter: ["minecraft.build-shelter", "minecraft.place-block", "minecraft.mine-block"],
+  build_house: ["minecraft.inspect-block", "minecraft.navigate", "minecraft.place-block"],
+  farm_wheat: ["minecraft.inspect-block", "minecraft.navigate", "minecraft.plant-wheat"],
+  excavate_volume: ["minecraft.inspect-block", "minecraft.navigate", "minecraft.mine-block", "minecraft.collect-log"],
   craft_item: ["minecraft.craft-item", "minecraft.place-crafting-table"],
 };
 
@@ -2144,6 +2147,12 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
       if (solid >= SHELTER_CARDINAL_DIRECTIONS.length) {
         return record("completed", null, [], `Task condition met: all four cardinal sides around the player are observed solid.`);
       }
+    } else if (task.kind === "excavate_volume") {
+      return record("blocked", null, [], "Volume excavation must use the deterministic, per-cell verified project executor.", "PROJECT_EXECUTOR_REQUIRED");
+    } else if (task.kind === "build_house") {
+      return record("blocked", null, [], "House construction must use the bounded, preflighted blueprint executor.", "PROJECT_EXECUTOR_REQUIRED");
+    } else if (task.kind === "farm_wheat") {
+      return record("blocked", null, [], "Wheat plot work must use the hydrated-soil preflight and verified planting executor.", "PROJECT_EXECUTOR_REQUIRED");
     } else {
       const targetItem =
         task.kind === "gather_resource"
@@ -2455,6 +2464,15 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
     if (requirement.requiresPickaxe && handTier < requirement.minPickaxeTier) {
       const equip = equipToolCandidate(state, { needTier: requirement.minPickaxeTier }, context);
       if (equip) return record(null, equip, [], equip.rationale);
+      if (requirement.minPickaxeTier >= 3) {
+        return record(
+          "blocked",
+          null,
+          [],
+          `${task.resourceName} requires an iron-tier pickaxe or better. The best carried pickaxe is tier ${tier}; mining is refused rather than risking a lost diamond drop. Smelting/crafting an iron pickaxe is not available in this task route yet.`,
+          "TASK_BLOCKED_TOOL_TIER",
+        );
+      }
       // No usable pickaxe is carried: fall back to the crafting planner for the missing tool.
       const toolItem = requirement.minPickaxeTier >= 2 ? "stone_pickaxe" : "wooden_pickaxe";
       const craftTask = craftItemTaskSchema.parse({

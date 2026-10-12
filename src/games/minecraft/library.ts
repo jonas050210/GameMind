@@ -16,7 +16,6 @@ import type { SkillRuntime } from "../../core/skill-runtime.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { SafetyBroker } from "../../core/safety-broker.js";
 import type { ExperienceLearner } from "../../core/learning/learner.js";
-import type { TrainingControl } from "../../training/manager.js";
 import type { WorldSeedStore } from "./world-seed.js";
 import type { ControlCenterCommands } from "../../control-center/types.js";
 import type { MinecraftObservation } from "./observation.js";
@@ -170,7 +169,6 @@ export interface LibraryHandlerContext {
   readonly safety: SafetyBroker | null;
   readonly control: LibraryRunControl;
   readonly learner: ExperienceLearner | null;
-  readonly training: TrainingControl | null;
   readonly worldSeed: WorldSeedStore | null;
   readonly advertisedCapabilities: readonly string[];
   readonly combatSwitchAvailable: boolean;
@@ -205,7 +203,6 @@ export interface LibraryEntry {
   readonly requiresCapabilities?: readonly string[];
   readonly requiresCompanion?: boolean;
   readonly requiresLearner?: boolean;
-  readonly requiresTraining?: boolean;
   readonly requiresSafety?: boolean;
   readonly requiresCombatSwitch?: boolean;
   readonly requiresTaskRunner?: boolean;
@@ -339,9 +336,6 @@ export function resolveEntryAvailability(
   }
   if (entry.requiresLearner && !ctx.learner) {
     return { status: "unavailable", reason: "The experience learner is off for this run. Start GameMind without --no-learning to enable it." };
-  }
-  if (entry.requiresTraining && !ctx.training) {
-    return { status: "unavailable", reason: "Training cannot run in this process. Start GameMind with python3 main.py and use the Training tab." };
   }
   if (entry.requiresSafety && !ctx.safety) {
     return { status: "unavailable", reason: "The Safety Broker is not attached to this run, so world-changing actions are refused. Restart GameMind." };
@@ -1713,84 +1707,5 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
     },
   });
 
-  // Training runs on the offline simulator in a separate process (never live, never in-browser).
-  registry.register({
-    meta: {
-      id: "learn.training-start",
-      category: "Learning & Memory",
-      title: "Start / resume training",
-      description: "Starts or resumes curriculum training in a separate process on the offline simulator. Same control as the Training panel; progress appears there.",
-      status: "implemented",
-      statusReason: null,
-      requiresConnection: false,
-      params: [
-        { name: "episodesPerStage", label: "Episodes per stage", type: "integer", required: false, def: 8, min: 1, max: 200 },
-        { name: "maxEpisodes", label: "Episode budget (blank = from stages)", type: "integer", required: false, min: 1, max: 5000 },
-        { name: "maxMinutes", label: "Time budget minutes (blank = none)", type: "integer", required: false, min: 1, max: 1440 },
-        { name: "fresh", label: "Start over (deletes saved experience)", type: "boolean", required: false, def: false },
-      ],
-    },
-    requiresTraining: true,
-    handler: async (params, ctx) => {
-      const commands = ctx.hostCommands;
-      if (!commands?.startTraining) {
-        return { ok: false, message: "Training is not available in this host.", failureCode: "TRAINING_MISSING" };
-      }
-      const options: { episodesPerStage?: number; maxEpisodes?: number; maxMinutes?: number; fresh?: boolean } = {};
-      if (typeof params["episodesPerStage"] === "number") options.episodesPerStage = params["episodesPerStage"] as number;
-      if (typeof params["maxEpisodes"] === "number") options.maxEpisodes = params["maxEpisodes"] as number;
-      if (typeof params["maxMinutes"] === "number") options.maxMinutes = params["maxMinutes"] as number;
-      if (typeof params["fresh"] === "boolean") options.fresh = params["fresh"] as boolean;
-      const result = await commands.startTraining(options);
-      return {
-        ok: result.ok,
-        message: result.message,
-        failureCode: result.ok ? null : "TRAINING_START_REFUSED",
-        failureMessage: result.ok ? null : result.message,
-      };
-    },
-  });
-  const trainingDelegate = (
-    id: string,
-    title: string,
-    description: string,
-    call: (commands: ControlCenterCommands) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string },
-  ): void => {
-    registry.register({
-      meta: { id, category: "Learning & Memory", title, description, status: "implemented", statusReason: null, requiresConnection: false, params: [] },
-      requiresTraining: true,
-      handler: async (_params, ctx) => {
-        const commands = ctx.hostCommands;
-        if (!commands) {
-          return { ok: false, message: "Training is not available in this host.", failureCode: "TRAINING_MISSING" };
-        }
-        const result = await call(commands);
-        return {
-          ok: result.ok,
-          message: result.message,
-          failureCode: result.ok ? null : "TRAINING_REFUSED",
-          failureMessage: result.ok ? null : result.message,
-        };
-      },
-    });
-  };
-  trainingDelegate(
-    "learn.training-pause",
-    "Pause training",
-    "Pauses training after the current episode. Same control as the Training panel.",
-    (commands) => commands.pauseTraining?.() ?? { ok: false, message: "Training is not available in this host." },
-  );
-  trainingDelegate(
-    "learn.training-resume",
-    "Resume training",
-    "Resumes paused or interrupted training. Same control as the Training panel.",
-    (commands) => commands.resumeTraining?.() ?? { ok: false, message: "Training is not available in this host." },
-  );
-  trainingDelegate(
-    "learn.training-stop",
-    "Stop training",
-    "Stops training after the current episode. Same control as the Training panel.",
-    (commands) => commands.stopTraining?.() ?? { ok: false, message: "Training is not available in this host." },
-  );
   return registry;
 }

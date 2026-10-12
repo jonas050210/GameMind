@@ -4,7 +4,7 @@
 - **As of:** 11 October 2026 (the original phase statuses are historical; the latest verified corrections are recorded after the fourth phase)
 - **Purpose of this document:** Provide a solid basis for the MVP, for architecture decisions and for later extensions.
 
-> **Scope note:** This document records the target architecture, the safety principles and the phase roadmap; it is not a complete product manual. The current implementation now also includes hierarchical goal selection, recovery and offline evaluation, persistent world memory, learning statistics with a strict promotion gate, the operations Control Center, and a headless worker/environment learning benchmark. The concrete feature set and the measured offline results are also in `README.md`; live behaviour remains unconfirmed.
+> **Scope note:** This document records the target architecture, the safety principles and the phase roadmap; it is not a complete product manual. The current implementation now also includes hierarchical goal selection, recovery and offline evaluation, persistent world memory, learning statistics with a strict promotion gate, and an optional operations Control Center. Offline trainer/evaluation commands remain CLI-only; the training GUI and worker/environment benchmark have been removed. The concrete feature set and the measured offline results are also in `README.md`; live behaviour remains unconfirmed.
 
 ### Implementation status of the first phase
 
@@ -57,8 +57,6 @@ Added on 10 October 2026. Everything below was verified **offline only**: unit a
 
 - **Action limits:** Removed the global cumulative `maxActionsPerRun` safety cap and its command/error path. Individual task `maxActions`, deadlines, progress checks and stuck recovery remain enforced; action and capability metrics remain observable.
 - **Operator UI:** The Overview now prioritizes live session/task/vitals and essential controls, with connection/world/task detail and secondary activity summaries collapsed or placed behind the relevant tabs.
-- **Headless learning benchmark:** The Training tab exposes an explicit manual action for an offline environment/worker sweep (1–256 cases, 20 seconds per case by default). Environment probes use isolated training-only seed ranges; throughput and early/late reward/success signals inform worker and curriculum-stage recommendations, while held-out evaluation remains the quality gate for exploration-rate defaults. The benchmark never starts automatically after training and never changes the live policy. Training defaults remain backward-compatible and feed new runs.
-- **Verification:** The Control Center page harness covers manual benchmark submission and saved-stage defaults; the focused integration tests and full suite/build are run for this update. Live Minecraft behavior remains unverified.
 
 ## Summary
 
@@ -70,7 +68,7 @@ GameMind should not be understood as a single neural network that translates pix
 4. A **skill runtime** executes skills as monitored, abortable options and reports results back.
 5. A **safety supervisor** checks every action, monitors progress and can pause at any time.
 6. **Memory, evaluation and learning** store experience and improve skills in a controlled way; new models are not switched live unchecked.
-7. A **Control Center** makes state, decisions, training status and errors understandable and controllable.
+7. An **optional Control Center** makes state, decisions and errors understandable and controllable; terminal and in-game chat remain the primary operating surfaces.
 
 For the start, a narrow, reproducible field of use is recommended: **Minecraft Java Edition, one fixed version, a dedicated or local vanilla server and a single agent instance**. The first version should be able to solve a bounded task dynamically — not merely replay a hard-coded sequence of steps. Reinforcement learning is explicitly **not** the foundation of the MVP at first: the world model, goal selection, planner, verifiable skills and good evaluation tools bring the greater benefit first.
 
@@ -187,7 +185,7 @@ This is a **recommendation, not a prior decision**. Before committing, a short c
 | **Safety Broker / Watchdog** | Validate, bound, serialise and abort actions; detect stalls, errors and critical states. | Be disabled by a model or the UI while the agent is active. |
 | **Telemetry / Evaluator** | Collect decision traces, action results, metrics, scenario evaluation and regressions. | Equate the training reward with actual task success. |
 | **Training Pipeline** | Version datasets, train models, produce checkpoints and test candidates against benchmarks. | Switch candidates live without an evaluation gate. |
-| **Control Center** | Enable observing, debugging, controlled interventions and training management. | Expose credentials or unvalidated actions. |
+| **Control Center** | Enable observing, debugging and controlled interventions. Offline training is not managed through the GUI. | Expose credentials or unvalidated actions. |
 
 ## 5. Decision model
 
@@ -471,15 +469,15 @@ Unnecessary for the MVP are dozens of real-time charts, freely editable internal
 
 The Control Center is implemented (`src/control-center/`, enabled with `--control-center`) as a three-column operations dashboard without external dependencies: run control and validated task start, goal/decision trace, safety broker, agent vitals/inventory, an interactive WebGL voxel view with observed blocks and marked last-seen targets, perception timing, Node process/host resource sampling, an action/failure/event timeline, skills and learning/evaluation. Layout and colours follow **AI Command Center × Minimal Dark × Minecraft Operations**: matte charcoal surfaces, cyan/green accents and compact status displays. The 3D view can be operated by drag/touch and keyboard, with visible focus, screen-reader control hints and `aria-live` status output.
 
-Deliberately **not** implemented: a searchable memory browser across all episodes (episodes are JSONL, world knowledge is JSON snapshots), filter/severity interfaces for all raw logs, a training dashboard (no model training takes place), free editing of internal variables and a full 3D reconstruction of the world. The views remain a time window of the ring trace; long-term forensics is the job of the trace files. Hardware values are lightweight process/host samples, not a full profiler.
+Deliberately **not** implemented: a searchable memory browser across all episodes (episodes are JSONL, world knowledge is JSON snapshots), filter/severity interfaces for all raw logs, a training dashboard (the offline trainer is a separate CLI utility), free editing of internal variables and a full 3D reconstruction of the world. The views remain a time window of the ring trace; long-term forensics is the job of the trace files. Hardware values are lightweight process/host samples, not a full profiler.
 
 ### 12.5 Implemented status (fourth phase)
 
-The page was rewritten in the same stack (plain HTML, CSS and ES modules, no dependency, no external asset). It is a status bar plus seven tabs over one polling store (every 1.5 s while visible, 15 s hidden): **Overview**, **Training**, **Bots**, **Tasks**, **Tests & Evaluation**, **Learning & Policy** and **World Memory & Events** (a searchable, redacted event log). What differs from §§12.1 to 12.4:
+The page is an optional operator surface, written in plain HTML, CSS and ES modules with no dependency or external asset. Terminal output and in-game chat remain the default operating surfaces; use `--control-center` to start the page. It is a status bar plus six tabs over one polling store (every 1.5 s while visible, 15 s hidden): **Overview**, **Bots**, **Tasks**, **Tests & Evaluation**, **Learning & Policy** and **World Memory & Events**. The Training tab and worker/environment benchmark have been removed; the independent offline trainer remains CLI-only.
 
 - The visual direction is restrained and typographic, with automatic, light and dark themes, subtle transitions switched off under `prefers-reduced-motion`, and a desktop-first, responsive layout. It follows a written brief that named learningview.org as inspiration; that site was not reachable from the build environment and nothing was copied from it.
 - The WebGL voxel view no longer exists. The page publishes the player's whole-block position but no blocks, terrain or entity coordinates.
-- A training view and a searchable event log now exist. Offline training is a monitored child process that states plainly that offline training is not real-world training. Memory shows the world identity, remembered resource sightings and explored regions, not a browser over every episode.
+- The searchable event log and world memory show only recorded identity, remembered resource sightings and explored regions, not a browser over every episode.
 - Every panel is labelled live, simulated, historical, offline or unavailable; a value that was not reported reads *unknown*; there are no placeholder charts.
 - Controls act only where the runtime implements them, and a refused command is shown with the server's reason. The page can pause, arm and stop the agent; it never writes to the world.
 

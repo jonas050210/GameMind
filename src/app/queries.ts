@@ -5,7 +5,6 @@ import { classifyFailure } from "../core/failure-taxonomy.js";
 import type { EvaluationSummary } from "../control-center/types.js";
 import { policyPromotionRefusalReasons } from "../games/minecraft/policy-promotion.js";
 import { readEvaluationSummary } from "../games/minecraft/run-control.js";
-import type { TrainingEvaluationReport } from "../training/evaluate.js";
 import type { JobKind, JobView } from "./jobs.js";
 import { displayPath, type RedactionContext } from "./redact.js";
 
@@ -80,9 +79,6 @@ export interface LearningQueryInputs {
   readonly evaluationReportPath: string;
   readonly evaluationScenarioIds: readonly string[];
   readonly redaction: RedactionContext;
-  /** Checkpoint evaluations from the offline training directory, newest first. */
-  readonly trainingReports: readonly TrainingEvaluationReport[];
-  readonly trainingDirectory: string;
 }
 
 export async function buildLearningQuery(input: LearningQueryInputs): Promise<Record<string, unknown>> {
@@ -95,8 +91,6 @@ export async function buildLearningQuery(input: LearningQueryInputs): Promise<Re
       reason: "Learning is turned off for this run (--no-learning), so no experience is recorded or shown.",
       explanations: EXPLAINED_FAILURE_CODES.map((code) => explainFailure(code)),
       evaluation,
-      trainingReports: summariseTrainingReports(input.trainingReports),
-      trainingDirectory: input.trainingDirectory,
     };
   }
   const detail: LearnerDetail = await learner.detail();
@@ -140,44 +134,8 @@ export async function buildLearningQuery(input: LearningQueryInputs): Promise<Re
     blockedTargets: snapshot.failureMemory,
     reward: snapshot.reward,
     evaluation,
-    trainingReports: summariseTrainingReports(input.trainingReports),
-    trainingDirectory: input.trainingDirectory,
     explanations: codes.map((code) => explainFailure(code, failureCounts.get(code) ?? null)),
   };
-}
-
-function summariseTrainingReports(reports: readonly TrainingEvaluationReport[]): Array<Record<string, unknown>> {
-  return reports.map((report) => ({
-    checkpointId: report.checkpointId,
-    generatedAt: report.generatedAt,
-    verdict: report.verdict,
-    conclusion: report.conclusion ?? null,
-    weightsId: report.weightsId,
-    learnedContexts: report.candidateContent?.learnedContexts ?? null,
-    evaluationSet: report.evaluationSet ?? null,
-    baseline: { successRate: report.baseline.metrics.successRate, runs: report.baseline.metrics.runs, interval: report.confidence?.baseline ?? null, meanWastedActions: report.baseline.meanWastedActions, medianActions: report.baseline.metrics.medianActions },
-    candidate: { successRate: report.candidate.metrics.successRate, runs: report.candidate.metrics.runs, interval: report.confidence?.candidate ?? null, meanWastedActions: report.candidate.meanWastedActions, medianActions: report.candidate.metrics.medianActions },
-    deltas: report.deltas,
-    behaviour: report.behaviour ?? null,
-    paired: report.paired ?? null,
-    baselineStability: report.baselineStability ?? null,
-    reasons: [...report.decision.reasons, ...report.decision.blocking],
-    heldOut: { seeds: report.heldOut.evaluationSeeds.length, disjointFromTraining: report.heldOut.disjointSeeds, note: report.heldOut.note },
-    scenarios: report.baseline.metrics.scenarios.map((baseline) => {
-      const candidate = report.candidate.metrics.scenarios.find((entry) => entry.scenarioId === baseline.scenarioId);
-      return {
-        scenarioId: baseline.scenarioId,
-        baselineSuccess: baseline.successRate,
-        candidateSuccess: candidate?.successRate ?? null,
-        successDelta: candidate ? Math.round((candidate.successRate - baseline.successRate) * 1000) / 1000 : null,
-        baselineMedianActions: baseline.medianActions,
-        candidateMedianActions: candidate?.medianActions ?? null,
-        actionsDelta: candidate ? candidate.medianActions - baseline.medianActions : null,
-        unsafeDelta: candidate ? candidate.unsafeActions - baseline.unsafeActions : null,
-        deathsDelta: candidate ? candidate.deaths - baseline.deaths : null,
-      };
-    }),
-  }));
 }
 
 // ---- world memory ------------------------------------------------------------------------------------------------
@@ -352,7 +310,6 @@ export function latestJob(jobs: readonly JobView[], kind: JobKind): JobView | nu
 export function evaluationOverview(input: {
   readonly summary: EvaluationSummary | null;
   readonly jobs: readonly JobView[];
-  readonly trainingReports: readonly TrainingEvaluationReport[];
   readonly liveDefaults: { readonly host: string; readonly port: number; readonly username: string };
 }): Record<string, unknown> {
   return {
@@ -362,7 +319,6 @@ export function evaluationOverview(input: {
       unitTests: latestJob(input.jobs, "unit-tests"),
       evaluationRun: latestJob(input.jobs, "offline-eval"),
       report: input.summary,
-      checkpointReports: summariseTrainingReports(input.trainingReports),
     },
     live: {
       latest: latestJob(input.jobs, "live-verification"),
