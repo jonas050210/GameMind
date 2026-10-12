@@ -6,6 +6,7 @@ import type { SkillRuntime } from "../src/core/skill-runtime.js";
 import type { WorldState } from "../src/core/types.js";
 import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
 import { MinecraftChatController, type MinecraftChatMessage, type MinecraftChatTransport } from "../src/games/minecraft/minecraft-chat-controller.js";
+import type { MinecraftChatResponder } from "../src/games/minecraft/ollama-chat-responder.js";
 import type { CompanionController } from "../src/games/minecraft/companion-controller.js";
 import { parseMinecraftChatCommand } from "../src/games/minecraft/chat-commands.js";
 import type { MinecraftTask } from "../src/games/minecraft/task.js";
@@ -115,6 +116,7 @@ function setup(
     readonly taskRunning?: () => boolean;
     readonly currentTask?: () => MinecraftTask | null;
     readonly requestTaskStop?: (reason: string) => void;
+    readonly chatResponder?: MinecraftChatResponder;
   } = {},
 ) {
   let world = makeWorld(options.initialInventory ?? [stack("diamond", 2)], {
@@ -163,6 +165,7 @@ function setup(
     requestTaskStop: options.requestTaskStop ?? (() => undefined),
     ...(options.confirmationTimeoutMs !== undefined ? { confirmationTimeoutMs: options.confirmationTimeoutMs } : {}),
     ...(options.deliveryTimeoutMs !== undefined ? { deliveryTimeoutMs: options.deliveryTimeoutMs } : {}),
+    ...(options.chatResponder !== undefined ? { chatResponder: options.chatResponder } : {}),
   });
   controller.start();
   return {
@@ -582,5 +585,72 @@ test("long help replies are split into deliverable Minecraft chat messages inste
   await flush();
   assert.ok(transport.sent.some((message) => message.startsWith("Befehle:")));
   assert.ok(transport.sent.every((message) => message.length <= 256));
+  controller.stop();
+});
+
+test("help arrives as one readable chat message per command group", async () => {
+  const { controller, transport } = setup();
+  transport.emit("Operator_1", "hilfe");
+  await flush();
+  assert.ok(transport.sent.length >= 8, "each group is its own message, not one run-on sentence");
+  assert.ok(transport.sent.every((message) => message.length <= 256));
+  assert.ok(transport.sent.every((message) => !message.includes("\n")));
+  assert.match(transport.sent[0] ?? "", /^Befehle: status \| hilfe \| stopp \| bleib \| folge mir \| komm$/);
+  assert.ok(transport.sent.some((message) => /^Ressourcen: /.test(message)));
+  assert.ok(transport.sent.some((message) => /^Planung: plane Haus A\/B\/C/.test(message)));
+  assert.ok(transport.sent.some((message) => /^Graben: grabe BxHxT/.test(message)));
+  controller.stop();
+});
+
+test("an unrecognized message is answered with the most-used commands even without a local model", async () => {
+  const { controller, transport, tasks } = setup();
+  transport.emit("Operator_1", "ich glaube du kannst das nicht");
+  await flush();
+  assert.deepEqual(tasks, [], "an unrecognized message never starts a task");
+  assert.ok(transport.sent.length >= 4);
+  assert.match(transport.sent[0] ?? "", /nicht verstanden/);
+  assert.ok(transport.sent.some((message) => /status \| stopp \| bleib \| folge mir \| komm/.test(message)));
+  assert.ok(transport.sent.some((message) => /Schreibe hilfe für die vollständige Liste/.test(message)));
+  controller.stop();
+});
+
+test("a local model answer is used when it is available, and the fallback only explains the helper once", async () => {
+  let replies = 0;
+  const responder: MinecraftChatResponder = {
+    reply: async (message: string) => {
+      replies += 1;
+      return /baue/.test(message) ? null : "Sende hilfe für die Befehle.";
+    },
+    unavailableReason: () => (replies > 0 ? "the model 'qwen3:0.6b' is not installed" : null),
+  };
+  const { controller, transport } = setup(undefined, { chatResponder: responder });
+
+  transport.emit("Operator_1", "what can you do for me?");
+  await flush();
+  assert.deepEqual(transport.sent, ["Sende hilfe für die Befehle."], "the model answer is relayed unchanged");
+  assert.ok(!transport.sent.some((message) => /nicht bereit/.test(message)));
+
+  transport.emit("Operator_1", "baue mir etwas");
+  await flush();
+  assert.ok(transport.sent.some((message) => /nicht verstanden/.test(message)), "a refused model answer falls back deterministically");
+  assert.ok(transport.sent.some((message) => /optionale Chat-Helfer ist nicht bereit/), "the reason is explained once");
+
+  const before = transport.sent.length;
+  transport.emit("Operator_1", "und jetzt?");
+  await flush();
+  assert.ok(transport.sent.length > before);
+  assert.equal(transport.sent.filter((message) => /optionale Chat-Helfer ist nicht bereit/.test(message)).length, 1, "the note is not repeated");
+  controller.stop();
+});
+
+test("a typo'd control word is still executed and never reaches the language model", async () => {
+  let asked = 0;
+  const responder: MinecraftChatResponder = { reply: async () => { asked += 1; return "Sende hilfe für die Befehle."; } };
+  const { controller, transport, calls } = setup(undefined, { chatResponder: responder });
+  transport.emit("Operator_1", "folg mir");
+  await flush();
+  assert.deepEqual(calls, [{ method: "setMode", mode: "follow", target: "Operator_1" }]);
+  assert.equal(asked, 0, "a corrected command is executed, not answered by the model");
+  assert.deepEqual(transport.sent, ["Mode follow"]);
   controller.stop();
 });

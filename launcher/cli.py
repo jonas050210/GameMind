@@ -20,6 +20,7 @@ EPILOG = """\
 Examples:
   python3 main.py                               connect and stay in the terminal until Ctrl-C
   python3 main.py --host 192.168.1.20 --port 25565
+  python3 main.py --port 25524                  connect to the Minecraft server on port 25524
   python3 main.py --task gather-logs            run a task first, then stay connected
   python3 main.py --control-center              opt in to the browser dashboard
   python3 main.py --simulated                   offline simulator instead of a real server (labelled simulated everywhere)
@@ -37,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live = parser.add_argument_group("Minecraft connection")
     live.add_argument("--host", help="Minecraft server host (default: $MINECRAFT_HOST, else 127.0.0.1; under WSL2 the Windows host is used when it is the only one that answers)")
-    live.add_argument("--port", type=int, help="Minecraft server port (default: $MINECRAFT_PORT or 25565)")
+    live.add_argument("--port", type=int, help="Minecraft server port (default: $MINECRAFT_PORT or 25565; the optional dashboard uses --control-port)")
     live.add_argument("--username", help="bot name")
     live.add_argument("--version", help="Minecraft version (default 1.20.4)")
     live.add_argument("--auth", choices=["offline", "microsoft"], help="authentication mode (default offline)")
@@ -177,7 +178,7 @@ def main(
     problems += dependency_problems
 
     mount_warning = checks.check_windows_mount(root, plat.wsl)
-    optional_tools = checks.check_optional_tools(system)
+    optional_tools = checks.check_optional_tools(system, model=environment.get("GAMEMIND_OLLAMA_MODEL", "qwen3:0.6b"))
     data_dir = checks.data_directory(root, args.passthrough)
     running = checks.existing_instance(data_dir)
     # One project folder shared between WSL and Windows (a OneDrive desktop, for instance) can hold a lock the
