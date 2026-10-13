@@ -3,21 +3,22 @@
   "proposals": [
     {
       "fingerprint": "reliability.chat-queue-hang",
-      "title": "Chat stops answering: one unresolved step blocks every later message",
+      "title": "Chat stops answering: the queue is bounded at 20 s, but one chain is unbounded and nothing is measured",
       "category": "reliability",
       "kind": "hypothesis",
-      "explanation": "Operator report from live play: the chat stops responding and never recovers. The cause is not established. The prime suspect is readable in the code: MinecraftChatController serialises every message on `this.processing = this.processing.then(...)`, so a single promise that never settles blocks all later chat for the rest of the session. `withChatTimeout` exists but has to cover every awaited step inside `handle()` — candidates are the Ollama responder, `freshState()` waiting for an observation, task start and `say()`. This is a hypothesis, not a defect: no recording of it exists yet.",
-      "expectedBenefit": "Chat becomes trustworthy, which is the precondition for every other live test.",
+      "explanation": "Operator report from live play: the chat stops responding. The first suspect is now partly ruled out by reading the code. MinecraftChatController does serialise every message on `this.processing`, but that chain is already wrapped in `withChatTimeout(..., CHAT_HANDLE_TIMEOUT_MS)` at 20 s and the helper is unit tested; `status`, `stopp` and `hold` bypass the queue and `hilfe` answers at once. So one hung command blocks the queue for about 20 s per message, not forever. Two gaps remain. (1) `scheduleQuestionTimeout` appends `expirePendingQuestion()` to the same promise with no timeout, so a hang there blocks every later message for the rest of the session. (2) Nothing is measured: neither queue wait nor handling duration is recorded, so a hang cannot be confirmed or located, and a timeout rejects the promise without cancelling the work underneath, which keeps running and may still mutate pending-approval state. Cause not established: a hypothesis until a recording shows the step.",
+      "expectedBenefit": "Chat becomes trustworthy and diagnosable, which is the precondition for every other live test.",
       "effort": 2,
       "impact": 5,
       "urgency": 5,
       "confidence": 0.5,
       "dependencies": ["performance.chat-latency", "reliability.live-protocol-results"],
       "evidence": [
-        { "source": "src/games/minecraft/minecraft-chat-controller.ts", "metric": "serialisation", "value": "one promise chain for all messages" },
+        { "source": "src/games/minecraft/minecraft-chat-controller.ts", "metric": "CHAT_HANDLE_TIMEOUT_MS", "value": "20000, wraps the message chain only" },
+        { "source": "src/games/minecraft/minecraft-chat-controller.ts", "metric": "scheduleQuestionTimeout", "value": "appends expirePendingQuestion to the same queue with no timeout" },
         { "source": "operator report", "metric": "live symptom", "value": "chat hangs, not yet recorded" }
       ],
-      "severity": 5
+      "severity": 4
     },
     {
       "fingerprint": "reliability.live-protocol-results",
