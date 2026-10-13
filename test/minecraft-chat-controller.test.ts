@@ -122,6 +122,8 @@ function setup(
     readonly hangingModes?: readonly string[];
     /** A logger the test can read, to assert what a session leaves behind in the log. */
     readonly logger?: pino.Logger;
+    /** Parks every observation until this resolves, so a queued command is provably still mid-flight. */
+    readonly observeGate?: Promise<void>;
   } = {},
 ) {
   let world = makeWorld(options.initialInventory ?? [stack("diamond", 2)], {
@@ -130,7 +132,10 @@ function setup(
   });
   const runtime = {
     get currentWorldState() { return world; },
-    observeIfStale: async () => world,
+    observeIfStale: async () => {
+      if (options.observeGate !== undefined) await options.observeGate;
+      return world;
+    },
     observe: async () => world,
   } as unknown as GameMindRuntime<MinecraftObservation>;
   const calls: Array<{ method: string; mode?: string; target?: string }> = [];
@@ -780,6 +785,83 @@ test("every answered message leaves one latency line in the log", async () => {
   assert.match(line, /"queueWaitMs":/);
   assert.match(line, /"handleMs":/);
   assert.match(line, /"firstReplyMs":/);
+  controller.stop();
+});
+
+test("a presence command sent while an order is being prepared stops that order from starting", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const { controller, transport, tasks, calls } = setup(
+    async (task) => result(task, makeWorld([stack("diamond", 3)]), 1),
+    { observeGate: gate },
+  );
+  transport.emit("Operator_1", "hol noch 1 diamanten");
+  await flush(); // the order is now parked inside its observation, which no wall clock decides
+  transport.emit("Operator_1", "komm");
+  await flush();
+  assert.ok(calls.some((call) => call.method === "setMode" && call.mode === "come"), "the presence command ran at once");
+
+  release(); // only now may the older order continue
+  await flush();
+  await flush();
+  assert.equal(tasks.length, 0, "the queued order must not take over the agent after the operator asked it to come");
+  assert.ok(
+    transport.sent.some((message) => /nicht gestartet/.test(message)),
+    "the operator is told the order was dropped instead of being left to guess",
+  );
+  controller.stop();
+});
+
+test("a stop sent while an order is being prepared is not overridden by that order", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const { controller, transport, tasks, calls } = setup(
+    async (task) => result(task, makeWorld([stack("diamond", 3)]), 1),
+    { observeGate: gate },
+  );
+  transport.emit("Operator_1", "hol noch 1 diamanten");
+  await flush();
+  transport.emit("Operator_1", "stopp");
+  await flush();
+  release();
+  await flush();
+  await flush();
+
+  assert.equal(tasks.length, 0, "a stop that arrived first must hold; the older order may not start afterwards");
+  assert.ok(calls.some((call) => call.method === "setMode" && call.mode === "hold"), "the stop itself ran");
+  controller.stop();
+});
+
+test("status changes nothing, so it must not drop a queued order", async () => {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const { controller, transport, tasks } = setup(
+    async (task) => result(task, makeWorld([stack("diamond", 3)]), 1),
+    { observeGate: gate },
+  );
+  transport.emit("Operator_1", "hol noch 1 diamanten");
+  await flush();
+  transport.emit("Operator_1", "status");
+  await flush();
+  release();
+  await flush();
+  await flush();
+
+  assert.equal(tasks.length, 1, "a read-only command answers without superseding the operator's order");
+  controller.stop();
+});
+
+test("a presence command is answered at once even while a slow model reply holds the queue", async () => {
+  const responder: MinecraftChatResponder = { reply: () => new Promise<string | null>(() => undefined) };
+  const { controller, transport, calls } = setup(undefined, { chatResponder: responder });
+  transport.emit("Operator_1", "erzähl mir was von der welt");
+  await flush();
+  const sentBefore = transport.sent.length;
+
+  transport.emit("Operator_1", "folge mir");
+  await flush();
+  assert.ok(calls.some((call) => call.method === "setMode" && call.mode === "follow"), "follow does not wait for the pending reply");
+  assert.ok(transport.sent.length > sentBefore, "and the operator hears it immediately");
   controller.stop();
 });
 

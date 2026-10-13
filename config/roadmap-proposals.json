@@ -94,24 +94,6 @@
       "severity": 2
     },
     {
-      "fingerprint": "reliability.come-follow-queued",
-      "title": "'komm' and 'folge mir' wait in the chat queue behind whatever is already running",
-      "category": "reliability",
-      "kind": "known-limitation",
-      "explanation": "The operator's stated requirement is that the agent stays near them and reacts to 'komm', 'komm zu mir' and 'folge mir'. Those parse as mode commands, but the priority bypass in the chat listener covers only `status`, `stopp` and `hold`; everything else is chained on `this.processing`. Measured: a 'folge mir' sent while another command is in flight waits for it, up to one 20 s queue timeout per link. So the two commands that mean 'come to me' can be delayed by an unrelated slow command - a project preflight, a local-model answer, or a hanging adapter call. Bypassing the queue is not a two-line change: `handleMode` for follow and come calls `cancelPendingWorkflow` and then `companion.setMode`, so it would interleave with a queued command that is about to start a task, and nothing tests who wins that race. The race has to be pinned before the bypass is widened.",
-      "expectedBenefit": "The operator's presence command works when they say it, which is the anchor the night behaviour is supposed to rely on.",
-      "effort": 2,
-      "impact": 4,
-      "urgency": 4,
-      "confidence": 0.85,
-      "dependencies": [],
-      "evidence": [
-        { "source": "src/games/minecraft/minecraft-chat-controller.ts", "metric": "priority bypass", "value": "status, stopp and hold only; come and follow are queued" },
-        { "source": "test/minecraft-chat-controller.test.ts", "metric": "measured", "value": "a queued folge mir reports a queue wait like any other command" }
-      ],
-      "severity": 3
-    },
-    {
       "fingerprint": "reliability.progress-watchdog-combat-build",
       "title": "Stall detection exists for navigation only, not for combat or building",
       "category": "reliability",

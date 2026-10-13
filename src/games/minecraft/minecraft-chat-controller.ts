@@ -142,6 +142,14 @@ const CHAT_REPLY_MAX_CHARS = 240;
 /** A single queued chat command that takes longer than this is abandoned so the queue cannot jam behind it. */
 const CHAT_HANDLE_TIMEOUT_MS = 20_000;
 
+/**
+ * Chat controls answered without waiting for the queue. `status` only reads; the others change what the agent
+ * does, so they also supersede queued work that has not reached its side effect yet. `come` and `follow` are
+ * here because they are how the operator keeps the agent near them - waiting behind an unrelated slow command
+ * is exactly the moment they are needed.
+ */
+const CHAT_PRIORITY_MODES: ReadonlySet<string> = new Set(["status", "stop", "hold", "come", "follow"]);
+
 /** Thrown when a chat step is abandoned; lets a caller tell a timeout from a command that failed. */
 export class ChatTimeoutError extends Error {
   constructor(readonly timeoutMs: number, label: string) {
@@ -188,6 +196,10 @@ export class MinecraftChatController {
   private deathPosition: { readonly x: number; readonly y: number; readonly z: number } | null = null;
   private deliveryGeneration = 0;
   private questionTimer: NodeJS.Timeout | null = null;
+  /** Bumped by every queue-bypassing control that changes behaviour, so queued work can see it was overtaken. */
+  private priorityGeneration = 0;
+  /** The priority generation in force when the message being handled now was let through; null outside the queue. */
+  private queuedPriorityAt: number | null = null;
   private helperUnavailableNoted = false;
 
   constructor(private readonly options: MinecraftChatControllerOptions) {
@@ -237,10 +249,11 @@ export class MinecraftChatController {
         this.recentMessages.delete(oldest);
       }
       const timing = this.latency.messageReceived();
-      if (command?.kind === "mode" && (command.mode === "status" || command.mode === "stop" || command.mode === "hold")) {
+      if (command?.kind === "mode" && CHAT_PRIORITY_MODES.has(command.mode)) {
         // A queued project preflight or local-model reply must never delay status or the operator's stop.
         // The control itself is still bounded: a hanging adapter call must not leave the operator without an
         // answer, and for anything but `status` the fallback stops the task instead of trusting the mode call.
+        if (command.mode !== "status") this.priorityGeneration += 1;
         this.answerOutsideQueue(
           timing,
           () => withChatTimeout(this.handleMode(command.mode), this.chatTimeoutMs, `mode ${command.mode}`),
@@ -294,7 +307,11 @@ export class MinecraftChatController {
     receivedPosition: { readonly x: number; readonly y: number; readonly z: number } | null,
   ): Promise<void> {
     const outer = this.activeTiming;
+    const outerPriorityAt = this.queuedPriorityAt;
     this.activeTiming = timing;
+    // Captured before the first await, so a control that bypasses the queue while this message is being
+    // handled is still visible at the point where the message would take over the agent.
+    this.queuedPriorityAt = this.priorityGeneration;
     this.latency.handlingStarted(timing);
     let failure: unknown = null;
     try {
@@ -306,6 +323,7 @@ export class MinecraftChatController {
     } finally {
       this.reportLatency(this.latency.handlingFinished(timing, { timedOut: failure instanceof ChatTimeoutError }));
       this.activeTiming = outer;
+      this.queuedPriorityAt = outerPriorityAt;
     }
   }
 
@@ -349,6 +367,16 @@ export class MinecraftChatController {
       return;
     }
     this.options.logger.debug({ chat: sample }, "Minecraft chat latency");
+  }
+
+  /**
+   * True when a control that bypasses the queue arrived while the queued message now running was handled.
+   * The message may still answer, but it must not take over the agent afterwards: the operator's newer
+   * command is the one that counts. `deliverToOperator` is covered by `deliveryGeneration` instead, which
+   * `cancelPendingWorkflow` already bumps, so it aborts between its own steps.
+   */
+  private supersededByPriority(): boolean {
+    return this.queuedPriorityAt !== null && this.priorityGeneration !== this.queuedPriorityAt;
   }
 
   /** Measured chat response times: for the Control Center, and for reading a live session afterwards. */
@@ -808,6 +836,11 @@ export class MinecraftChatController {
   }
 
   private async startTask(task: MinecraftTask, order: ResourceOrder | null): Promise<void> {
+    if (this.supersededByPriority()) {
+      this.options.logger.info({ task: taskName(task) }, "Queued chat command superseded by a newer control; no task started");
+      this.say(`Ich habe „${taskName(task)}“ nicht gestartet: Dein Steuerbefehl danach hat Vorrang. Sage es erneut, wenn ich es ausführen soll.`);
+      return;
+    }
     if (this.options.taskRunning() && !this.options.currentTask()) {
       this.say("Der Task-Scheduler ist beschäftigt; ich kann den Chat-Auftrag gerade nicht sicher annehmen.");
       return;
