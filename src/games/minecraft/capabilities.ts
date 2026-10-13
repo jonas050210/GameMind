@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CRITICAL_HEALTH, LOW_HEALTH } from "../../core/survival-thresholds.js";
+import { COMBAT_MIN_HEALTH, CRITICAL_HEALTH } from "../../core/survival-thresholds.js";
 import type { CapabilityDefinition } from "../../core/types.js";
 import {
   minecraftDroppableJunkNames,
@@ -305,7 +305,8 @@ export const minecraftAttackHostileInputSchema = z
     entityId: z.string().min(1).max(48),
     maxHits: z.number().int().min(1).max(6).default(4),
     dangerRadius: z.number().finite().min(2).max(16).default(6),
-    minHealth: z.number().finite().min(1).max(20).default(LOW_HEALTH),
+    /** Exclusive floor: the agent fights only strictly above this (see COMBAT_MIN_HEALTH). */
+    minHealth: z.number().finite().min(1).max(20).default(COMBAT_MIN_HEALTH),
     retreatHealth: z.number().finite().min(0.5).max(20).default(CRITICAL_HEALTH),
     requiredDamage: z.number().finite().min(1).max(20).default(4),
   })

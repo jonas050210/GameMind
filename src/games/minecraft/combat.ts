@@ -42,7 +42,57 @@ export const minecraftHostileHealth: Readonly<Record<string, number>> = {
   evoker: 24,
 };
 
-const ATTACK_COOLDOWN_MS = 600;
+/**
+ * Which hostiles the agent may engage, and which it avoids even though they are hostile.
+ *
+ * Being on the hostile list (`threats.ts`) decides *flee or not*; this table decides *fight or not*. They are
+ * separate questions, and before this table existed the answer to the second one was "anything hostile", which
+ * meant walking into a creeper with a wooden sword. Every entry says why, because the reason is what the
+ * operator reads in the decision log when the agent declines a fight.
+ *
+ * Anything not listed is **avoided**: an unknown hostile is not a target to experiment on. That default also
+ * covers the mobs nobody would fight at this gear level (blaze, ghast, warden, ...) without listing them all.
+ */
+export type CombatTargetPolicy = "engage" | "avoid";
+
+export interface CombatTargetRule {
+  readonly policy: CombatTargetPolicy;
+  readonly reason: string;
+}
+
+export const minecraftCombatTargets: Readonly<Record<string, CombatTargetRule>> = {
+  // Zombie family: melee only, slow, no ranged pressure, 20 health is inside the hit budget with a stone sword.
+  zombie: { policy: "engage", reason: "slow and melee-only; 20 health is inside the hit budget" },
+  husk: { policy: "engage", reason: "a zombie that does not burn in daylight; same melee-only pressure" },
+  drowned: { policy: "engage", reason: "melee-only in water and on land; the trident variant is rare and drops it" },
+  // Skeleton family: ranged, so approaching costs health, but it cannot chase effectively and 20 health dies fast.
+  skeleton: { policy: "engage", reason: "ranged but fragile and slow to kite; close the gap and it dies in a few swings" },
+  stray: { policy: "engage", reason: "a skeleton whose arrows slow; still fragile, but the approach costs more" },
+  // Spider family: fast and can climb, but low health and no ranged attack.
+  spider: { policy: "engage", reason: "16 health and no ranged attack; the danger is speed, which strafing answers" },
+  cave_spider: { policy: "engage", reason: "16 health, but its poison matters — fight it only above the combat floor" },
+  slime: { policy: "engage", reason: "8 health and low damage; the cheapest kill available" },
+  // Avoided hostiles. Each reason is what makes the fight a bad trade, not a difficulty estimate.
+  creeper: { policy: "avoid", reason: "it explodes: a melee kill can land inside the blast, and the agent cannot outrun the fuse at melee range" },
+  enderman: { policy: "avoid", reason: "40 health, teleports out of melee, and turns hostile when looked at — the hit budget cannot cover it" },
+  bogged: { policy: "avoid", reason: "poison arrows: poison keeps draining health after the fight ends, which no retreat can undo" },
+  phantom: { policy: "avoid", reason: "aerial and swooping; melee reach cannot be held, so the fight is a series of unanswerable hits" },
+  witch: { policy: "avoid", reason: "throws potions from range and heals itself; 26 health is more than the budget allows" },
+  pillager: { policy: "avoid", reason: "crossbow at range with 24 health; the approach costs more than the kill returns" },
+  vindicator: { policy: "avoid", reason: "24 health and more melee damage than any weapon the agent can craft early" },
+  evoker: { policy: "avoid", reason: "summons vexes, so the fight is never one target and the outnumbered rule would trip mid-swing" },
+};
+
+/** Unknown hostile: avoided rather than tried. */
+const UNKNOWN_TARGET_RULE: CombatTargetRule = {
+  policy: "avoid",
+  reason: "not on the engageable list, so it is avoided rather than tested",
+};
+
+export function combatTargetRule(hostileName: string): CombatTargetRule {
+  const normalized = hostileName.toLowerCase().replaceAll(" ", "_");
+  return minecraftCombatTargets[normalized] ?? { ...UNKNOWN_TARGET_RULE, reason: `'${hostileName}' is ${UNKNOWN_TARGET_RULE.reason}` };
+}
 
 export function weaponDamageFor(itemName: string | null | undefined): number {
   if (!itemName) return UNARMED_DAMAGE;
@@ -69,19 +119,63 @@ export function bestWeapon(items: Iterable<{ readonly name: string }>): { name: 
 }
 
 /**
- * Time between melee swings for the held weapon, from approximate vanilla attack speeds (Java 1.20+). A swing
- * sent before the cooldown has elapsed deals reduced damage, so the executor waits this long between swings instead
+ * Time between melee swings for the held weapon, from vanilla attack speeds (Java 1.20+). A swing sent
+ * before the cooldown has elapsed deals reduced damage, so the executor waits this long between swings instead
  * of using one fixed interval. Unknown or no weapon: bare hands (4 swings per second).
+ *
+ * The table is attacks per second, exactly the value vanilla puts in an item's `attack_speed` attribute, and
+ * the cooldown is derived from it (1000 / speed). It used to be a chain of `endsWith` guesses, which got the
+ * axes wrong: wooden, stone and golden axes swing at 0.8 (1250 ms), not 1.0, so the agent swung a fifth of a
+ * second early and dealt reduced damage on every axe hit but the first.
  */
-const HAND_COOLDOWN_MS = 250;
+const HAND_ATTACKS_PER_SECOND = 4;
+const minecraftAttackSpeed: Readonly<Record<string, number>> = {
+  wooden_sword: 1.6,
+  stone_sword: 1.6,
+  iron_sword: 1.6,
+  diamond_sword: 1.6,
+  netherite_sword: 1.6,
+  golden_sword: 1.6,
+  wooden_axe: 0.8,
+  stone_axe: 0.8,
+  golden_axe: 0.8,
+  iron_axe: 0.9,
+  diamond_axe: 1.0,
+  netherite_axe: 1.0,
+  wooden_pickaxe: 1.2,
+  stone_pickaxe: 1.2,
+  golden_pickaxe: 1.2,
+  iron_pickaxe: 1.2,
+  diamond_pickaxe: 1.2,
+  netherite_pickaxe: 1.2,
+  wooden_shovel: 1.0,
+  stone_shovel: 1.0,
+  golden_shovel: 1.0,
+  iron_shovel: 1.0,
+  diamond_shovel: 1.0,
+  netherite_shovel: 1.0,
+  wooden_hoe: 1.0,
+  golden_hoe: 1.0,
+  stone_hoe: 2.0,
+  iron_hoe: 3.0,
+  diamond_hoe: 4.0,
+  netherite_hoe: 4.0,
+  trident: 1.1,
+};
+
 export function attackCooldownMs(weaponName?: string | null): number {
-  if (!weaponName) return HAND_COOLDOWN_MS;
-  if (weaponName.endsWith("_sword")) return 625;
-  if (weaponName.endsWith("_axe")) return weaponName.startsWith("iron_") ? 1_100 : 1_000;
-  if (weaponName.endsWith("_pickaxe")) return 833;
-  if (weaponName.endsWith("_shovel") || weaponName.endsWith("_hoe")) return 1_000;
-  if (weaponName === "trident") return 909;
-  return ATTACK_COOLDOWN_MS;
+  const speed = weaponName ? minecraftAttackSpeed[weaponName] : undefined;
+  return Math.round(1_000 / (speed ?? HAND_ATTACKS_PER_SECOND));
+}
+
+/** Attack speed of a weapon in swings per second; null when the item is not in the vanilla table. */
+export function attackSpeedOf(weaponName: string): number | null {
+  return minecraftAttackSpeed[weaponName] ?? null;
+}
+
+/** Every weapon whose damage is known must also have a swing speed, or the executor would guess. */
+export function weaponsWithoutAttackSpeed(): readonly string[] {
+  return Object.keys(minecraftWeaponDamage).filter((name) => minecraftAttackSpeed[name] === undefined);
 }
 
 /** Survival melee reach, in blocks, measured from the eye to the target's bounding box. */
@@ -122,6 +216,7 @@ export function combatEnabledForPlanner(startupAllowed: boolean, adapterArmed: b
 export interface CombatSafetyInput {
   readonly enabled: boolean;
   readonly health: number | null;
+  /** Exclusive floor: combat needs health strictly above this (see `COMBAT_MIN_HEALTH`). */
   readonly minHealth: number;
   readonly retreatHealth: number;
   readonly hostileCountNearby: number;
@@ -144,6 +239,7 @@ export type CombatVerdict =
 export type MinecraftCombatCode =
   | "COMBAT_DISABLED"
   | "COMBAT_TARGET_INVALID"
+  | "COMBAT_TARGET_AVOID"
   | "COMBAT_NO_WEAPON"
   | "COMBAT_HEALTH_TOO_LOW"
   | "COMBAT_OUTNUMBERED"
@@ -171,14 +267,26 @@ export function combatIsAllowed(input: CombatSafetyInput): CombatVerdict {
       reason: `'${input.hostileName}' is not on the hostile list; attacking is refused.`,
     };
   }
+  // Hostile decides *flee or not*; this decides *fight or not*. A creeper is worth fleeing and never worth
+  // hitting, and an unlisted hostile is avoided instead of used as an experiment.
+  const target = combatTargetRule(input.hostileName);
+  if (target.policy === "avoid") {
+    return {
+      allowed: false,
+      code: "COMBAT_TARGET_AVOID",
+      reason: `'${input.hostileName}' is avoided: ${target.reason}. The agent flees or shelters instead of engaging.`,
+    };
+  }
   if (input.health === null) {
     return { allowed: false, code: "COMBAT_HEALTH_TOO_LOW", reason: "Health is unknown; combat is refused." };
   }
-  if (input.health < input.minHealth) {
+  // Exclusive floor: a fight needs health strictly *above* `minHealth`, so at exactly the floor the decision
+  // model's rest candidate (which fires at `health <= REST_HEALTH_THRESHOLD`) wins instead of tying with it.
+  if (input.health <= input.minHealth) {
     return {
       allowed: false,
       code: "COMBAT_HEALTH_TOO_LOW",
-      reason: `Health ${input.health} is below the combat floor of ${input.minHealth}; retreat instead.`,
+      reason: `Health ${input.health} is at or below the combat floor of ${input.minHealth}; rest and eat instead of fighting.`,
     };
   }
   if (input.weapon === null || input.weapon.damage < input.requiredDamage) {

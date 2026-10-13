@@ -96,6 +96,10 @@ const SAFETY_CODES = new Set([
   "SESSION_MISMATCH",
   "CRITICAL_STATE_NO_RECOVERY_SKILL",
   "COMBAT_DISABLED",
+  // Refusing a hostile *class* (creeper, enderman, anything unlisted) is standing policy, not a failed swing.
+  // Classified as safety on purpose: it is external to the attack skill, so declining a creeper must not teach
+  // the learner that attacking is bad at it.
+  "COMBAT_TARGET_AVOID",
   "OBSERVATION_STALE",
   // Bounded construction/farming runners stop immediately when player position, health, mobs, or consent makes an action unsafe.
   "EXCAVATION_UNSAFE_POSITION",
@@ -374,6 +378,7 @@ const HINTS: Readonly<Partial<Record<FailureKind, string>>> = {
 
 const CODE_HINTS: Readonly<Record<string, string>> = {
   PLAYER_DEAD: "Respawn in Minecraft, then wait for a fresh same-session observation before retrying.",
+  COMBAT_TARGET_AVOID: "This hostile class is never engaged (creeper, enderman, unlisted mobs). The agent flees or shelters instead; the table is `minecraftCombatTargets` in combat.ts.",
   GAME_MODE_BLOCKS_PLANTING: "Switch to survival or hardcore mode before asking GameMind to plant wheat.",
   UNSUPPORTED_DIMENSION: "Move the task to the overworld and wait for a fresh observation before retrying.",
 };
@@ -390,6 +395,7 @@ const OWNERS: Readonly<Record<FailureKind, string>> = {
 };
 
 const LABELS: Readonly<Record<string, string>> = {
+  COMBAT_TARGET_AVOID: "hostile class is never engaged",
   TASK_RESULT_MISSING: "task ended without a recorded result",
   UNKNOWN_LIBRARY_ENTRY: "unknown Library entry",
   LIBRARY_UNAVAILABLE: "Library entry unavailable in this run",
