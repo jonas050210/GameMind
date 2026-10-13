@@ -578,24 +578,6 @@
       "severity": 1
     },
     {
-      "fingerprint": "reliability.onedrive-wsl-checkout",
-      "title": "Document moving the checkout out of OneDrive and off /mnt/c",
-      "category": "reliability",
-      "kind": "known-limitation",
-      "explanation": "`launcher/checks.py` already warns when the project sits on a Windows drive seen from WSL, and names four OneDrive-specific problems: the sync watches node_modules, it watches the constantly written data folder, a cloud-placeholder file cannot be read at all, and two writers can lose a rename — which matters because every persistence write here is a temp file plus rename. `INSTANCE_LOCK_FOREIGN` covers the related risk of starting from both sides. What is missing is the move itself as documented steps, including that data is gitignored and a fresh clone loses homepoints and episodes.",
-      "expectedBenefit": "Faster installs, tests and traces, and no lost renames in the data directory.",
-      "effort": 1,
-      "impact": 3,
-      "urgency": 3,
-      "confidence": 0.9,
-      "dependencies": [],
-      "evidence": [
-        { "source": "launcher/checks.py", "metric": "check_windows_mount", "value": "warning exists, no documented remedy" },
-        { "source": "docs/LIVE_VERIFICATION.md", "metric": "§18 item 7", "value": "asks to record what happens under /mnt/c" }
-      ],
-      "severity": 2
-    },
-    {
       "fingerprint": "reliability.windows-launcher-ci-red",
       "title": "The Windows launcher CI job is red on main and on every branch",
       "category": "reliability",

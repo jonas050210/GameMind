@@ -191,6 +191,106 @@ python3 main.py --check  # check Node, dependencies, ports and WSL, then exit
 npm audit                # the dependency audit must report 0 vulnerabilities
 ```
 
+## Where the checkout should live (WSL and OneDrive)
+
+`python3 main.py --check` warns when the project sits on a Windows drive seen from WSL (a path starting with
+`/mnt/<drive>`), and names four extra problems when that path is inside OneDrive. The check is
+`check_windows_mount` in `launcher/checks.py`; this section is the remedy it points at.
+
+- File access from WSL to `/mnt/<drive>` is much slower than the Linux filesystem, and `npm ci`, `tsc` and the
+  test runner are almost entirely many small file operations.
+- The OneDrive sync watches `node_modules` (tens of thousands of files) and the constantly written `data/`
+  folder, which holds traces, episodes, homepoints and roadmap decisions.
+- A file that is only a cloud placeholder cannot be read at all. Mark the folder "Always keep on this device",
+  or better, move it out of the sync.
+- Two writers — WSL and the sync — can lose a rename, and every persistence write in this project is a temp
+  file plus a rename (`src/core/atomic-file.ts`).
+
+A related failure the launcher reports as `INSTANCE_LOCK_FOREIGN`: one folder started once from Windows and
+once from WSL holds a lock whose pid belongs to the other process table, so it cannot be judged. The outcome
+nobody wants is a second bot on the same account.
+
+**Recommended layout: the checkout lives in the Linux filesystem, and Windows keeps a shortcut to it.** The
+code, `node_modules` and `data/` then stay out of the sync entirely, while Explorer and your editor can still
+reach the folder.
+
+### Moving the checkout
+
+Both routes end in the same place. Check for uncommitted work first (`git status --short`) — route A keeps it,
+route B does not.
+
+Route A — copy everything, slowest and safest:
+
+```bash
+# In WSL, from inside the current (OneDrive) checkout.
+OLD="$PWD"
+mkdir -p ~/projects
+cp -a "$OLD" ~/projects/GameMind
+cd ~/projects/GameMind
+
+rm -rf node_modules     # installed for Windows; the platform binaries do not match Linux
+npm ci
+npm run build && npm test
+python3 main.py --check # the /mnt/<drive> warning is gone
+```
+
+Route B — clone locally, much faster, needs a clean tree:
+
+```bash
+# In WSL. Commit or stash first, or the uncommitted work stays behind in the old folder.
+OLD="/mnt/c/Users/<you>/OneDrive/Desktop/GameMind"
+git clone "$OLD" ~/projects/GameMind
+cd ~/projects/GameMind
+
+# A local clone points origin at the folder it came from. Put it back on GitHub:
+git remote set-url origin https://github.com/<you>/GameMind.git
+git remote -v
+
+# data/ is gitignored, so a clone does not bring it. Copy it separately, or lose the homepoints,
+# episodes, traces and roadmap decisions:
+cp -a "$OLD/data" ~/projects/GameMind/data
+
+npm ci && npm run build && npm test
+```
+
+Only delete or rename the OneDrive copy after the new one builds and tests green. `npm ci` inside WSL is not
+optional: `check_dependencies` compares the esbuild platform directory in `node_modules` with the operating
+system it runs on, and a Windows-installed tree fails that check on Linux.
+
+### A Windows shortcut to the moved folder
+
+From inside WSL, `explorer.exe .` opens the current Linux folder in Windows Explorer, and the address bar then
+shows the UNC path you need — `\\wsl.localhost\<Distro>\home\<you>\projects\GameMind`. (`\\wsl$\<Distro>\...`
+is the older spelling and still works.) `<Distro>` is what `wsl -l -q` prints from Windows, or
+`echo "$WSL_DISTRO_NAME"` inside WSL.
+
+To put a shortcut on the desktop — which is the OneDrive desktop when OneDrive owns it — run this in
+PowerShell on Windows:
+
+```powershell
+$distro   = "Ubuntu"                                   # from: wsl -l -q
+$linuxDir = "home\<you>\projects\GameMind"             # the Linux home, without the leading slash
+$target   = "\\wsl.localhost\$distro\$linuxDir"
+$desktop  = [Environment]::GetFolderPath("Desktop")
+$link     = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop "GameMind.lnk"))
+$link.TargetPath  = $target
+$link.Description = "GameMind checkout inside WSL"
+$link.Save()
+```
+
+What the shortcut does and does not do:
+
+- OneDrive syncs the `.lnk` file, a few kilobytes. It does **not** sync the folder the shortcut points at,
+  which is the whole point.
+- The target resolves only while the distro is available. Opening the shortcut starts WSL if it is not
+  running; the first open can take a few seconds.
+- Never move or copy the target back into OneDrive through the shortcut — that recreates every problem above.
+- Edit through the Linux path (a Remote-WSL editor session, or an editor started from WSL), not through a
+  second Windows copy of the tree, and not both at once.
+
+Reaching the folder by hand works too, without any shortcut: in Explorer, go to
+`\\wsl.localhost\<Distro>\home\<you>\projects`.
+
 ## Offline demos (no Minecraft server required)
 
 ```bash
