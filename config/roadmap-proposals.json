@@ -594,6 +594,24 @@
         { "source": "docs/LIVE_VERIFICATION.md", "metric": "§18 item 7", "value": "asks to record what happens under /mnt/c" }
       ],
       "severity": 2
+    },
+    {
+      "fingerprint": "reliability.windows-launcher-ci-red",
+      "title": "The Windows launcher CI job is red on main and on every branch",
+      "category": "reliability",
+      "kind": "hypothesis",
+      "explanation": "Every recent workflow run is red, main included: 'Launcher (Python, Windows 11 runner)' fails at `python -m unittest discover -s tests_py -t .` with exit code 1, while the same 53 tests pass on the Linux runner and the TypeScript job is green. Cause not established — the check annotations carry only 'Process completed with exit code 1' and the job log is not reachable from every environment. The tests are dependency-injected by design, so a plain platform assumption is unlikely; suspects are a Windows-specific path, process-liveness or port-binding assumption in launcher/checks.py, or the runner itself. Until this is green, CI cannot separate a real regression from the standing failure, which is why it outranks most feature work.",
+      "expectedBenefit": "CI becomes a signal again: red means this change broke something.",
+      "effort": 2,
+      "impact": 4,
+      "urgency": 4,
+      "confidence": 0.6,
+      "dependencies": ["Access to the failing job log, or a Windows machine to run tests_py on"],
+      "evidence": [
+        { "source": "GitHub Actions, main at 37ac199", "metric": "jobs", "value": "Windows launcher failure; Linux launcher and TypeScript success" },
+        { "source": "GitHub Actions run history", "metric": "conclusion", "value": "every one of the last 12 runs is a failure" }
+      ],
+      "severity": 3
     }
   ]
 }
