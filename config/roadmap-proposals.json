@@ -58,24 +58,6 @@
       "severity": 2
     },
     {
-      "fingerprint": "reliability.scenario-gate-strictness",
-      "title": "A required goal counts even when its action failed, so a scenario can pass without the behaviour",
-      "category": "reliability",
-      "kind": "known-limitation",
-      "explanation": "`aggregateScenario`'s required-goal gate reads `run.actionGoals`, which is every executed action whatever its status, so a goal that was attempted and failed in 1 ms satisfies it. That is exactly how `combat-opt-in-defence` stayed green through a refused swing. `requiredSuccessfulGoals` (the action must have succeeded) and `requiredHostileDeaths` (read from the world) now exist and the combat scenarios use them, but the permissive default remains and every other scenario still relies on it. Nothing flags a scenario whose required goal only ever appears in failed actions - the case that reads as verified behaviour while measuring an attempt.",
-      "expectedBenefit": "A green scenario means the behaviour happened. The suite cannot quietly degrade into asserting attempts.",
-      "effort": 1,
-      "impact": 3,
-      "urgency": 2,
-      "confidence": 0.9,
-      "dependencies": [],
-      "evidence": [
-        { "source": "src/testing/eval/harness.ts", "metric": "required-goal gate", "value": "reads actionGoals, which includes failed actions" },
-        { "source": "src/testing/eval/scenarios.ts", "metric": "strict gates in use", "value": "requiredSuccessfulGoals and requiredHostileDeaths on 3 combat scenarios only" }
-      ],
-      "severity": 2
-    },
-    {
       "fingerprint": "reliability.progress-watchdog-combat-build",
       "title": "Stall detection exists for navigation only, not for combat or building",
       "category": "reliability",

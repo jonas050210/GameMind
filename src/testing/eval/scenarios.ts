@@ -47,15 +47,16 @@ export interface EvaluationScenario {
   /** Agent-level switches the scenario needs, applied when the run is built. */
   readonly agent?: { readonly allowCombat?: boolean };
   /**
-   * Behaviour the executed action list has to show. `requiredGoals` must appear in every seed's run,
-   * `forbiddenGoals` in none — deterministic gates that catch a policy that quietly stopped doing (or
-   * started doing) something, which a success rate alone would hide.
+   * Behaviour the executed action list has to show, in every seed's run. `forbiddenGoals` must appear in none
+   * of them — deterministic gates that catch a policy that quietly stopped doing (or started doing) something,
+   * which a success rate alone would hide. A forbidden goal counts even when it failed: attempting it is the
+   * violation.
    */
-  readonly requiredGoals?: readonly string[];
   readonly forbiddenGoals?: readonly string[];
   /**
-   * Like `requiredGoals`, but the action has to have succeeded. `requiredGoals` alone is satisfied by an
-   * attempt that failed, which reads as a pass while the behaviour never happened.
+   * Goals that have to have *succeeded*. There is deliberately no variant that counts an attempt: the old
+   * `requiredGoals` gate read every executed action whatever its status, so a goal that failed in a
+   * millisecond satisfied it. That is how `combat-opt-in-defence` stayed green through a refused swing.
    */
   readonly requiredSuccessfulGoals?: readonly string[];
   /** Hostiles that must be dead in the simulated world by the end of every seed's run. */
@@ -353,7 +354,7 @@ export function evaluationScenarios(): EvaluationScenario[] {
           maxActions: 16,
           maxExplorationLegs: 2,
         }),
-      requiredGoals: ["build-shelter"],
+      requiredSuccessfulGoals: ["build-shelter"],
     },
     {
       id: "combat-opt-in-defence",
@@ -377,7 +378,6 @@ export function evaluationScenarios(): EvaluationScenario[] {
           maxExplorationLegs: 1,
         }),
       agent: { allowCombat: true },
-      requiredGoals: ["defend"],
       requiredSuccessfulGoals: ["defend"],
       requiredHostileDeaths: 1,
     },
@@ -480,7 +480,7 @@ export function evaluationScenarios(): EvaluationScenario[] {
           maxActions: 10,
           maxExplorationLegs: 0,
         }),
-      requiredGoals: ["free-inventory"],
+      requiredSuccessfulGoals: ["free-inventory"],
     },
     {
       id: "hazard-lava-edge",
@@ -501,7 +501,7 @@ export function evaluationScenarios(): EvaluationScenario[] {
           maxActions: 12,
           maxExplorationLegs: 1,
         }),
-      requiredGoals: ["avoid-hazard", "collect:", "explore:"],
+      requiredSuccessfulGoals: ["avoid-hazard", "collect:", "explore:"],
     },
     {
       id: "gather-pickup-dropped-log",

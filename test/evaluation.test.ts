@@ -25,7 +25,7 @@ test("an attacking zombie is fought and killed offline, and every rule that refu
   };
 
   // The fight itself. Before the simulated adapter equipped a carried weapon like the live one does, this
-  // scenario "passed" its required-goal gate on a swing that failed with COMBAT_NO_WEAPON: the goal was
+  // scenario "passed" its goal gate on a swing that failed with COMBAT_NO_WEAPON: the goal was
   // executed, so nothing showed that no fight ever happened. These assertions are about world facts.
   const fight = byId("combat-opt-in-defence");
   const fightRuns: EvaluationRun[] = [];
@@ -49,6 +49,54 @@ test("an attacking zombie is fought and killed offline, and every rule that refu
       assert.ok(aggregateScenario(scenario, [run]).passed, `${id}: gates hold on seed ${seed}`);
     }
   }
+});
+
+function evaluationRun(overrides: Partial<EvaluationRun> = {}): EvaluationRun {
+  return {
+    scenarioId: "fake",
+    seed: 0,
+    status: "succeeded",
+    success: true,
+    safe: true,
+    died: false,
+    simulatedMs: 4_000,
+    metrics: { actions: 4, wastedActions: 0, unsafeActions: 0, unverifiedConfirmations: 0, progressEvents: 1 } as unknown as EvaluationRun["metrics"],
+    worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0, hostilesKilled: 0 },
+    actionGoals: [],
+    successfulActionGoals: [],
+    actionChoices: [],
+    actionFailures: [],
+    failureCode: null,
+    ...overrides,
+  };
+}
+
+function gateOf(scenario: EvaluationScenario, runs: EvaluationRun[], name: string): { passed: boolean; detail: string } {
+  const gate = aggregateScenario(scenario, runs).gates.find((candidate) => candidate.name === name);
+  assert.ok(gate, `${scenario.id} has a '${name}' gate`);
+  return gate;
+}
+
+test("a required goal counts only when it succeeded, a forbidden one counts even when it failed", () => {
+  // The two gates are deliberately asymmetric. A requirement is a claim that behaviour happened, so an
+  // attempt that failed must not satisfy it - that asymmetry is the whole reason `requiredGoals`, which read
+  // every executed action whatever its status, no longer exists. A prohibition is about what the agent was
+  // willing to do, so a forbidden swing counts as a violation even when it landed on nothing.
+  const freeing = evaluationScenarios().find((candidate) => candidate.id === "inventory-full-frees-space");
+  const refusing = evaluationScenarios().find((candidate) => candidate.id === "combat-denied-by-default");
+  assert.ok(freeing && refusing);
+
+  const attemptedOnly = evaluationRun({ actionGoals: ["free-inventory"], successfulActionGoals: [] });
+  const gate = gateOf(freeing, [attemptedOnly], "required-successful-goal");
+  assert.equal(gate.passed, false, "a goal that was executed and failed must not satisfy the requirement");
+  assert.match(gate.detail, /0\/1 seed/);
+
+  const completed = evaluationRun({ actionGoals: ["free-inventory"], successfulActionGoals: ["free-inventory"] });
+  assert.equal(gateOf(freeing, [completed], "required-successful-goal").passed, true, "the same goal, succeeded, does");
+
+  const failedSwing = evaluationRun({ actionGoals: ["defend"], successfulActionGoals: [] });
+  assert.equal(gateOf(refusing, [failedSwing], "forbidden-goal").passed, false, "a forbidden attempt is a violation even when it failed");
+  assert.equal(gateOf(refusing, [evaluationRun({ actionGoals: ["explore:north"] })], "forbidden-goal").passed, true);
 });
 
 test("evaluation runs retain specific action failures for intermittent-action diagnosis", async () => {

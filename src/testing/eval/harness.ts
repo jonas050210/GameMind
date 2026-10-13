@@ -235,14 +235,6 @@ export function aggregateScenario(
   }
   const matches = (goal: string, prefixes: readonly string[]): boolean =>
     prefixes.some((prefix) => goal === prefix || goal.startsWith(prefix));
-  if (scenario.requiredGoals && scenario.requiredGoals.length > 0) {
-    const satisfied = runs.filter((run) => matches(run.actionGoals.join(","), scenario.requiredGoals ?? [])).length;
-    gates.push({
-      name: "required-goal",
-      passed: satisfied === seeds,
-      detail: `${satisfied}/${seeds} seed(s) executed one of ${scenario.requiredGoals.join(", ")}; goals are read from executed actions, not from the plan.`,
-    });
-  }
   if (scenario.requiredSuccessfulGoals && scenario.requiredSuccessfulGoals.length > 0) {
     const satisfied = runs.filter((run) => matches(run.successfulActionGoals.join(","), scenario.requiredSuccessfulGoals ?? [])).length;
     gates.push({
