@@ -29,6 +29,7 @@ export interface ControlCenterConnection {
 }
 
 import type { AgentLoopPerformance } from "../games/minecraft/runtime-metrics.js";
+import type { ChatLatency } from "../games/minecraft/chat-latency.js";
 import type { AutonomySnapshot } from "../games/minecraft/autonomy-controller.js";
 import type { RoadmapSnapshot } from "../roadmap/service.js";
 
@@ -489,6 +490,8 @@ export interface ControlCenterSnapshot {
   readonly generatedAt: string;
   /** Measured timing of the fast observation loop: frequency, observation age, decision/action/reaction latency. */
   readonly agentLoop?: AgentLoopPerformance | null;
+  /** Measured chat response times: queue wait, handling, first reply, and the optional local model. */
+  readonly chatLatency?: ChatLatency | null;
   /** Subgoal choice, cooldowns, and recent outcomes from the autonomy controller. */
   readonly objective?: AutonomySnapshot | null;
   readonly worldSeed?: ControlCenterWorldSeed | null;

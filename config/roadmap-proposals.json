@@ -6,13 +6,13 @@
       "title": "Chat hang: every queued link is bounded now, but abandoned work is not cancelled and nothing is measured",
       "category": "reliability",
       "kind": "hypothesis",
-      "explanation": "Operator report from live play: the chat stops responding. Reading the code rules out the first suspect, and one of the two gaps found since is now fixed. MinecraftChatController serialises every message on `this.processing`, and each link is wrapped in `withChatTimeout`: the message chain at CHAT_HANDLE_TIMEOUT_MS (20 s) and, since the fix, the confirmation-deadline link as well. That one used to append `expirePendingQuestion()` with no timeout, so a hang while resuming follow mode blocked every later message for the rest of the session; it is now abandoned after one timeout, and because `expirePendingQuestion` clears all pending approvals before its only await, an abandoned expiry still fails closed. A regression test hangs `setMode(\"follow\")` and asserts the queue recovers. `status`, `stopp` and `hold` bypass the queue, `hilfe` answers at once. What remains: a timeout rejects without cancelling the work underneath, which keeps running and may mutate state later; and nothing is measured, so the operator symptom is still unconfirmed. If it recurs it is no longer explainable by this chain and needs a recording - queue wait and handling duration belong to performance.chat-latency.",
+      "explanation": "Operator report from live play: chat stops responding. Reading the code rules out the first suspect, and one gap found since is now fixed. The controller serialises every message on `this.processing`, and every link is bounded by `withChatTimeout`: the message chain, the confirmation-deadline link and the priority controls. The deadline link used to append `expirePendingQuestion()` with no timeout, so a hang while resuming follow mode blocked every later message for the rest of the session; it is now abandoned after one timeout, and since `expirePendingQuestion` clears all pending approvals before its only await, an abandoned expiry still fails closed. A regression test hangs `setMode(\"follow\")` and asserts the queue recovers. `status`, `stopp`, `hold` bypass the queue; `hilfe` answers at once. Every message is now timed - queue wait, handling, first reply, helper model - and logged, so a recurrence becomes a number. What remains: a timeout rejects without cancelling the work underneath, which keeps running and may mutate state later; and the operator symptom is still unconfirmed. If it recurs while the chat latency numbers look healthy, the cause is outside this chain.",
       "expectedBenefit": "Chat becomes trustworthy and diagnosable, which is the precondition for every other live test.",
       "effort": 2,
       "impact": 3,
       "urgency": 4,
       "confidence": 0.5,
-      "dependencies": ["performance.chat-latency", "reliability.live-protocol-results"],
+      "dependencies": ["reliability.live-protocol-results"],
       "evidence": [
         { "source": "src/games/minecraft/minecraft-chat-controller.ts", "metric": "CHAT_HANDLE_TIMEOUT_MS", "value": "20000, wraps every queued link including the confirmation deadline" },
         { "source": "test/minecraft-chat-controller.test.ts", "metric": "regression test", "value": "a hung follow resume must not block later messages" },
@@ -55,23 +55,6 @@
         { "source": "src/testing/simulated-minecraft/world.ts", "metric": "hostile behaviour", "value": "health and drops only, no attack" }
       ],
       "severity": 2
-    },
-    {
-      "fingerprint": "performance.chat-latency",
-      "title": "Chat response time is not measured",
-      "category": "performance",
-      "kind": "known-limitation",
-      "explanation": "`runtime-metrics.ts` already samples observation interval, observation age, decision time and reaction time against LOOP_TARGETS, and the Control Center reports whether they are met. Chat has no such window: neither 'message received to first reply' nor 'message received to task started' nor the Ollama responder duration is measured, although the responder has 3 s and 8 s cold budgets.",
-      "expectedBenefit": "A hang or a slow model answer becomes a number instead of an impression, which is also how the chat hypothesis gets confirmed or dropped.",
-      "effort": 1,
-      "impact": 3,
-      "urgency": 3,
-      "confidence": 0.9,
-      "dependencies": [],
-      "evidence": [
-        { "source": "src/games/minecraft/runtime-metrics.ts", "metric": "sampled quantities", "value": "loop timings only, no chat" }
-      ],
-      "severity": 1
     },
     {
       "fingerprint": "reliability.progress-watchdog-combat-build",

@@ -120,6 +120,8 @@ function setup(
     readonly chatTimeoutMs?: number;
     /** Companion modes whose `setMode` never settles, to reproduce a hung adapter call. */
     readonly hangingModes?: readonly string[];
+    /** A logger the test can read, to assert what a session leaves behind in the log. */
+    readonly logger?: pino.Logger;
   } = {},
 ) {
   let world = makeWorld(options.initialInventory ?? [stack("diamond", 2)], {
@@ -157,7 +159,7 @@ function setup(
     runtime,
     skills,
     companion,
-    logger: pino({ level: "silent" }),
+    logger: options.logger ?? pino({ level: "silent" }),
     runTask: async (task) => {
       tasks.push(task);
       const taskResult = await runTask(task);
@@ -185,6 +187,13 @@ function setup(
 }
 
 const flush = async (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** Collects log lines instead of writing them, so a test can read what a live session would leave behind. */
+function logCapture(): { readonly logger: pino.Logger; readonly lines: string[] } {
+  const lines: string[] = [];
+  const destination = { write: (chunk: string): void => { lines.push(chunk); } };
+  return { logger: pino({ level: "debug" }, destination), lines };
+}
 
 test("only the exact configured Minecraft player can issue chat controls", async () => {
   const { controller, transport, calls, tasks } = setup();
@@ -703,6 +712,74 @@ test("a confirmation deadline that hangs while resuming follow mode does not blo
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.ok(transport.sent.length > sentBefore, "a hung confirmation deadline must not block later messages");
   assert.match(transport.sent.at(-1) ?? "", /Meintest du/);
+  controller.stop();
+});
+
+test("chat response times are measured per message, and dropped messages never look like slow answers", async () => {
+  const { controller, transport } = setup();
+  transport.emit("Alex", "folge mir"); // not the operator
+  transport.emit("Operator_1", "   "); // empty
+  transport.emit("Operator_1", "folge mir");
+  await flush();
+  transport.emit("Operator_1", "folge mir"); // the same command again inside the duplicate window
+  await flush();
+
+  const latency = controller.chatLatency();
+  assert.deepEqual(latency.messages, { received: 1, ignored: 3, handled: 1, timedOut: 0, answered: 1 });
+  assert.equal(latency.firstReplyMs.count, 1);
+  assert.equal(latency.queueWaitMs.count, 1);
+  assert.ok(latency.last !== null && latency.last.timedOut === false);
+  assert.deepEqual(
+    latency.targets.map((target) => target.met),
+    [true, true, true, null],
+    "no model answered, so nothing is claimed about the helper",
+  );
+  controller.stop();
+});
+
+test("priority controls and help are measured even though they bypass the queue", async () => {
+  const { controller, transport } = setup();
+  transport.emit("Operator_1", "status");
+  transport.emit("Operator_1", "hilfe");
+  await flush();
+
+  const latency = controller.chatLatency();
+  assert.deepEqual(latency.messages, { received: 2, ignored: 0, handled: 2, timedOut: 0, answered: 2 });
+  assert.equal(latency.queueWaitMs.maxMs, 0, "a message that bypasses the queue does not wait");
+  controller.stop();
+});
+
+test("an abandoned message is reported as a timeout in the metrics and in the log", async () => {
+  const capture = logCapture();
+  const responder: MinecraftChatResponder = { reply: () => new Promise<string | null>(() => undefined) };
+  const { controller, transport } = setup(undefined, { chatResponder: responder, chatTimeoutMs: 20, logger: capture.logger });
+  transport.emit("Operator_1", "erzähl mir was von der welt");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  const latency = controller.chatLatency();
+  assert.equal(latency.messages.timedOut, 1);
+  assert.equal(latency.messages.handled, 0);
+  assert.equal(latency.messages.answered, 1, "the operator still receives the failure message");
+  assert.ok(latency.last?.timedOut === true);
+
+  const warning = capture.lines.find((line) => line.includes("breached a response-time target"));
+  assert.ok(warning, "an abandoned answer must be visible in the log without reading a metric panel");
+  assert.match(warning, /abandoned/);
+  assert.ok(capture.lines.some((line) => line.includes("Operator chat command failed")));
+  controller.stop();
+});
+
+test("every answered message leaves one latency line in the log", async () => {
+  const capture = logCapture();
+  const { controller, transport } = setup(undefined, { logger: capture.logger });
+  transport.emit("Operator_1", "folge mir");
+  await flush();
+
+  const line = capture.lines.find((entry) => entry.includes("Minecraft chat latency"));
+  assert.ok(line, "a normal answer is logged at debug with its numbers");
+  assert.match(line, /"queueWaitMs":/);
+  assert.match(line, /"handleMs":/);
+  assert.match(line, /"firstReplyMs":/);
   controller.stop();
 });
 
