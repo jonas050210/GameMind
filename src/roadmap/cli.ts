@@ -10,12 +10,16 @@ const USAGE = `GameMind improvement roadmap
   npm run roadmap -- act FINGERPRINT ACTION [--value 1-5] [--note TEXT]
       ACTION: ${ROADMAP_ACTIONS.join(", ")}
 
-Evidence is read from data/ (profiles, evidence/tests.json, episodes and live verification). Decisions are saved in data/roadmap/state.json.`;
+Evidence is read from data/ (profiles, evidence/tests.json, episodes and live verification), plus operator
+proposals from config/roadmap-proposals.json (tracked) and data/roadmap/proposals.json (local, wins on a
+duplicate fingerprint). A malformed proposal file loads nothing and prints why. Decisions are saved in
+data/roadmap/state.json.`;
 
 function print(snapshot: RoadmapSnapshot): void {
   console.log(`Evidence measured: ${snapshot.evidenceAt ?? "none"}`);
   for (const source of snapshot.sources) {
-    console.log(`  ${source.available ? "✓" : "–"} ${source.name}${source.measuredAt ? ` (${source.measuredAt})` : ""}`);
+    const problem = source.problem ? ` — ${source.problem}` : "";
+    console.log(`  ${source.available ? "✓" : "–"} ${source.name}${source.measuredAt ? ` (${source.measuredAt})` : ""}${problem}`);
   }
   if (snapshot.error) console.log(`Error: ${snapshot.error}`);
   if (snapshot.items.length === 0) console.log("No open items.");
