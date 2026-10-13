@@ -78,7 +78,7 @@ import { isHostileMinecraftEntity } from "./threats.js";
 import { COMBAT_APPROACH_MAX_BLOCKS, MELEE_REACH_BLOCKS, attackCooldownMs } from "./combat.js";
 import { isMineableBlockName, minecraftMiningRequirements, estimatedDigSeconds, bestPickaxeTier, canMineWithTier } from "./mining.js";
 import { bestWeapon, combatIsAllowed, weaponDamageFor } from "./combat.js";
-import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_DIRECTIONS } from "./shelter.js";
+import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_SEAL_TOTAL, analyzeShelterSeal, shelterSealTargets, type ShelterCellState } from "./shelter.js";
 import { minecraftObservationSchema } from "./observation.js";
 import { reachedNavigationGoal } from "./reach.js";
 import type {
@@ -1577,6 +1577,9 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         "NAVIGATION_TARGET_TOO_FAR",
       );
     }
+    // Navigation never digs (canDig = false), so a fully enclosed agent would stand still. A sealed shelter is
+    // opened first, on the side facing the target, by exactly one feet-level and one head-level wall.
+    await this.breakOutOfSealedShelter(bot, { x, y, z }, signal);
     await this.navigateWithProgressWatchdog(
       bot,
       new pathfinderApi.goals.GoalNear(x, y, z, range),
@@ -1601,6 +1604,50 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         conservativeMovements: true,
       },
     };
+  }
+
+  /**
+   * If the agent stands in a fully observed enclosure, removes the two walls on the side nearest the target
+   * (head level first, then feet level) so that pathfinding has an opening. Does nothing when not sealed.
+   * Refuses when the cell beyond the opening is unsafe (lava, water, fire) or when a wall cannot be read back as open.
+   */
+  private async breakOutOfSealedShelter(
+    bot: Bot,
+    target: { x: number; y: number; z: number },
+    signal: AbortSignal,
+  ): Promise<void> {
+    const feet = { x: Math.floor(bot.entity.position.x), y: Math.floor(bot.entity.position.y), z: Math.floor(bot.entity.position.z) };
+    const seal = analyzeShelterSeal(
+      feet.x,
+      feet.y,
+      feet.z,
+      (x, y, z) => this.shelterCellState(bot, x, y, z),
+      this.shelterFloorState(bot, feet),
+    );
+    if (!seal.sealed) return;
+    const toward = { x: target.x - feet.x, z: target.z - feet.z };
+    const [dx, dz] = [...SHELTER_CARDINAL_DIRECTIONS].sort(
+      (left, right) => (right[0] * toward.x + right[1] * toward.z) - (left[0] * toward.x + left[1] * toward.z),
+    )[0] ?? [0, -1];
+    const beyond = this.blockAtCoordinates(bot, feet.x + 2 * dx, feet.y, feet.z + 2 * dz);
+    if (!beyond) {
+      throw new MinecraftAdapterError("The cell beyond the shelter wall is unknown; the breakout was refused.", "SHELTER_BREAKOUT_UNSAFE");
+    }
+    if (["lava", "water", "fire", "soul_fire"].includes(beyond.name)) {
+      throw new MinecraftAdapterError(`The cell beyond the shelter wall holds ${beyond.name}; the breakout was refused.`, "SHELTER_BREAKOUT_UNSAFE");
+    }
+    for (const y of [feet.y + 1, feet.y]) {
+      const wall = this.blockAtCoordinates(bot, feet.x + dx, y, feet.z + dz);
+      if (!wall || wall.boundingBox !== "block") {
+        throw new MinecraftAdapterError(`Shelter wall at ${feet.x + dx},${y},${feet.z + dz} is not observed solid; breakout stopped.`, "SHELTER_BREAKOUT_UNSAFE");
+      }
+      await raceWithAbort(bot.lookAt(wall.position.offset(0.5, 0.5, 0.5), true), signal).catch(() => undefined);
+      await raceWithAbort(bot.dig(wall, true), signal);
+      const after = this.shelterCellState(bot, feet.x + dx, y, feet.z + dz);
+      if (after !== "open") {
+        throw new MinecraftAdapterError(`Shelter wall at ${feet.x + dx},${y},${feet.z + dz} is still present after digging.`, "SHELTER_BREAKOUT_UNSAFE");
+      }
+    }
   }
 
   private async navigateWithProgressWatchdog(
@@ -2701,19 +2748,23 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const parsed = minecraftBuildShelterInputSchema.safeParse(input);
     if (!parsed.success) throw new MinecraftAdapterError("Invalid shelter request.", "INVALID_ACTION_INPUT");
     const { mode, maxBlocks, dangerRadius } = parsed.data;
-    const directions = mode === "cardinal" ? SHELTER_CARDINAL_DIRECTIONS : SHELTER_DIRECTIONS;
     const feet = {
       x: Math.floor(bot.entity.position.x),
       y: Math.floor(bot.entity.position.y),
       z: Math.floor(bot.entity.position.z),
     };
+    // "full" walks the 25 enclosure cells in build order (feet ring, head ring, roof), skipping cells already
+    // observed solid. "cardinal" keeps the legacy four feet-level walls, which are never a shelter on their own.
+    const candidates = mode === "cardinal"
+      ? SHELTER_CARDINAL_DIRECTIONS.map(([dx, dz]) => ({ x: feet.x + dx, y: feet.y, z: feet.z + dz }))
+      : shelterSealTargets(feet.x, feet.y, feet.z).filter(
+        (target) => this.shelterCellState(bot, target.x, target.y, target.z) !== "solid",
+      );
     const placed: Array<{ x: number; y: number; z: number; blockName: string }> = [];
     const skipped: Array<{ x: number; y: number; z: number; reason: string }> = [];
-    for (const [dx, dz] of directions) {
+    for (const candidate of candidates) {
       if (placed.length >= maxBlocks) break;
-      const x = feet.x + dx;
-      const z = feet.z + dz;
-      const y = feet.y;
+      const { x, y, z } = candidate;
       const cell = this.blockAtCoordinates(bot, x, y, z);
       if (!cell) {
         skipped.push({ x, y, z, reason: "unknown-block" });
@@ -2752,7 +2803,13 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         });
       }
     }
-    const solidCardinal = cardinalShelterCount(bot, feet);
+    const seal = analyzeShelterSeal(
+      feet.x,
+      feet.y,
+      feet.z,
+      (x, y, z) => this.shelterCellState(bot, x, y, z),
+      this.shelterFloorState(bot, feet),
+    );
     if (placed.length === 0) {
       throw new MinecraftAdapterError(
         `No shelter cell could be closed: ${skipped.map((entry) => `${entry.reason}@${entry.x},${entry.y},${entry.z}`).join(", ") || "no candidates"}.`,
@@ -2767,9 +2824,27 @@ export class MinecraftAdapter implements GameAdapter<MinecraftObservation> {
         placedCount: placed.length,
         placed,
         skipped,
-        solidCardinalCells: solidCardinal,
-        sheltered: solidCardinal >= SHELTER_CARDINAL_DIRECTIONS.length,
+        solidCardinalCells: cardinalShelterCount(bot, feet),
+        enclosureCells: seal.solidCount,
+        enclosureTotal: SHELTER_SEAL_TOTAL,
+        remainingCells: seal.missing.map((target) => `${target.x},${target.y},${target.z}`),
+        sheltered: seal.sealed,
       },
+    };
+  }
+
+  /** Observed state of one enclosure cell: only a cell the client has loaded counts as solid or open. */
+  private shelterCellState(bot: Bot, x: number, y: number, z: number): ShelterCellState {
+    const cell = this.blockAtCoordinates(bot, x, y, z);
+    if (!cell) return "unknown";
+    return cell.boundingBox === "block" ? "solid" : cell.boundingBox === "empty" ? "open" : "unknown";
+  }
+
+  private shelterFloorState(bot: Bot, feet: { x: number; y: number; z: number }): { solid: boolean; safe: boolean } {
+    const floor = this.blockAtCoordinates(bot, feet.x, feet.y - 1, feet.z);
+    return {
+      solid: floor?.boundingBox === "block",
+      safe: floor !== undefined && floor !== null && !unsafePlacementSupport(floor.name),
     };
   }
 

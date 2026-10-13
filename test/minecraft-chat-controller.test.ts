@@ -5,7 +5,7 @@ import type { GameMindRuntime } from "../src/core/game-mind-runtime.js";
 import type { SkillRuntime } from "../src/core/skill-runtime.js";
 import type { WorldState } from "../src/core/types.js";
 import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
-import { MinecraftChatController, type MinecraftChatMessage, type MinecraftChatTransport } from "../src/games/minecraft/minecraft-chat-controller.js";
+import { MinecraftChatController, withChatTimeout, type MinecraftChatMessage, type MinecraftChatTransport } from "../src/games/minecraft/minecraft-chat-controller.js";
 import type { MinecraftChatResponder } from "../src/games/minecraft/ollama-chat-responder.js";
 import type { CompanionController } from "../src/games/minecraft/companion-controller.js";
 import { parseMinecraftChatCommand } from "../src/games/minecraft/chat-commands.js";
@@ -652,5 +652,35 @@ test("a typo'd control word is still executed and never reaches the language mod
   assert.deepEqual(calls, [{ method: "setMode", mode: "follow", target: "Operator_1" }]);
   assert.equal(asked, 0, "a corrected command is executed, not answered by the model");
   assert.deepEqual(transport.sent, ["Mode follow"]);
+  controller.stop();
+});
+
+test("help answers at once even while an earlier model reply is still pending in the queue", async () => {
+  // A hung reply must not hold the queue: before this change, `help` waited behind it and looked dead.
+  const hung: MinecraftChatResponder = { reply: () => new Promise<string | null>(() => undefined) };
+  const { controller, transport } = setup(undefined, { chatResponder: hung });
+  transport.emit("Operator_1", "qwertzuiop asdfgh");
+  await flush();
+  const before = transport.sent.length;
+  transport.emit("Operator_1", "hilfe");
+  await flush();
+  assert.ok(transport.sent.length > before, "help must be sent while the model reply is still pending");
+  controller.stop();
+});
+
+test("a queued chat command that never settles is abandoned instead of blocking the queue", async () => {
+  await assert.rejects(
+    withChatTimeout(new Promise<never>(() => undefined), 20, "hängender Befehl"),
+    /timed out after 20 ms/,
+  );
+  assert.equal(await withChatTimeout(Promise.resolve("fertig"), 1_000, "schneller Befehl"), "fertig");
+});
+
+test("an unrecognized near-miss of a control word asks 'Meintest du …?' and executes nothing", async () => {
+  const { controller, transport, calls } = setup();
+  transport.emit("Operator_1", "sttaus");
+  await flush();
+  assert.deepEqual(calls, [], "a suggestion never runs a command");
+  assert.match(transport.sent.at(-1) ?? "", /Meintest du „status“/);
   controller.stop();
 });

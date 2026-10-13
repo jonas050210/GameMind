@@ -488,7 +488,7 @@ Environment variables may set connection defaults:
 - `MINECRAFT_HOST` (default `127.0.0.1`)
 - `MINECRAFT_PORT` (default `25565`)
 - `MINECRAFT_USERNAME` (default `GameMind`)
-- `MINECRAFT_OPERATOR` (required to enable chat control; exact in-game name, case-sensitive, 3–16 letters/digits/underscores)
+- `MINECRAFT_OPERATOR` (exact in-game name, case-sensitive, 3–16 letters/digits/underscores; defaults to `JonasBubi` for live CLI runs when unset, so `python3 main.py --port 25524` needs no extra flag)
 - `MINECRAFT_VERSION` (default `1.20.4`)
 - `MINECRAFT_AUTH` (`offline` by default; or `microsoft`)
 - `MINECRAFT_CONNECT_TIMEOUT_MS` (default `15000`)

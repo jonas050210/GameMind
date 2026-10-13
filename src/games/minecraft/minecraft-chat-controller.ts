@@ -20,7 +20,7 @@ import type { CompanionController } from "./companion-controller.js";
 import type { GameMindRuntime } from "../../core/game-mind-runtime.js";
 import type { SkillRuntime } from "../../core/skill-runtime.js";
 import { verifySkillPostcondition } from "./skill-contracts.js";
-import { parseMinecraftChatCommand, describeMinecraftChatHelp, describeUnknownChatFallback, describeChatHelperUnavailable, detectChatLanguage, type MinecraftChatCommand } from "./chat-commands.js";
+import { parseMinecraftChatCommand, describeMinecraftChatHelp, describeUnknownChatFallback, describeChatHelperUnavailable, detectChatLanguage, suggestMinecraftChatCommand, type MinecraftChatCommand } from "./chat-commands.js";
 import { minecraftCraftTaskItemNames, minecraftFoodNames, minecraftPickupNames, minecraftLogNames } from "./capabilities.js";
 import { generateLargeHouseBlueprint } from "./house-blueprint.js";
 import { bestPickaxeTier, minecraftMiningRequirements } from "./mining.js";
@@ -132,6 +132,20 @@ function inventoryAndGearSummary(state: MinecraftObservation): string {
 const CHAT_DUPLICATE_WINDOW_MS = 1_200;
 const CHAT_DEDUPE_MAX_ENTRIES = 64;
 const CHAT_REPLY_MAX_CHARS = 240;
+/** A single queued chat command that takes longer than this is abandoned so the queue cannot jam behind it. */
+const CHAT_HANDLE_TIMEOUT_MS = 20_000;
+
+/** Rejects if `work` does not settle in time; the caller reports the failure and the queue moves on. */
+export function withChatTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Chat command timed out after ${timeoutMs} ms: ${label.slice(0, 40)}`)), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 /** Live chat gate and finite command interpreter; only authorized unrecognized chat may reach the optional local helper. */
 export class MinecraftChatController {
@@ -201,9 +215,15 @@ export class MinecraftChatController {
         return;
       }
 
+      if (command?.kind === "help") {
+        // Help has no side effects; it must answer even while a task or a slow reply holds the queue.
+        for (const line of describeMinecraftChatHelp(detectChatLanguage(message.message, "en"))) this.say(line);
+        return;
+      }
+
       const receivedPosition = this.positionAtChatReceipt();
       this.processing = this.processing
-        .then(() => this.handle(message.message, receivedPosition))
+        .then(() => withChatTimeout(this.handle(message.message, receivedPosition), CHAT_HANDLE_TIMEOUT_MS, message.message))
         .catch((error: unknown) => {
           this.options.logger.error({ err: error }, "Operator chat command failed");
           this.say("Der Chatbefehl ist fehlgeschlagen; ich habe keine erfolgreiche Aktion bestätigt.");
@@ -320,6 +340,14 @@ export class MinecraftChatController {
     const command = parseMinecraftChatCommand(raw);
     if (!command) {
       const language = detectChatLanguage(raw, "de");
+      // A near-miss of a control word gets a question, never an action: the operator confirms by sending the words.
+      const suggestion = suggestMinecraftChatCommand(raw);
+      if (suggestion) {
+        this.say(language === "de"
+          ? `Meintest du „${suggestion}“? Dann sende genau dieses Wort. Ich habe noch nichts ausgeführt.`
+          : `Did you mean “${suggestion}”? Send exactly that word. I have not run anything yet.`);
+        return;
+      }
       const responder = this.options.chatResponder;
       if (responder) {
         const reply = await responder.reply(raw);
@@ -436,10 +464,10 @@ export class MinecraftChatController {
     if (command.kind === "shelter") {
       const task = buildShelterTaskSchema.parse({
         id: `chat-shelter-${Date.now().toString(36)}`,
-        mode: "cardinal",
-        maxBlocks: 4,
-        maxActions: 32,
-        maxDurationMs: 120_000,
+        mode: "full",
+        maxBlocks: 26,
+        maxActions: 150,
+        maxDurationMs: 420_000,
       });
       await this.startTask(task, null);
       return;

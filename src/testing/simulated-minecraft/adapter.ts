@@ -59,7 +59,7 @@ import {
   minecraftMiningRequirements,
 } from "../../games/minecraft/mining.js";
 import { UNARMED_DAMAGE, weaponDamageFor, combatIsAllowed } from "../../games/minecraft/combat.js";
-import { SHELTER_DIRECTIONS, SHELTER_CARDINAL_DIRECTIONS } from "../../games/minecraft/shelter.js";
+import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_SEAL_TOTAL, analyzeShelterSeal, shelterSealTargets, type ShelterCellState } from "../../games/minecraft/shelter.js";
 import { minecraftObservationSchema, type MinecraftObservation } from "../../games/minecraft/observation.js";
 import {
   SimulatedActionError,
@@ -827,6 +827,8 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     blockName: string,
     dangerRadius: number,
     check: () => void,
+    /** Enclosure roof centre: supported by a solid neighbour in the same layer, as the live adapter allows. */
+    sideSupport = false,
   ): AdapterActionOutcome {
     if (this.world.gameMode !== "survival") {
       throw new SimulatedActionError(`Placing ${blockName} requires survival mode.`, "GAME_MODE_BLOCKS_PLACEMENT");
@@ -838,8 +840,14 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     if (!destination || destination.name !== "air") {
       throw new SimulatedActionError("Placement destination is unknown or occupied.", "PLACEMENT_CELL_NOT_EMPTY");
     }
-    const support = this.world.blockAt(x, y - 1, z);
-    if (!support || support.boundingBox !== "block" || UNSAFE_SUPPORT_NAMES.has(support.name)) {
+    const below = this.world.blockAt(x, y - 1, z);
+    const sideSolid = sideSupport && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx = 0, dz = 0]) => {
+      const side = this.world.blockAt(x + dx, y, z + dz);
+      return side?.boundingBox === "block" && !UNSAFE_SUPPORT_NAMES.has(side.name);
+    });
+    const support = below ?? null;
+    const belowSafe = support !== null && support.boundingBox === "block" && !UNSAFE_SUPPORT_NAMES.has(support.name);
+    if (!belowSafe && !sideSolid) {
       throw new SimulatedActionError("Placement destination has no safe solid support block.", "PLACEMENT_SUPPORT_UNSAFE");
     }
     const player = { x: this.world.playerX, y: this.world.playerY, z: this.world.playerZ };
@@ -878,17 +886,18 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     if (placeable.size === 0) {
       throw new SimulatedActionError("No placeable blocks are in the inventory.", "SHELTER_NO_BLOCKS");
     }
-    const directions = mode === "cardinal" ? SHELTER_CARDINAL_DIRECTIONS : SHELTER_DIRECTIONS;
     const feetX = Math.floor(this.world.playerX);
     const feetY = Math.floor(this.world.playerY);
     const feetZ = Math.floor(this.world.playerZ);
+    // Same build order as the live adapter: feet ring, head ring, roof; observed solid cells are skipped.
+    const candidates = mode === "cardinal"
+      ? SHELTER_CARDINAL_DIRECTIONS.map(([dx, dz]) => ({ x: feetX + dx, y: feetY, z: feetZ + dz }))
+      : shelterSealTargets(feetX, feetY, feetZ).filter((target) => this.shelterCellState(target.x, target.y, target.z) !== "solid");
     const placed: Array<{ x: number; y: number; z: number; blockName: string }> = [];
     const skipped: Array<{ x: number; y: number; z: number; reason: string }> = [];
-    for (const [dx, dz] of directions) {
+    for (const candidate of candidates) {
       if (placed.length >= maxBlocks) break;
-      const x = feetX + dx;
-      const z = feetZ + dz;
-      const y = feetY;
+      const { x, y, z } = candidate;
       const cell = this.world.blockAt(x, y, z);
       if (!cell) {
         skipped.push({ x, y, z, reason: "unknown" });
@@ -899,7 +908,9 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         continue;
       }
       const support = this.world.blockAt(x, y - 1, z);
-      if (!support || support.boundingBox !== "block" || UNSAFE_SUPPORT_NAMES.has(support.name)) {
+      const sideSupported = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx = 0, dz = 0]) => this.shelterCellState(x + dx, y, z + dz) === "solid");
+      const belowSupported = support !== null && support.boundingBox === "block" && !UNSAFE_SUPPORT_NAMES.has(support.name);
+      if (!belowSupported && !(mode === "full" && sideSupported)) {
         skipped.push({ x, y, z, reason: "no-support" });
         continue;
       }
@@ -913,7 +924,7 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         break;
       }
       try {
-        this.placeOne(x, y, z, blockName, dangerRadius, check);
+        this.placeOne(x, y, z, blockName, dangerRadius, check, mode === "full");
         placeable.set(blockName, (placeable.get(blockName) ?? 1) - 1);
         placed.push({ x, y, z, blockName });
       } catch (error) {
@@ -925,7 +936,13 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         });
       }
     }
-    const solidCardinal = cardinalSolidCount(this.world);
+    const seal = analyzeShelterSeal(
+      feetX,
+      feetY,
+      feetZ,
+      (x, y, z) => this.shelterCellState(x, y, z),
+      { solid: this.world.blockAt(feetX, feetY - 1, feetZ)?.boundingBox === "block", safe: !UNSAFE_SUPPORT_NAMES.has(this.world.blockAt(feetX, feetY - 1, feetZ)?.name ?? "") },
+    );
     return {
       confirmed: placed.length > 0,
       confirmation: "simulated_shelter_blocks_read_back",
@@ -934,10 +951,19 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
         placedCount: placed.length,
         placed,
         skipped,
-        solidCardinalCells: solidCardinal,
-        sheltered: solidCardinal >= SHELTER_CARDINAL_DIRECTIONS.length,
+        solidCardinalCells: cardinalSolidCount(this.world),
+        enclosureCells: seal.solidCount,
+        enclosureTotal: SHELTER_SEAL_TOTAL,
+        remainingCells: seal.missing.map((target) => `${target.x},${target.y},${target.z}`),
+        sheltered: seal.sealed,
       },
     };
+  }
+
+  private shelterCellState(x: number, y: number, z: number): ShelterCellState {
+    const cell = this.world.blockAt(x, y, z);
+    if (!cell) return "unknown";
+    return cell.boundingBox === "block" ? "solid" : "open";
   }
 
   private placeableCounts(): Map<string, number> {

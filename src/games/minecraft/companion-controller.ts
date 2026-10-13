@@ -289,7 +289,7 @@ export class CompanionController {
       return this.logTask(`Cannot start ordinary work while ${this.targetPlayer} is ${separation.toFixed(1)} blocks away; safe catch-up has priority.`, false);
     }
     if (this.options.taskRunning()) return this.logTask("A verified task is already running. Stop the companion before replacing it.", false);
-    const task = buildShelterTaskSchema.parse({ id: "companion-build-shelter", mode: "cardinal", maxBlocks: 4, maxActions: 30 });
+    const task = buildShelterTaskSchema.parse({ id: "companion-build-shelter", mode: "full", maxBlocks: 26, maxActions: 150, maxDurationMs: 420_000 });
     return this.startCompanionTask(task);
   }
 

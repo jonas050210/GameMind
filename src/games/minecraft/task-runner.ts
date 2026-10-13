@@ -18,8 +18,8 @@ import {
   vitalityBandOf,
 } from "../../core/learning/episode.js";
 import { miningDropFor } from "./mining.js";
-import { shelterCardinalSolidCount } from "./skill-contracts.js";
-import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
+import { shelterSealSolidCount } from "./skill-contracts.js";
+import { SHELTER_SEAL_TOTAL } from "./shelter.js";
 import type { MinecraftObservation } from "./observation.js";
 import type { MinecraftTask } from "./task.js";
 import { countItemAndEquipment } from "./recipes.js";
@@ -209,7 +209,7 @@ function taskTarget(task: MinecraftTask): { item: string; count: number } {
   if (task.kind === "craft_item") return { item: task.targetItem, count: task.targetCount };
   // A shelter is measured in closed sides, not items; the sentinel name keeps the metric honest.
   if (task.kind === "build_shelter") {
-    return { item: "minecraft:shelter_sides", count: SHELTER_CARDINAL_DIRECTIONS.length };
+    return { item: "minecraft:shelter_enclosure_cells", count: SHELTER_SEAL_TOTAL };
   }
   if (task.kind === "mine_resource") {
     return { item: miningDropFor(task.resourceName) ?? task.resourceName, count: task.targetCount };
@@ -444,7 +444,7 @@ export class MinecraftTaskRunner {
     const memory = this.options.memory ?? new WorldMemory();
     const target = taskTarget(task);
     const targetCountOf = (state: MinecraftObservation): number =>
-      task.kind === "build_shelter" ? shelterCardinalSolidCount(state) : countItem(state, target.item);
+      task.kind === "build_shelter" ? shelterSealSolidCount(state) : countItem(state, target.item);
     const learner = this.learner;
     const worldKey = this.options.worldKey ?? null;
     const runId = this.options.runId ?? `${task.id}-${startedClock}`;
@@ -1165,11 +1165,7 @@ export class MinecraftTaskRunner {
       wastedActions,
       explorations,
       minedBlocks,
-      shelterSidesClosed: finalObservation && task.kind === "build_shelter"
-        ? shelterCardinalSolidCount(finalObservation.state)
-        : finalObservation
-          ? shelterCardinalSolidCount(finalObservation.state)
-          : 0,
+      shelterSidesClosed: finalObservation ? shelterSealSolidCount(finalObservation.state) : 0,
       combatActions,
       hungerRecoveryActions,
       deathsObserved,

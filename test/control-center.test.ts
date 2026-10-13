@@ -626,7 +626,8 @@ test("task requests are validated through the same schemas the CLI uses", () => 
 
   const shelter = taskFromControlCenterRequest({ kind: "build-shelter" });
   assert.equal(shelter.kind, "build_shelter");
-  assert.equal((shelter as { maxBlocks: number }).maxBlocks, 4);
+  assert.equal((shelter as { maxBlocks: number }).maxBlocks, 26);
+  assert.equal((shelter as { mode: string }).mode, "full");
 
   assert.throws(() => taskFromControlCenterRequest({ kind: "kill-player" }), /Unknown task kind/);
   assert.throws(() => taskFromControlCenterRequest({ kind: "gather-logs", resource: "cobblestone" }), /not a log/);

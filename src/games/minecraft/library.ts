@@ -1089,11 +1089,11 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
     "minecraft.build-shelter",
     "minecraft.build_shelter",
     [
-      selectField("mode", "Mode", ["cardinal", "full"], "cardinal", "cardinal closes 4 sides; full closes all 8."),
-      { name: "maxBlocks", label: "Max blocks", type: "integer", required: false, def: 4, min: 1, max: 16 },
+      selectField("mode", "Mode", ["full", "cardinal"], "full", "full encloses the player in a 3×3×3 shelter (25 cells); cardinal only closes 4 walls and is never reported as sheltered."),
+      { name: "maxBlocks", label: "Max blocks", type: "integer", required: false, def: 26, min: 1, max: 32 },
       dangerField,
     ],
-    (p) => ({ mode: p["mode"] ?? "cardinal", maxBlocks: p["maxBlocks"] ?? 4, dangerRadius: p["dangerRadius"] ?? 6 }),
+    (p) => ({ mode: p["mode"] ?? "full", maxBlocks: p["maxBlocks"] ?? 26, dangerRadius: p["dangerRadius"] ?? 6 }),
   );
 
   // -- Combat & Protection ----------------------------------------------------
@@ -1450,7 +1450,7 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
   taskEntry(
     "task.build-shelter",
     "Build shelter (task)",
-    "Verified objective: closes the 4 cardinal sides around the player with inventory blocks. Reports no-support vs unknown per side against the next observation.",
+    "Verified objective: encloses the player in a 3×3×3 shelter (feet, head and roof layers, 25 cells) with inventory blocks. Reports missing or unknown cells against the next observation.",
     "build-shelter",
     [],
   );
