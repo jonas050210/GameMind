@@ -117,6 +117,9 @@ function setup(
     readonly currentTask?: () => MinecraftTask | null;
     readonly requestTaskStop?: (reason: string) => void;
     readonly chatResponder?: MinecraftChatResponder;
+    readonly chatTimeoutMs?: number;
+    /** Companion modes whose `setMode` never settles, to reproduce a hung adapter call. */
+    readonly hangingModes?: readonly string[];
   } = {},
 ) {
   let world = makeWorld(options.initialInventory ?? [stack("diamond", 2)], {
@@ -132,6 +135,7 @@ function setup(
   const companion = {
     setMode: async (mode: string, modeOptions: { targetPlayer?: string | null } = {}) => {
       calls.push({ method: "setMode", mode, ...(modeOptions.targetPlayer ? { target: modeOptions.targetPlayer } : {}) });
+      if (options.hangingModes?.includes(mode)) return new Promise<{ ok: boolean; message: string }>(() => undefined);
       return { ok: true, message: `Mode ${mode}` };
     },
     getStatus: async () => ({ ok: true, message: "Mode follow; health 20/20." }),
@@ -166,6 +170,7 @@ function setup(
     ...(options.confirmationTimeoutMs !== undefined ? { confirmationTimeoutMs: options.confirmationTimeoutMs } : {}),
     ...(options.deliveryTimeoutMs !== undefined ? { deliveryTimeoutMs: options.deliveryTimeoutMs } : {}),
     ...(options.chatResponder !== undefined ? { chatResponder: options.chatResponder } : {}),
+    ...(options.chatTimeoutMs !== undefined ? { chatTimeoutMs: options.chatTimeoutMs } : {}),
   });
   controller.start();
   return {
@@ -674,6 +679,31 @@ test("a queued chat command that never settles is abandoned instead of blocking 
     /timed out after 20 ms/,
   );
   assert.equal(await withChatTimeout(Promise.resolve("fertig"), 1_000, "schneller Befehl"), "fertig");
+});
+
+test("a confirmation deadline that hangs while resuming follow mode does not block the queue", async () => {
+  const { controller, transport, calls } = setup(
+    async (task) => result(task, makeWorld([stack("diamond", 3)]), 1),
+    { confirmationTimeoutMs: 5, chatTimeoutMs: 30, hangingModes: ["follow"] },
+  );
+  transport.emit("Operator_1", "hol noch 1 diamanten");
+  await flush();
+  // The delivery question expires and resuming follow mode hangs inside the adapter.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.ok(transport.sent.some((message) => /Bestätigungsfrist ist abgelaufen/.test(message)), "expiry must fail closed");
+  assert.ok(
+    calls.some((call) => call.method === "setMode" && call.mode === "follow"),
+    "the hang has to be the follow resume, otherwise this test proves nothing",
+  );
+
+  // The queue must recover on its own: a near-miss travels the same chain and is answered.
+  const sentBefore = transport.sent.length;
+  transport.emit("Operator_1", "sttaus");
+  await flush();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(transport.sent.length > sentBefore, "a hung confirmation deadline must not block later messages");
+  assert.match(transport.sent.at(-1) ?? "", /Meintest du/);
+  controller.stop();
 });
 
 test("an unrecognized near-miss of a control word asks 'Meintest du …?' and executes nothing", async () => {

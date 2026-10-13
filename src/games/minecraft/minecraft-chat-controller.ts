@@ -84,6 +84,12 @@ export interface MinecraftChatControllerOptions {
   /** How long a yes/no reply remains valid. Expired delivery/resume prompts fail closed. */
   readonly confirmationTimeoutMs?: number;
   readonly deliveryTimeoutMs?: number;
+  /**
+   * How long one queued chat step may take before the queue abandons it and moves on. Defaults to
+   * {@link CHAT_HANDLE_TIMEOUT_MS}; injectable so tests can exercise the recovery path in milliseconds
+   * instead of waiting out the production value.
+   */
+  readonly chatTimeoutMs?: number;
   /** Optional local model for brief conversational guidance only; recognized commands never use it. */
   readonly chatResponder?: MinecraftChatResponder;
 }
@@ -223,7 +229,7 @@ export class MinecraftChatController {
 
       const receivedPosition = this.positionAtChatReceipt();
       this.processing = this.processing
-        .then(() => withChatTimeout(this.handle(message.message, receivedPosition), CHAT_HANDLE_TIMEOUT_MS, message.message))
+        .then(() => withChatTimeout(this.handle(message.message, receivedPosition), this.chatTimeoutMs, message.message))
         .catch((error: unknown) => {
           this.options.logger.error({ err: error }, "Operator chat command failed");
           this.say("Der Chatbefehl ist fehlgeschlagen; ich habe keine erfolgreiche Aktion bestätigt.");
@@ -279,6 +285,11 @@ export class MinecraftChatController {
     this.questionTimer = null;
   }
 
+  /** One queued chat step may take this long before the queue abandons it and moves on. */
+  private get chatTimeoutMs(): number {
+    return this.options.chatTimeoutMs ?? CHAT_HANDLE_TIMEOUT_MS;
+  }
+
   /**
    * Tells the operator once per session why the optional local helper is silent (no Ollama server, missing
    * model, or answers the safety filter refused), so terse deterministic replies do not look like a bug.
@@ -297,9 +308,16 @@ export class MinecraftChatController {
     if (expiresAt === undefined) return;
     this.questionTimer = setTimeout(() => {
       this.questionTimer = null;
-      this.processing = this.processing.then(() => this.expirePendingQuestion()).catch((error: unknown) => {
-        this.options.logger.warn({ err: error }, "Could not expire a Minecraft chat confirmation");
-      });
+      // This link is appended outside the message handler, so it needs a timeout of its own. Without one a
+      // hang while resuming follow mode leaves `processing` unsettled forever and blocks every later
+      // message permanently, instead of costing the queue one timeout like a hung command does.
+      // `expirePendingQuestion` clears all pending approvals before its only await, so an expiry abandoned
+      // here has still failed closed: nothing is left that a late "ja" could act on.
+      this.processing = this.processing
+        .then(() => withChatTimeout(this.expirePendingQuestion(), this.chatTimeoutMs, "confirmation deadline"))
+        .catch((error: unknown) => {
+          this.options.logger.warn({ err: error }, "Could not expire a Minecraft chat confirmation");
+        });
     }, Math.max(0, expiresAt - Date.now()));
     this.questionTimer.unref?.();
   }
