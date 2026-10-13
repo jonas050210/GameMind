@@ -36,6 +36,7 @@ import { formatLargeHouseBlueprint, generateLargeHouseBlueprint, isLargeHouseCon
 import { LitematicaBridgeServer } from "./games/minecraft/litematica-bridge-server.js";
 import { LitematicPlacementGuard, type LitematicPlacementSnapshot } from "./games/minecraft/litematica-placement-guard.js";
 import { loadScenario } from "./testing/scenario.js";
+import { applyDefaultMinecraftOperator } from "./app/operator-default.js";
 import { ScenarioRunner } from "./testing/scenario-runner.js";
 
 type TaskChoice = ControlCenterTaskKind;
@@ -1204,6 +1205,8 @@ async function runLitematicBridge(options: CliOptions): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  // Live play defaults to the project operator so `python3 main.py --port 25524` needs no extra flags.
+  applyDefaultMinecraftOperator(process.env);
   const options = parseArgs(process.argv.slice(2));
   if (options.help) {
     printHelp();
