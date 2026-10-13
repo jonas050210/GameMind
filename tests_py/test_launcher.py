@@ -68,7 +68,14 @@ class WindowsHostDiscovery(unittest.TestCase):
             server.listen(1)
             port = server.getsockname()[1]
             self.assertEqual(wsl.probe_tcp("127.0.0.1", port), "open")
-        self.assertEqual(wsl.probe_tcp("127.0.0.1", port), "refused", "nothing listens once the socket is closed")
+        status = wsl.probe_tcp("127.0.0.1", port)
+        # "open" is the only answer that means someone is listening, and the only one choose_host acts on. What a
+        # closed loopback port does instead is the operating system's business: POSIX refuses the connection, and
+        # Windows drops the SYN of a listener it has just closed, which the probe reports as a timeout. The exact
+        # wording is asserted only where it is stable.
+        self.assertIn(status, {"refused", "timeout"}, "nothing listens once the socket is closed")
+        if os.name != "nt":
+            self.assertEqual(status, "refused", "a closed loopback port refuses the connection on POSIX")
 
 
 class HostChoice(unittest.TestCase):
