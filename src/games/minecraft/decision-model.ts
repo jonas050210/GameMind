@@ -44,6 +44,7 @@ import type {
 import type { CraftableMinecraftItem } from "./recipes.js";
 import {
   countItemAndEquipment,
+  isEatLastFood,
   isMinecraftFoodName,
   isMinecraftLogName,
   minecraftFoodNutrition,
@@ -1180,9 +1181,13 @@ function eatCandidate(state: MinecraftObservation, context: MinecraftDecisionCon
     .map((item) => ({ item, nutrition: minecraftFoodNutrition[item.name as keyof typeof minecraftFoodNutrition] }))
     .filter(({ item }) => !isExcluded(context, `eat:${item.name}`))
     .sort((left, right) => {
+      // Risk tier first, arithmetic second. At a nearly full bar the least wasteful item is the smallest one,
+      // so waste-first would choose raw chicken — with its chance of draining hunger again — exactly when the
+      // meal is worth least. Cooked and plant food is always eaten first when it is carried.
+      const tier = (isEatLastFood(left.item.name) ? 1 : 0) - (isEatLastFood(right.item.name) ? 1 : 0);
       const leftWaste = Math.max(0, left.nutrition - (20 - hunger));
       const rightWaste = Math.max(0, right.nutrition - (20 - hunger));
-      return leftWaste - rightWaste || right.nutrition - left.nutrition || left.item.name.localeCompare(right.item.name);
+      return tier || leftWaste - rightWaste || right.nutrition - left.nutrition || left.item.name.localeCompare(right.item.name);
     });
   const selected = options[0];
   if (!selected) return null;

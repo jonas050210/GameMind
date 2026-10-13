@@ -327,24 +327,6 @@
       "severity": 1
     },
     {
-      "fingerprint": "survival.raw-meat-not-food",
-      "title": "Raw meat is neither picked up nor eaten",
-      "category": "survival",
-      "kind": "known-limitation",
-      "explanation": "`minecraftFoodNames` and `minecraftFoodNutrition` contain only the cooked variants (cooked_beef, cooked_chicken, cooked_porkchop, cooked_mutton, cooked_rabbit) plus plant food. `beef`, `chicken`, `porkchop`, `mutton` and `rabbit` are absent, so a raw drop is not in the useful-drop allowlist and `eatCandidate` would ignore it even if it were carried. Cooking is not an option yet: there is no smelting capability.",
-      "expectedBenefit": "The most common early food source becomes usable, which is what any hunting or herding plan depends on.",
-      "effort": 1,
-      "impact": 4,
-      "urgency": 3,
-      "confidence": 0.9,
-      "dependencies": [],
-      "evidence": [
-        { "source": "src/games/minecraft/capabilities.ts", "metric": "food names", "value": "cooked variants only" },
-        { "source": "src/games/minecraft/decision-model.ts", "metric": "smelting", "value": "not available in any task route yet" }
-      ],
-      "severity": 2
-    },
-    {
       "fingerprint": "autonomy.hunt-animal-capability",
       "title": "Hunt passive animals for food, separately from combat",
       "category": "autonomy",
@@ -355,7 +337,7 @@
       "impact": 4,
       "urgency": 2,
       "confidence": 0.6,
-      "dependencies": ["survival.raw-meat-not-food"],
+      "dependencies": [],
       "evidence": [
         { "source": "src/games/minecraft/minecraft-adapter.ts", "metric": "entity scan", "value": "all entities within 24 blocks are already observed, so no schema change is needed" }
       ],
@@ -386,7 +368,7 @@
       "impact": 3,
       "urgency": 1,
       "confidence": 0.8,
-      "dependencies": ["survival.raw-meat-not-food"],
+      "dependencies": [],
       "severity": 1
     },
     {

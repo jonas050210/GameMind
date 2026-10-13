@@ -117,8 +117,10 @@ export function plankNameForLog(logName: MinecraftLogName): MinecraftPlankName {
 export const minecraftFoodNutrition: Readonly<Record<MinecraftFoodName, number>> = {
   apple: 4,
   baked_potato: 5,
+  beef: 3,
   bread: 5,
   carrot: 3,
+  chicken: 2,
   cooked_beef: 8,
   cooked_chicken: 6,
   cooked_cod: 5,
@@ -131,10 +133,35 @@ export const minecraftFoodNutrition: Readonly<Record<MinecraftFoodName, number>>
   glow_berries: 2,
   golden_apple: 4,
   melon_slice: 2,
+  mutton: 2,
   mushroom_stew: 6,
+  porkchop: 3,
   pumpkin_pie: 8,
+  rabbit: 3,
   sweet_berries: 2,
 };
+
+/**
+ * Food that is only worth eating when nothing else is carried.
+ *
+ * Raw chicken restores 2 hunger and carries a 30% chance of the Hunger effect for 30 s, which drains the bar
+ * it was meant to fill. The tier is applied *before* the waste calculation in `eatCandidate`, and that order
+ * matters: at a nearly full hunger bar the least wasteful item is the smallest one, so waste-first would pick
+ * the risky item exactly when the meal is worth least.
+ *
+ * Raw beef, porkchop, mutton and rabbit carry no effect in vanilla and are ordinary food — only their low
+ * saturation makes cooking worth it, and cooking is not available yet.
+ */
+export const minecraftFoodEatLastNames = ["chicken"] as const;
+
+export function isEatLastFood(name: string): boolean {
+  return (minecraftFoodEatLastNames as readonly string[]).includes(name);
+}
+
+/** Food names with no nutrition value would make the fake adapter compute NaN hunger; this finds them. */
+export function foodNamesWithoutNutrition(): readonly string[] {
+  return minecraftFoodNames.filter((name) => minecraftFoodNutrition[name] === undefined);
+}
 
 export function isMinecraftFoodName(name: string): name is MinecraftFoodName {
   return (minecraftFoodNames as readonly string[]).includes(name);

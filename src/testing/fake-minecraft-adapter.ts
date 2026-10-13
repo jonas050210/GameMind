@@ -11,6 +11,7 @@ import type {
 import type { MinecraftObservation } from "../games/minecraft/observation.js";
 import { minecraftObservationSchema } from "../games/minecraft/observation.js";
 import { isHostileMinecraftEntity } from "../games/minecraft/threats.js";
+import { minecraftFoodNutrition } from "../games/minecraft/recipes.js";
 import {
   legacyMinecraftCapabilities,
   MINECRAFT_COLLECT_BLOCK_CAPABILITY,
@@ -197,27 +198,12 @@ const fakeRecipes: Record<string, { outputCount: number; ingredients: Record<str
   wooden_sword: { outputCount: 1, ingredients: { any_planks: 2, stick: 1 }, requiresCraftingTable: true },
 };
 
-const fakeFoodNutrition: Record<string, number> = {
-  apple: 4,
-  baked_potato: 5,
-  bread: 5,
-  carrot: 3,
-  cooked_beef: 8,
-  cooked_chicken: 6,
-  cooked_cod: 5,
-  cooked_mutton: 6,
-  cooked_porkchop: 8,
-  cooked_rabbit: 5,
-  cooked_salmon: 6,
-  cookie: 2,
-  dried_kelp: 1,
-  glow_berries: 2,
-  golden_apple: 4,
-  melon_slice: 2,
-  mushroom_stew: 6,
-  pumpkin_pie: 8,
-  sweet_berries: 2,
-};
+/**
+ * One nutrition table, read from `recipes.ts`. This used to be a private copy of the same numbers, which meant
+ * a food name added to the shared list had no value here — and the eat action below indexed it with a
+ * non-null assertion, so the fake world's hunger became NaN instead of failing loudly.
+ */
+const fakeFoodNutrition = minecraftFoodNutrition as Readonly<Record<string, number>>;
 
 function consumeStack(
   inventory: MinecraftObservation["inventory"],
@@ -662,7 +648,11 @@ export class FakeMinecraftAdapter implements GameAdapter<MinecraftObservation> {
     const before = this.stateValue.player.food;
     const countBefore = inventoryCount(this.stateValue, parsed.data.item);
     if (countBefore < 1) throw new Error(`Fake inventory does not contain '${parsed.data.item}'.`);
-    const nutrition = fakeFoodNutrition[parsed.data.item]!;
+    const nutrition = fakeFoodNutrition[parsed.data.item];
+    if (nutrition === undefined) {
+      // Never compute with an unknown value: NaN hunger would propagate into the observation schema.
+      throw new Error(`No nutrition value for '${parsed.data.item}'; it is not in minecraftFoodNutrition.`);
+    }
     const inventory = consumeStack(this.stateValue.inventory, parsed.data.item, 1);
     const after = Math.min(20, before + nutrition);
     this.stateValue = {

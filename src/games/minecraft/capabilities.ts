@@ -156,11 +156,21 @@ export const minecraftToolItemNames = [
   "stone_sword",
 ] as const;
 
+/**
+ * Food the agent may eat. Raw meat is included because it is what an animal actually drops, and cooking needs
+ * a furnace and fuel, which no task route has (see `world-knowledge.smelting-furnace` in the roadmap). Raw
+ * chicken is eaten only when nothing else is available; see `minecraftFoodEatLastNames` in `recipes.ts`.
+ *
+ * Deliberately absent: `rotten_flesh`, the drop from every zombie. It restores 4 hunger but carries an 80%
+ * chance of the Hunger effect, so picking it up and eating it is a net loss — a test pins the exclusion.
+ */
 export const minecraftFoodNames = [
   "apple",
   "baked_potato",
+  "beef",
   "bread",
   "carrot",
+  "chicken",
   "cooked_beef",
   "cooked_chicken",
   "cooked_cod",
@@ -173,8 +183,11 @@ export const minecraftFoodNames = [
   "glow_berries",
   "golden_apple",
   "melon_slice",
+  "mutton",
   "mushroom_stew",
+  "porkchop",
   "pumpkin_pie",
+  "rabbit",
   "sweet_berries",
 ] as const;
 
