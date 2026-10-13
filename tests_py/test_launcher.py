@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -67,7 +68,14 @@ class WindowsHostDiscovery(unittest.TestCase):
             server.listen(1)
             port = server.getsockname()[1]
             self.assertEqual(wsl.probe_tcp("127.0.0.1", port), "open")
-        self.assertEqual(wsl.probe_tcp("127.0.0.1", port), "refused", "nothing listens once the socket is closed")
+        status = wsl.probe_tcp("127.0.0.1", port)
+        # "open" is the only answer that means someone is listening, and the only one choose_host acts on. What a
+        # closed loopback port does instead is the operating system's business: POSIX refuses the connection, and
+        # Windows drops the SYN of a listener it has just closed, which the probe reports as a timeout. The exact
+        # wording is asserted only where it is stable.
+        self.assertIn(status, {"refused", "timeout"}, "nothing listens once the socket is closed")
+        if os.name != "nt":
+            self.assertEqual(status, "refused", "a closed loopback port refuses the connection on POSIX")
 
 
 class HostChoice(unittest.TestCase):
@@ -421,7 +429,21 @@ class FakeChild:
 
 
 class MainFlow(unittest.TestCase):
-    def run_main(self, argv: list[str], *, spawn_lines: list[str] | None = None, patch_node: str | None = "/usr/bin/node", env: dict | None = None):
+    def run_main(
+        self,
+        argv: list[str],
+        *,
+        spawn_lines: list[str] | None = None,
+        patch_node: str | None = "/usr/bin/node",
+        env: dict | None = None,
+        proc_version: str = NATIVE_PROC,
+    ):
+        """Runs the real ``cli.main`` against a fake project folder and a fake child process.
+
+        ``/proc/version`` is always injected. Reading the real one would make these tests follow the WSL path on a
+        WSL machine (and read the real routing table there) while following the native path in CI, so the same test
+        could pass in one place and fail in the other. Tests that mean WSL ask for it with ``proc_version=``.
+        """
         lines: list[str] = []
         spawned: list[list[str]] = []
 
@@ -437,6 +459,7 @@ class MainFlow(unittest.TestCase):
                 mock.patch.object(checks, "node_version", return_value=(22, 22, 3)),
                 mock.patch.object(checks, "is_port_free", return_value=True),
                 mock.patch.object(checks, "check_dependencies", return_value=[]),
+                mock.patch.object(cli, "read_proc_version", return_value=proc_version),
             ]
             for patch in patches:
                 patch.start()
@@ -498,34 +521,46 @@ class MainFlow(unittest.TestCase):
         self.assertNotIn("--no-connect", spawned[0])
 
     def test_missing_dependencies_are_installed_without_asking_unless_no_install_is_given(self) -> None:
-        calls: list[list[str]] = []
-        with mock.patch.object(cli.subprocess, "run", side_effect=lambda cmd, **kw: calls.append(list(cmd)) or mock.Mock(returncode=0)), \
-            mock.patch.object(checks, "check_dependencies", side_effect=[[checks.Problem("DEPENDENCIES_MISSING", "missing", "npm ci")], []]), \
-            mock.patch.object(checks, "find_executable", return_value="/usr/bin/npm"), \
-            mock.patch.object(checks, "node_version", return_value=(22, 22, 3)), \
-            mock.patch.object(checks, "is_port_free", return_value=True), \
-            mock.patch.object(cli, "ask", side_effect=lambda q, assume_yes, interactive: assume_yes), \
-            mock.patch.object(checks, "check_node", return_value=[]):
-            with tempfile.TemporaryDirectory() as raw:
-                root = Path(raw)
-                make_project(root)
-                cli.main([ "--no-browser"], root=root, env={}, out=lambda _line: None, spawn_fn=lambda *a, **k: FakeChild([]))
-        self.assertTrue(calls and calls[0][1] == "ci", "npm ci runs by default, without a prompt")
+        # The stand-in for the command runner answers with a real, empty result: a bare Mock would leak into
+        # everything that reads a command's output (the WSL default-route lookup, for instance) instead of failing
+        # where it is written. Both kernels are run because that leak only showed itself on a WSL2 machine.
+        for kernel in (NATIVE_PROC, WSL2_PROC):
+            with self.subTest(kernel=kernel):
+                calls: list[list[str]] = []
+
+                def fake_run(command, **kwargs):
+                    calls.append(list(command))
+                    return subprocess.CompletedProcess(list(command), 0, "", "")
+
+                with mock.patch.object(cli.subprocess, "run", side_effect=fake_run), \
+                    mock.patch.object(checks, "check_dependencies", side_effect=[[checks.Problem("DEPENDENCIES_MISSING", "missing", "npm ci")], []]), \
+                    mock.patch.object(checks, "find_executable", return_value="/usr/bin/npm"), \
+                    mock.patch.object(checks, "node_version", return_value=(22, 22, 3)), \
+                    mock.patch.object(checks, "is_port_free", return_value=True), \
+                    mock.patch.object(cli, "ask", side_effect=lambda q, assume_yes, interactive: assume_yes), \
+                    mock.patch.object(checks, "check_node", return_value=[]), \
+                    mock.patch.object(cli, "read_proc_version", return_value=kernel), \
+                    mock.patch.object(wsl, "probe_tcp", return_value="refused"):
+                    with tempfile.TemporaryDirectory() as raw:
+                        root = Path(raw)
+                        make_project(root)
+                        cli.main([ "--no-browser"], root=root, env={}, out=lambda _line: None, spawn_fn=lambda *a, **k: FakeChild([]))
+                self.assertTrue(calls and calls[0][1] == "ci", "npm ci runs by default, without a prompt")
 
     def test_wsl2_with_only_the_windows_host_answering_uses_it_and_says_so(self) -> None:
         with mock.patch.object(wsl, "probe_tcp", side_effect=lambda host, port, timeout=1.5: "open" if host == "172.28.0.1" else "refused"), mock.patch.object(
-            cli, "read_proc_version", return_value=WSL2_PROC
-        ), mock.patch.object(cli, "discover_windows_host", return_value=["172.28.0.1"]), mock.patch("platform.system", return_value="Linux"):
-            code, lines, spawned = self.run_main([])
+            cli, "discover_windows_host", return_value=["172.28.0.1"]
+        ), mock.patch("platform.system", return_value="Linux"):
+            code, lines, spawned = self.run_main([], proc_version=WSL2_PROC)
         self.assertEqual(code, 0)
         self.assertEqual(spawned[0][spawned[0].index("--host") + 1], "172.28.0.1")
         self.assertIn("using it", "\n".join(lines))
 
     def test_an_explicit_host_is_passed_through_untouched_under_wsl2(self) -> None:
-        with mock.patch.object(wsl, "probe_tcp", return_value="refused"), mock.patch.object(cli, "read_proc_version", return_value=WSL2_PROC), mock.patch.object(
+        with mock.patch.object(wsl, "probe_tcp", return_value="refused"), mock.patch.object(
             cli, "discover_windows_host", return_value=["172.28.0.1"]
         ), mock.patch("platform.system", return_value="Linux"):
-            _, _, spawned = self.run_main(["--host", "192.168.1.50"])
+            _, _, spawned = self.run_main(["--host", "192.168.1.50"], proc_version=WSL2_PROC)
         self.assertEqual(spawned[0][spawned[0].index("--host") + 1], "192.168.1.50")
 
     def test_a_running_instance_is_not_started_twice(self) -> None:
