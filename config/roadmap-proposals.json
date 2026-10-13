@@ -57,6 +57,43 @@
       "severity": 1
     },
     {
+      "fingerprint": "reliability.adapter-parity-gate",
+      "title": "Nothing compares the simulated adapter with the live one, so a divergence passes as verified",
+      "category": "reliability",
+      "kind": "known-limitation",
+      "explanation": "The simulated adapter and `minecraft-adapter.ts` implement the same action contracts independently, and nothing compares them. On 2026-10-13 that produced a false green: the simulator's `attack()` read the weapon from the held slot only, while the live adapter calls `bestWeapon` over hand plus inventory and equips what it finds before the first swing. Every simulated fight was therefore refused with COMBAT_NO_WEAPON while the same run on a server would have fought, and `combat-opt-in-defence` still passed. Fixed by hand for that one action; the structural gap is untouched. Mining equips a carried pickaxe in both adapters, but no test says so, and the same class of divergence - preconditions, reach rules, confirmation semantics, failure codes - can appear in any action. Offline evaluation is the only measurement available without a server, so a divergence there quietly redefines what 'verified offline' means.",
+      "expectedBenefit": "Offline results keep meaning what they say: a behaviour verified in the simulator was verified against the same preconditions the live adapter applies.",
+      "effort": 2,
+      "impact": 4,
+      "urgency": 3,
+      "confidence": 0.9,
+      "dependencies": [],
+      "evidence": [
+        { "source": "src/testing/simulated-minecraft/adapter.ts", "metric": "attack() weapon source", "value": "held slot only until 2026-10-13; now equips the best carried weapon" },
+        { "source": "src/games/minecraft/minecraft-adapter.ts", "metric": "executeAttackHostile", "value": "bestWeapon over hand plus inventory, then bot.equip before the first swing" },
+        { "source": "test/", "metric": "adapter parity test", "value": "none; minecraft-adapter.test.ts covers the live adapter alone" }
+      ],
+      "severity": 2
+    },
+    {
+      "fingerprint": "reliability.scenario-gate-strictness",
+      "title": "A required goal counts even when its action failed, so a scenario can pass without the behaviour",
+      "category": "reliability",
+      "kind": "known-limitation",
+      "explanation": "`aggregateScenario`'s required-goal gate reads `run.actionGoals`, which is every executed action whatever its status, so a goal that was attempted and failed in 1 ms satisfies it. That is exactly how `combat-opt-in-defence` stayed green through a refused swing. `requiredSuccessfulGoals` (the action must have succeeded) and `requiredHostileDeaths` (read from the world) now exist and the combat scenarios use them, but the permissive default remains and every other scenario still relies on it. Nothing flags a scenario whose required goal only ever appears in failed actions - the case that reads as verified behaviour while measuring an attempt.",
+      "expectedBenefit": "A green scenario means the behaviour happened. The suite cannot quietly degrade into asserting attempts.",
+      "effort": 1,
+      "impact": 3,
+      "urgency": 2,
+      "confidence": 0.9,
+      "dependencies": [],
+      "evidence": [
+        { "source": "src/testing/eval/harness.ts", "metric": "required-goal gate", "value": "reads actionGoals, which includes failed actions" },
+        { "source": "src/testing/eval/scenarios.ts", "metric": "strict gates in use", "value": "requiredSuccessfulGoals and requiredHostileDeaths on 3 combat scenarios only" }
+      ],
+      "severity": 2
+    },
+    {
       "fingerprint": "reliability.progress-watchdog-combat-build",
       "title": "Stall detection exists for navigation only, not for combat or building",
       "category": "reliability",
