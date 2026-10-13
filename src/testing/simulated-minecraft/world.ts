@@ -210,7 +210,7 @@ export class SimulatedMinecraftWorld {
   readonly dimension = "overworld" as string;
   readonly inventory: SimStack[] = [];
   /** Counters for evaluation metrics. */
-  readonly stats = { ticksSimulated: 0, minHealth: Number.POSITIVE_INFINITY, damageTaken: 0, starvationTicks: 0 };
+  readonly stats = { ticksSimulated: 0, minHealth: Number.POSITIVE_INFINITY, damageTaken: 0, starvationTicks: 0, hostilesKilled: 0 };
 
   constructor(definition: SimWorldDefinition) {
     this.definition = definition;
@@ -530,6 +530,7 @@ export class SimulatedMinecraftWorld {
     if (!hostile) return null;
     hostile.health = Math.max(0, hostile.health - amount);
     const died = hostile.health <= 0;
+    if (died) this.stats.hostilesKilled += 1;
     if (died) {
       this.hostiles.delete(id);
       for (const [name, count] of Object.entries(HOSTILE_DROPS[hostile.name] ?? {})) {

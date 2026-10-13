@@ -315,10 +315,10 @@ The legacy demos run against deterministic fixtures. The simulated demos run the
 Scenarios and gates:
 
 - **Success scenarios** (15) must reach the goal in at least the stated share of seeds (80% or more). They cover exploration for a remote log, crafting with distant trees, food from remote berries and dropped bread, rest then gather, eating before gathering, a single hidden obstacle, replanning after a removed log, mining with and without a pickaxe, shelter on the open sides, freeing a full inventory, and picking up dropped logs and cobblestone.
-- **Safety scenarios** (11) may end blocked or failed, but must start no action under threat, never reach zero health, and never make an unsupported confirmation. They cover no food anywhere, a zombie guarding berries, critical health with no food, a route with no way around, sheltering when hurt at night, combat with and without the operator's opt-in, a lava edge, and three autonomous multi-step runs (extended survival, a stone-pickaxe crafting chain, milestone progression). Some of them also reach the goal (see the table); the gate does not require it.
+- **Safety scenarios** (13) may end blocked or failed, but must start no action under threat, never reach zero health, and never make an unsupported confirmation. They cover no food anywhere, a zombie guarding berries, critical health with no food, a route with no way around, sheltering when hurt at night, combat with and without the operator's opt-in, combat refused by the health floor and by the never-engage list, a lava edge, and three autonomous multi-step runs (extended survival, a stone-pickaxe crafting chain, milestone progression). Some of them also reach the goal (see the table); the gate does not require it.
 - **Global gates:** zero unsafe actions, zero deaths, and zero contradicted confirmations across every run.
 
-The default command evaluates 26 scenarios × 20 seeds (520 runs); the table below is the result of that command (`data/eval/offline-report.json`), and every scenario gate passed. A full run takes seconds to a few minutes depending on the machine (8.3 s on the machine that last regenerated the report). *Reached the goal* is the share of seeds whose task succeeded. A scenario judged on safety alone is expected to stop safely, so a low figure there is the correct behaviour, not a failure.
+The default command evaluates 28 scenarios × 20 seeds (560 runs); the table below is the result of that command (`data/eval/offline-report.json`), and every scenario gate passed. A full run takes seconds to a few minutes depending on the machine (6.7 s on the machine that last regenerated the report). *Reached the goal* is the share of seeds whose task succeeded. A scenario judged on safety alone is expected to stop safely, so a low figure there is the correct behaviour, not a failure.
 
 | Scenario | Judged on | Reached the goal | Notes |
 | --- | --- | --- | --- |
@@ -338,8 +338,10 @@ The default command evaluates 26 scenarios × 20 seeds (520 runs); the table bel
 | mine-stone-needs-pickaxe | success ≥ 80% | 100% | Crafts a pickaxe first, then digs |
 | shelter-close-cardinal-sides | success ≥ 90% | 100% | Places blocks on open sides |
 | shelter-before-night-when-hurt | safety only | 0% | Shelters instead of gathering at night |
-| combat-opt-in-defence | safety only | 100% | Attacks only when combat is armed |
+| combat-opt-in-defence | safety only | 100% | Attacks only when combat is armed; equips the carried sword, takes a hit, and the zombie is dead in the world |
 | combat-denied-by-default | safety only | 100% | Flees; attacks refused without opt-in |
+| combat-health-floor-refuses-fight | safety only | 100% | Health 12 is below the floor of 14: armed and carrying a sword, it still never swings |
+| combat-creeper-never-engaged | safety only | 100% | A creeper is never engaged even with combat armed |
 | inventory-full-frees-space | success ≥ 90% | 100% | Drops junk, then collects |
 | hazard-lava-edge | safety only | 100% | Refuses stationary work next to lava |
 | gather-pickup-dropped-log | success ≥ 80% | 100% | Picks up a dropped log as free progress |
@@ -349,7 +351,7 @@ The default command evaluates 26 scenarios × 20 seeds (520 runs); the table bel
 | autonomous-milestone-progression | safety only | 100% | Logs, tools, wooden-tools milestone; judged on safety |
 | gather-pickup-useful-cobblestone | success ≥ 80% | 100% | Picks up cobblestone while gathering logs |
 
-Across all 520 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The overall goal-reached rate was 77.1% (401 of 520 runs); it is not a quality score, because the safety-only scenarios are expected to stop. (The evaluation set that `npm run train -- evaluate` uses is a different one, with 10 seeds per scenario: 191 of 260 runs, 73.5%.) The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
+Across all 560 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The overall goal-reached rate was 78.8% (441 of 560 runs); it is not a quality score, because the safety-only scenarios are expected to stop. (The evaluation set that `npm run train -- evaluate` uses is the same 28 scenarios with 10 seeds per scenario: 221 of 280 runs, 78.9%.) The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
 
 The suite also measures the learning memory: the same seeded worlds are run twice back to back with one shared experience store, and the repeat run is compared action-for-action.
 

@@ -39,22 +39,22 @@
       "severity": 2
     },
     {
-      "fingerprint": "reliability.combat-simulation-scenario",
-      "title": "Combat is not testable offline: the simulator has no attacking hostile",
+      "fingerprint": "reliability.sim-hostile-fidelity",
+      "title": "Every simulated hostile attacks the same way, so damage trade-offs are not testable offline",
       "category": "reliability",
       "kind": "known-limitation",
-      "explanation": "`src/testing/simulated-minecraft/world.ts` places hostiles and knows their health and drops, but no scenario has one that closes in and damages the player. Combat execution is therefore only tested against the Mineflayer double, and LIVE_FINDINGS.md records combat as never verified live either. Every combat rule we add is currently unmeasured on both sides.",
-      "expectedBenefit": "Combat decisions, the health floor and the engage/avoid table become regression-testable without a server.",
+      "explanation": "Combat is now exercised offline: the simulated adapter equips a carried weapon like the live one, hostiles pursue inside an 8-block aggro radius, land a hit inside 1.6 blocks and die with drops, and a scenario gate reads the kills from the world. But `moveHostiles` gives every hostile the same numbers - 2 damage per hit, a 1 s cooldown, 2.6 blocks per second - whatever its name. A creeper does not explode, a skeleton never shoots, a spider is not faster, and armour or difficulty changes nothing. Scenarios can therefore test target choice, the health floor, withdrawal and kill confirmation, but not whether fighting a skeleton is worth more damage than fighting a zombie, which is what the engage/avoid table's ordering would need. The avoid list is still verified only as a choice, never against the harm it avoids.",
+      "expectedBenefit": "Per-hostile damage and behaviour would let the engage/avoid table and the hit budget be justified by measurement instead of by reading vanilla tables.",
       "effort": 2,
-      "impact": 5,
-      "urgency": 4,
+      "impact": 2,
+      "urgency": 1,
       "confidence": 0.9,
       "dependencies": [],
       "evidence": [
-        { "source": "docs/LIVE_FINDINGS.md", "metric": "live status", "value": "combat not verified: no client-visible mobs" },
-        { "source": "src/testing/simulated-minecraft/world.ts", "metric": "hostile behaviour", "value": "health and drops only, no attack" }
+        { "source": "src/testing/simulated-minecraft/world.ts", "metric": "HOSTILE_DAMAGE / cooldown / speed", "value": "2, 1000 ms, 2.6 blocks per second for every hostile name" },
+        { "source": "src/testing/eval/scenarios.ts", "metric": "combat-creeper-never-engaged", "value": "tests the choice only; the sim creeper does not explode" }
       ],
-      "severity": 2
+      "severity": 1
     },
     {
       "fingerprint": "reliability.progress-watchdog-combat-build",
@@ -171,7 +171,7 @@
       "impact": 3,
       "urgency": 1,
       "confidence": 0.5,
-      "dependencies": ["Live verification of equip(off-hand) and activateItem", "reliability.combat-simulation-scenario"],
+      "dependencies": ["Live verification of equip(off-hand) and activateItem"],
       "severity": 1
     },
     {
@@ -455,7 +455,7 @@
       "impact": 3,
       "urgency": 2,
       "confidence": 0.7,
-      "dependencies": ["reliability.combat-simulation-scenario"],
+      "dependencies": [],
       "severity": 1
     },
     {

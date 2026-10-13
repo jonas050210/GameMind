@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluationScenarios } from "../src/testing/eval/scenarios.js";
-import { evaluationSeeds, runEvaluationOnce, runEvaluationSuite } from "../src/testing/eval/harness.js";
+import { evaluationScenarios, type EvaluationScenario } from "../src/testing/eval/scenarios.js";
+import { aggregateScenario, evaluationSeeds, runEvaluationOnce, runEvaluationSuite, type EvaluationRun } from "../src/testing/eval/harness.js";
 
 test("the offline evaluation gates hold on a regression sample of seeds", async () => {
   const report = await runEvaluationSuite(evaluationScenarios(), evaluationSeeds(8));
@@ -14,6 +14,41 @@ test("the offline evaluation gates hold on a regression sample of seeds", async 
   assert.equal(report.totals.unverifiedConfirmations, 0, "no confirmation may contradict the observed state");
   assert.equal(report.totals.deaths, 0, "no seed may reach zero health");
   assert.equal(report.passed, true);
+});
+
+test("an attacking zombie is fought and killed offline, and every rule that refuses a fight is obeyed", async () => {
+  const scenarios = evaluationScenarios();
+  const byId = (id: string): EvaluationScenario => {
+    const scenario = scenarios.find((candidate) => candidate.id === id);
+    assert.ok(scenario, `scenario '${id}' exists`);
+    return scenario;
+  };
+
+  // The fight itself. Before the simulated adapter equipped a carried weapon like the live one does, this
+  // scenario "passed" its required-goal gate on a swing that failed with COMBAT_NO_WEAPON: the goal was
+  // executed, so nothing showed that no fight ever happened. These assertions are about world facts.
+  const fight = byId("combat-opt-in-defence");
+  const fightRuns: EvaluationRun[] = [];
+  for (const seed of evaluationSeeds(4)) fightRuns.push(await runEvaluationOnce(fight, seed));
+  assert.ok(fightRuns.every((run) => run.worldStats.hostilesKilled === 1), "every seed leaves the zombie dead in the world");
+  assert.ok(fightRuns.every((run) => run.worldStats.damageTaken > 0), "the zombie attacks first, so this is a real fight and not a target practice");
+  assert.ok(fightRuns.every((run) => run.successfulActionGoals.includes("defend")), "the swing succeeded; an attempt that failed does not count");
+  assert.ok(fightRuns.every((run) => run.actionFailures.every((failure) => failure.goalId !== "defend")), "no seed has a failed attack");
+  assert.ok(fightRuns.every((run) => !run.died), "the agent survives the fight it chose");
+  assert.ok(aggregateScenario(fight, fightRuns).passed, "every gate of the combat scenario holds");
+
+  // The refusals. Each of these has fighting enabled or a weapon carried, so only the rule under test can
+  // be what stops the swing.
+  for (const id of ["combat-denied-by-default", "combat-health-floor-refuses-fight", "combat-creeper-never-engaged"]) {
+    const scenario = byId(id);
+    for (const seed of evaluationSeeds(3)) {
+      const run = await runEvaluationOnce(scenario, seed);
+      assert.ok(!run.actionGoals.includes("defend"), `${id}: no swing may be attempted`);
+      assert.equal(run.worldStats.hostilesKilled, 0, `${id}: the hostile stays alive`);
+      assert.ok(!run.died, `${id}: the agent survives without fighting`);
+      assert.ok(aggregateScenario(scenario, [run]).passed, `${id}: gates hold on seed ${seed}`);
+    }
+  }
 });
 
 test("evaluation runs retain specific action failures for intermittent-action diagnosis", async () => {

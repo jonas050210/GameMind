@@ -58,7 +58,7 @@ import {
   isMineableBlockName,
   minecraftMiningRequirements,
 } from "../../games/minecraft/mining.js";
-import { UNARMED_DAMAGE, weaponDamageFor, combatIsAllowed } from "../../games/minecraft/combat.js";
+import { UNARMED_DAMAGE, bestWeapon, weaponDamageFor, combatIsAllowed } from "../../games/minecraft/combat.js";
 import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_SEAL_TOTAL, analyzeShelterSeal, shelterSealTargets, type ShelterCellState } from "../../games/minecraft/shelter.js";
 import { minecraftObservationSchema, type MinecraftObservation } from "../../games/minecraft/observation.js";
 import {
@@ -991,7 +991,16 @@ export class SimulatedMinecraftAdapter implements GameAdapter<MinecraftObservati
     const targetDistance = Math.hypot(hostile.x - player.x, player.y - this.world.standingY, hostile.z - player.z);
     const nearby = this.world.hostileCountNear(player.x, this.world.standingY, player.z, dangerRadius * 1.5);
     const hand = this.equipment.hand;
-    const weaponName = hand?.name ?? null;
+    // Parity with the live adapter, which equips the best carried weapon before the first swing. Without this
+    // a sword in the inventory is unusable offline, so every simulated fight was refused with
+    // COMBAT_NO_WEAPON while the same run on a server would have equipped and fought - which is why no
+    // offline scenario could exercise combat at all.
+    const carried = bestWeapon([
+      ...(hand ? [{ name: hand.name }] : []),
+      ...this.world.inventory.map((stack) => ({ name: stack.name })),
+    ]);
+    if (carried && hand?.name !== carried.name) this.equip({ item: carried.name, destination: "hand" });
+    const weaponName = this.equipment.hand?.name ?? null;
     const verdict = combatIsAllowed({
       enabled: true,
       health: this.world.health,
