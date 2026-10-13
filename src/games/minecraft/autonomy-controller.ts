@@ -113,7 +113,7 @@ export function describeSubgoal(task: MinecraftTask): { subgoal: string; complet
     case "secure_food":
       return { subgoal: "Restore hunger with food", completion: `hunger reaches ${task.targetHunger}/20` };
     case "build_shelter":
-      return { subgoal: "Close the four cardinal sides", completion: "all four cardinal sides are observed solid" };
+      return { subgoal: "Enclose the player in a 3×3×3 shelter", completion: "all 25 enclosure cells are observed solid on a safe floor" };
     case "build_house":
       return { subgoal: "Build a fixed 5×5 starter house", completion: "all 80 planned house blocks are read back at their target cells" };
     case "farm_wheat":

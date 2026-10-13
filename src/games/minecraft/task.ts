@@ -56,8 +56,8 @@ export const buildShelterTaskSchema = z.object({
   ...taskLimits,
   id: z.string().min(1).max(96),
   kind: z.literal("build_shelter").default("build_shelter"),
-  mode: z.enum(["cardinal", "full"]).default("cardinal"),
-  maxBlocks: z.number().int().min(1).max(16).default(4),
+  mode: z.enum(["cardinal", "full"]).default("full"),
+  maxBlocks: z.number().int().min(1).max(32).default(26),
 });
 
 const wheatFarmOriginSchema = z.object({
@@ -182,6 +182,6 @@ export const DEFAULT_MINE_COBBLESTONE_TASK: MineResourceTask = mineResourceTaskS
 export const DEFAULT_BUILD_SHELTER_TASK: BuildShelterTask = buildShelterTaskSchema.parse({
   id: "build-shelter",
   kind: "build_shelter",
-  mode: "cardinal",
-  maxBlocks: 4,
+  mode: "full",
+  maxBlocks: 26,
 });

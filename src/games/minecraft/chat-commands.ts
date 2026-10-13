@@ -171,6 +171,23 @@ function matchFuzzyChatCommand(text: string): MinecraftChatCommand | null {
   return best?.command ?? null;
 }
 
+/**
+ * The closest known control phrase for an unrecognized message, for a "Meintest du …?" hint. It never executes
+ * anything: the operator still has to send the suggested words. Only longer phrases (≥ 6 characters) are
+ * suggested, and only when the difference is at most two edits, so ordinary chat does not get a guess.
+ */
+export function suggestMinecraftChatCommand(raw: string): string | null {
+  const candidate = fuzzyCommandInput(normalizeChatText(raw.replace(/^\s*\/+\s*(?:gamemind\s+)?/i, "")));
+  if (!candidate || /\d/.test(candidate) || candidate.length > 24) return null;
+  let best: { readonly canonical: string; readonly length: number } | null = null;
+  for (const { canonical } of FUZZY_COMMAND_PHRASES) {
+    if (canonical.length < 6 || canonical.includes(" ") || candidate.includes(" ")) continue;
+    if (!withinEditDistance(candidate, canonical, 2)) continue;
+    if (!best || canonical.length > best.length) best = { canonical, length: canonical.length };
+  }
+  return best?.canonical ?? null;
+}
+
 /** Resource names typed with a small typo ("steine", "eisenn"); only used once a resource verb is present. */
 function matchFuzzyResourceAlias(text: string): ResourceAlias | null {
   const words = text.split(" ").filter((word) => word.length >= 4);

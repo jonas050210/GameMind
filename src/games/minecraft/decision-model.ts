@@ -29,8 +29,7 @@ import {
   miningDropFor,
 } from "./mining.js";
 import { COMBAT_APPROACH_MAX_BLOCKS, UNARMED_DAMAGE, bestWeapon, combatIsAllowed, hitBudgetFor } from "./combat.js";
-import { shelterCardinalSolidCount } from "./skill-contracts.js";
-import { SHELTER_CARDINAL_DIRECTIONS } from "./shelter.js";
+import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_SEAL_TOTAL, analyzeShelterSealFromObservation } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import type { MinecraftObservation } from "./observation.js";
@@ -793,9 +792,12 @@ function defendCandidate(
   };
 }
 
-/** True when the agent stands inside a closed ring of observed solid blocks. */
+/**
+ * True only when the agent stands inside a fully observed 3×3×3 enclosure (feet, head and roof layers)
+ * on a safe floor. Four walls at feet level are not shelter: mobs reach the head level diagonally and from above.
+ */
 export function isShelteredFromState(state: MinecraftObservation): boolean {
-  return shelterCardinalSolidCount(state) >= SHELTER_CARDINAL_DIRECTIONS.length;
+  return analyzeShelterSealFromObservation(state).sealed;
 }
 
 function nightPressure(state: MinecraftObservation): "night" | "approaching" | "day" {
@@ -832,14 +834,7 @@ function shelterCandidate(
     );
     return null;
   }
-  const open = SHELTER_CARDINAL_DIRECTIONS.filter(([dx, dz]) => {
-    const x = Math.floor(state.player.position.x) + dx;
-    const z = Math.floor(state.player.position.z) + dz;
-    const y = Math.floor(state.player.position.y);
-    return !state.nearbyBlocks.some(
-      (block) => block.position.x === x && block.position.y === y && block.position.z === z && block.boundingBox === "block",
-    );
-  }).length;
+  const open = analyzeShelterSealFromObservation(state).missing.length;
   if (open === 0) return null;
   if (threats.visibleHostiles.some((hostile) => hostile.distance <= task.dangerRadius)) return null;
   const pressure = nightPressure(state);
@@ -861,7 +856,7 @@ function shelterCandidate(
     priorityBand: reason === "task" ? BAND_PROGRESS : BAND_SURVIVAL,
     score: (reason === "task" ? 420 : 640) + (20 - health) + open * 5,
     skillId: "minecraft.build-shelter",
-    input: { mode: "cardinal", maxBlocks: Math.min(4, placeable.total), dangerRadius: task.dangerRadius },
+    input: { mode: "full", maxBlocks: Math.min(SHELTER_SEAL_TOTAL, placeable.total), dangerRadius: task.dangerRadius },
     targetKey,
     rationale:
       reason === "hurt"
@@ -2066,17 +2061,10 @@ function planFor(selected: DecisionCandidate | null, state: MinecraftObservation
 
 function shelterPlanSummary(state: MinecraftObservation): string {
   const placeable = placeableBlockInventory(state);
-  const open = SHELTER_CARDINAL_DIRECTIONS.filter(([dx, dz]) => {
-    const x = Math.floor(state.player.position.x) + dx;
-    const z = Math.floor(state.player.position.z) + dz;
-    const y = Math.floor(state.player.position.y);
-    return !state.nearbyBlocks.some(
-      (block) => block.position.x === x && block.position.y === y && block.position.z === z && block.boundingBox === "block",
-    );
-  }).length;
+  const open = analyzeShelterSealFromObservation(state).missing.length;
   return placeable.total === 0
-    ? `no placeable blocks are in the inventory and ${open} side(s) are open`
-    : `${open} side(s) are open but none can be validated as an empty cell with an observed solid support block`;
+    ? `no placeable blocks are in the inventory and ${open} of ${SHELTER_SEAL_TOTAL} enclosure cells are open`
+    : `${open} of ${SHELTER_SEAL_TOTAL} enclosure cells are open but none can be validated as an empty cell with an observed solid support block`;
 }
 
 export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObservation, MinecraftTask> {
@@ -2143,9 +2131,14 @@ export class MinecraftTaskDecisionModel implements DecisionModel<MinecraftObserv
         return record("completed", null, [], `Task condition met: hunger ${hunger}/20 reached the target of ${task.targetHunger}.`);
       }
     } else if (task.kind === "build_shelter") {
-      const solid = shelterCardinalSolidCount(state);
-      if (solid >= SHELTER_CARDINAL_DIRECTIONS.length) {
-        return record("completed", null, [], `Task condition met: all four cardinal sides around the player are observed solid.`);
+      const seal = analyzeShelterSealFromObservation(state);
+      if (seal.sealed) {
+        return record(
+          "completed",
+          null,
+          [],
+          `Task condition met: all ${SHELTER_SEAL_TOTAL} enclosure cells (feet, head and roof layers) are observed solid and the floor is safe.`,
+        );
       }
     } else if (task.kind === "excavate_volume") {
       return record("blocked", null, [], "Volume excavation must use the deterministic, per-cell verified project executor.", "PROJECT_EXECUTOR_REQUIRED");

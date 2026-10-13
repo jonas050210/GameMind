@@ -181,3 +181,109 @@ export function planShelter(
 }
 
 export { centerOf };
+
+/**
+ * Full enclosure: the agent occupies a 1×2 cell (feet and head). A mob can reach it from any of the
+ * eight neighbours at feet or head height, and from the top of the head-level ring. The sealed shelter
+ * is therefore a hollow 3×3×3 box around the cell: 8 feet-level walls, 8 head-level walls, and the
+ * 9 cells of the top layer. Two-block walls only (one block per side) leave diagonals and the roof open.
+ */
+export const SHELTER_SEAL_LAYERS = ["feet", "head", "roof"] as const;
+export type ShelterSealLayer = (typeof SHELTER_SEAL_LAYERS)[number];
+export const SHELTER_SEAL_TOTAL = 8 + 8 + 9;
+
+export interface ShelterSealTarget {
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+  readonly layer: ShelterSealLayer;
+}
+
+export type ShelterCellState = "solid" | "open" | "unknown";
+
+export interface ShelterSealAnalysis {
+  /** Every one of the 25 cells is observed solid, and the floor under the feet is observed safe solid. */
+  readonly sealed: boolean;
+  readonly solidCount: number;
+  readonly solidByLayer: Readonly<Record<ShelterSealLayer, number>>;
+  /** Cells that must still be placed, in build order (feet → head → roof, roof centre last). */
+  readonly missing: readonly ShelterSealTarget[];
+  /** Cells whose state is not observed; an unknown cell is never counted as closed or as open. */
+  readonly unknown: readonly ShelterSealTarget[];
+  readonly floorSafe: boolean;
+}
+
+/**
+ * Coordinates of the 25 enclosure cells for a player whose feet block is (feetX, feetY, feetZ), in build order.
+ * Each layer starts with its edges and corners, so that every later block has an already-placed support
+ * below or beside it; the roof centre is last because it is supported only by the roof edges.
+ */
+export function shelterSealTargets(feetX: number, feetY: number, feetZ: number): readonly ShelterSealTarget[] {
+  const targets: ShelterSealTarget[] = [];
+  for (const [dx, dz] of SHELTER_DIRECTIONS) targets.push({ x: feetX + dx, y: feetY, z: feetZ + dz, layer: "feet" });
+  for (const [dx, dz] of SHELTER_DIRECTIONS) targets.push({ x: feetX + dx, y: feetY + 1, z: feetZ + dz, layer: "head" });
+  for (const [dx, dz] of SHELTER_DIRECTIONS) targets.push({ x: feetX + dx, y: feetY + 2, z: feetZ + dz, layer: "roof" });
+  targets.push({ x: feetX, y: feetY + 2, z: feetZ, layer: "roof" });
+  return targets;
+}
+
+/**
+ * Classifies the 25 enclosure cells from an observation-agnostic cell reader. The reader returns
+ * "solid" only for a cell observed as a full block, "open" only for an observed non-solid cell, and
+ * "unknown" otherwise. The same function serves the decision model, the live adapter and the simulator.
+ */
+export function analyzeShelterSeal(
+  feetX: number,
+  feetY: number,
+  feetZ: number,
+  cellState: (x: number, y: number, z: number) => ShelterCellState,
+  floorState: { readonly solid: boolean; readonly safe: boolean },
+): ShelterSealAnalysis {
+  const solidByLayer: Record<ShelterSealLayer, number> = { feet: 0, head: 0, roof: 0 };
+  const missing: ShelterSealTarget[] = [];
+  const unknown: ShelterSealTarget[] = [];
+  let solidCount = 0;
+  for (const target of shelterSealTargets(feetX, feetY, feetZ)) {
+    const state = cellState(target.x, target.y, target.z);
+    if (state === "solid") {
+      solidCount += 1;
+      solidByLayer[target.layer] += 1;
+    } else {
+      missing.push(target);
+      if (state === "unknown") unknown.push(target);
+    }
+  }
+  const floorSafe = floorState.solid && floorState.safe;
+  return {
+    sealed: missing.length === 0 && floorSafe,
+    solidCount,
+    solidByLayer,
+    missing,
+    unknown,
+    floorSafe,
+  };
+}
+
+/** Reads the enclosure state from an observation: only observed blocks count as solid. */
+export function analyzeShelterSealFromObservation(state: MinecraftObservation): ShelterSealAnalysis {
+  const player = state.player.position;
+  const feetX = Math.floor(player.x);
+  const feetY = Math.floor(player.y);
+  const feetZ = Math.floor(player.z);
+  const index = new Map<string, { name: string; boundingBox: string }>();
+  for (const block of state.nearbyBlocks) index.set(blockKey(block.position), { name: block.name, boundingBox: block.boundingBox });
+  const scanRadius = state.sampledRegion.radius;
+  const inScan = (x: number, z: number): boolean => Math.abs(x - feetX) <= scanRadius && Math.abs(z - feetZ) <= scanRadius;
+  const cellState = (x: number, y: number, z: number): ShelterCellState => {
+    if (!inScan(x, z)) return "unknown";
+    const observed = index.get(blockKey({ x, y, z }));
+    if (observed) return observed.boundingBox === "block" ? "solid" : "open";
+    // No record inside a partially unknown region is not evidence of air.
+    return state.sampledRegion.unknownCells > 0 ? "unknown" : "open";
+  };
+  const floor = index.get(blockKey({ x: feetX, y: feetY - 1, z: feetZ }));
+  return analyzeShelterSeal(feetX, feetY, feetZ, cellState, {
+    solid: floor?.boundingBox === "block",
+    safe: floor !== undefined && !UNSAFE_SUPPORT_NAMES.has(floor.name),
+  });
+}

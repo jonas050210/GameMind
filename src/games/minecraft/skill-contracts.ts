@@ -3,6 +3,7 @@ import type { MinecraftObservation } from "./observation.js";
 import { COMBAT_APPROACH_MAX_BLOCKS } from "./combat.js";
 import { miningDropFor } from "./mining.js";
 import { reachedNavigationGoal } from "./reach.js";
+import { SHELTER_SEAL_TOTAL, analyzeShelterSealFromObservation } from "./shelter.js";
 
 /** Number of the four cardinal cells around the player that are observed solid at feet level. */
 export function shelterCardinalSolidCount(state: MinecraftObservation): number {
@@ -26,6 +27,11 @@ export function shelterCardinalSolidCount(state: MinecraftObservation): number {
         block.boundingBox === "block",
     ),
   ).length;
+}
+
+/** Number of the 25 enclosure cells observed solid (see shelter.ts); the measure of shelter progress. */
+export function shelterSealSolidCount(state: MinecraftObservation): number {
+  return analyzeShelterSealFromObservation(state).solidCount;
 }
 
 export interface PostconditionResult {
@@ -191,14 +197,13 @@ export function verifySkillPostcondition(
       };
     }
     case "minecraft.build-shelter": {
-      // The contract counts how many cardinal sides are solid before and after: progress must be
-      // visible in the world, not only in the adapter's own report.
-      const solidAfter = shelterCardinalSolidCount(after);
-      const solidBefore = before ? shelterCardinalSolidCount(before) : 0;
+      // Progress is counted in the observed 25-cell enclosure: a block the world does not show is not progress.
+      const solidAfter = shelterSealSolidCount(after);
+      const solidBefore = before ? shelterSealSolidCount(before) : 0;
       const verified = solidAfter > solidBefore;
       return {
         verified,
-        evidence: `Cardinal sides closed around the player went from ${solidBefore}/4 to ${solidAfter}/4.`,
+        evidence: `Enclosure cells closed around the player went from ${solidBefore}/${SHELTER_SEAL_TOTAL} to ${solidAfter}/${SHELTER_SEAL_TOTAL}.`,
       };
     }
     case "minecraft.attack-hostile": {

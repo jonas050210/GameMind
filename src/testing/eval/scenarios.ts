@@ -314,15 +314,15 @@ export function evaluationScenarios(): EvaluationScenario[] {
     {
       id: "shelter-close-cardinal-sides",
       family: "shelter",
-      description: "The agent carries dirt and must wall in the four cardinal sides around itself. Completion is read back from the observed blocks, not from the placement calls.",
+      description: "The agent carries dirt and must enclose itself in the 3×3×3 shelter (feet, head and roof layers), not merely wall four sides. Completion is read back from the observed blocks, not from the placement calls.",
       expectation: "success",
       minSuccessRate: 0.9,
       world: (seed) =>
         simulatedWorld({
           seed,
-          player: { inventory: [{ name: "dirt", count: 12 }] },
+          player: { inventory: [{ name: "dirt", count: 32 }] },
         }),
-      task: () => buildShelterTaskSchema.parse({ id: "eval-shelter-cardinal", mode: "cardinal", maxBlocks: 4, maxActions: 12 }),
+      task: () => buildShelterTaskSchema.parse({ id: "eval-shelter-full", mode: "full", maxBlocks: 26, maxActions: 120, maxDurationMs: 300_000 }),
     },
     {
       id: "shelter-before-night-when-hurt",

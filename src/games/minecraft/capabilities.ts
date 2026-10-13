@@ -293,8 +293,9 @@ export const minecraftPlantWheatInputSchema = z.object({
 
 export const minecraftBuildShelterInputSchema = z
   .object({
-    mode: z.enum(["cardinal", "full"]).default("cardinal"),
-    maxBlocks: z.number().int().min(1).max(16).default(4),
+    /** "full" closes the 3×3×3 enclosure (25 cells); "cardinal" closes only four walls and is never reported as sheltered. */
+    mode: z.enum(["cardinal", "full"]).default("full"),
+    maxBlocks: z.number().int().min(1).max(32).default(26),
     dangerRadius: z.number().finite().min(2).max(16).default(6),
   })
   .strict();

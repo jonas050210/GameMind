@@ -150,7 +150,23 @@ test("the shelter task is verified from observed blocks, not from the placement 
   assert.equal(pending.terminalStatus, null);
   assert.equal(pending.selected?.goalId, "build-shelter");
 
-  const closed = observationAt({ x: 0.5, y: 64, z: 0.5 }, {
+  // A full 3×3×3 enclosure: feet ring, head ring and roof layer around the player, on a grass floor.
+  const enclosure: Array<ReturnType<typeof block>> = [block("grass_block", 0, 63, 0)];
+  for (const y of [64, 65, 66]) {
+    for (let dx = -1; dx <= 1; dx += 1) {
+      for (let dz = -1; dz <= 1; dz += 1) {
+        if (dx === 0 && dz === 0 && y !== 66) continue; // the player's own feet and head cells stay open
+        enclosure.push(block("dirt", dx, y, dz));
+      }
+    }
+  }
+  const closed = observationAt({ x: 0.5, y: 64, z: 0.5 }, { nearbyBlocks: enclosure, inventory: [stack("dirt", 0)] });
+  const done = decide(closed, shelterTask);
+  assert.equal(done.terminalStatus, "completed");
+  assert.match(done.summary, /25 enclosure cells/);
+
+  // Four walls at feet level are not a shelter: the same fixture without the head and roof layers stays pending.
+  const fourWalls = observationAt({ x: 0.5, y: 64, z: 0.5 }, {
     nearbyBlocks: [
       block("grass_block", 0, 63, 0),
       block("dirt", 1, 64, 0),
@@ -158,11 +174,9 @@ test("the shelter task is verified from observed blocks, not from the placement 
       block("dirt", 0, 64, 1),
       block("dirt", 0, 64, -1),
     ],
-    inventory: [stack("dirt", 0)],
+    inventory: [stack("dirt", 4)],
   });
-  const done = decide(closed, shelterTask);
-  assert.equal(done.terminalStatus, "completed");
-  assert.match(done.summary, /four cardinal sides/);
+  assert.equal(decide(fourWalls, shelterTask).terminalStatus, null);
 
   // Without blocks the task must be reported as impossible here instead of pretending.
   const empty = { ...open, inventory: [] };
