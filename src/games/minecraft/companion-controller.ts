@@ -13,6 +13,7 @@ import type { WorldMemory } from "./world-memory.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
 import { isHostileMinecraftEntity } from "./threats.js";
+import { COMBAT_MIN_HEALTH, CRITICAL_HEALTH } from "../../core/survival-thresholds.js";
 
 /**
  * Structured operation log entry. The chat transcript (in/out text commands) was removed with the
@@ -439,9 +440,9 @@ export class CompanionController {
         this.lastOutcome = `Survival retreat ${result.action.status}: health ${state.player.health ?? "unknown"}, hostile ${hostile.name} at ${hostile.distance.toFixed(1)} blocks.`;
         return;
       }
-      if (["combat", "afk", "guard"].includes(this.mode) && hostile && hostile.distance <= 4 && (state.player.health ?? 0) >= 10) {
+      if (["combat", "afk", "guard"].includes(this.mode) && hostile && hostile.distance <= 4 && (state.player.health ?? 0) > COMBAT_MIN_HEALTH) {
         const result = await this.options.skills.run("minecraft.attack-hostile", {
-          entityId: hostile.id, maxHits: 4, dangerRadius: 6, minHealth: 10, retreatHealth: 6, requiredDamage: 4,
+          entityId: hostile.id, maxHits: 4, dangerRadius: 6, minHealth: COMBAT_MIN_HEALTH, retreatHealth: CRITICAL_HEALTH, requiredDamage: 4,
         }, { source: `companion:${this.mode}:defend` });
         this.lastOutcome = `Defence ${result.action.status}: ${result.action.failure?.message ?? result.action.confirmation ?? "no evidence"}`;
         return;

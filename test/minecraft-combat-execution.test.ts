@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MINECRAFT_ATTACK_HOSTILE_CAPABILITY } from "../src/games/minecraft/capabilities.js";
-import { attackCooldownMs } from "../src/games/minecraft/combat.js";
+import { attackCooldownMs, minecraftWeaponDamage, weaponsWithoutAttackSpeed } from "../src/games/minecraft/combat.js";
 import { verifySkillPostcondition } from "../src/games/minecraft/skill-contracts.js";
 import { createLiveMock, connectAdapter, run, Vec } from "./support/minecraft-double.js";
 
@@ -176,13 +176,36 @@ test("a hostile beyond the approach limit is refused before any swing or movemen
   await adapter.disconnect("test");
 });
 
-test("weapon cooldowns follow approximate vanilla attack speeds, with bare hands the fastest", () => {
-  assert.equal(attackCooldownMs("wooden_sword"), 625);
-  assert.equal(attackCooldownMs("iron_axe"), 1_100);
-  assert.equal(attackCooldownMs("wooden_axe"), 1_000);
-  assert.equal(attackCooldownMs("iron_pickaxe"), 833);
+test("weapon cooldowns are derived from the vanilla attack-speed table, with bare hands the fastest", () => {
+  // Derived as 1000 / attacks-per-second from the item's `attack_speed` attribute, not guessed per suffix.
+  assert.equal(attackCooldownMs("wooden_sword"), 625, "1.6 swings per second");
+  assert.equal(attackCooldownMs("netherite_sword"), 625);
+  assert.equal(attackCooldownMs("iron_pickaxe"), 833, "1.2 swings per second");
   assert.equal(attackCooldownMs(null), 250, "bare hands swing faster than any tool");
   assert.ok(attackCooldownMs("wooden_sword") > attackCooldownMs(null));
+});
+
+test("axe cooldowns follow their material: the slow tier was previously guessed as the fast one", () => {
+  // Wooden, stone and golden axes swing at 0.8/s (1250 ms). The old suffix rule returned 1000 ms for all of
+  // them, so the agent swung 250 ms early and every axe hit but the first landed at reduced damage.
+  assert.equal(attackCooldownMs("wooden_axe"), 1_250, "0.8 swings per second");
+  assert.equal(attackCooldownMs("stone_axe"), 1_250);
+  assert.equal(attackCooldownMs("golden_axe"), 1_250);
+  assert.equal(attackCooldownMs("iron_axe"), 1_111, "0.9 swings per second");
+  assert.equal(attackCooldownMs("diamond_axe"), 1_000, "1.0 swing per second");
+  assert.equal(attackCooldownMs("netherite_axe"), 1_000);
+  assert.ok(
+    attackCooldownMs("wooden_axe") > attackCooldownMs("iron_axe") && attackCooldownMs("iron_axe") > attackCooldownMs("diamond_axe"),
+    "better axes swing faster, which is the whole reason the tier matters",
+  );
+});
+
+test("every weapon whose damage is known also has a swing speed, so the executor never guesses", () => {
+  assert.deepEqual(weaponsWithoutAttackSpeed(), [], "a damage entry without a speed entry would fall back to bare hands");
+  for (const weapon of Object.keys(minecraftWeaponDamage)) {
+    assert.ok(attackCooldownMs(weapon) > 0, weapon);
+    assert.notEqual(attackCooldownMs(weapon), attackCooldownMs(null), `${weapon} is not a bare-handed swing`);
+  }
 });
 
 test("the attack postcondition does not count a target that merely left view as killed", () => {

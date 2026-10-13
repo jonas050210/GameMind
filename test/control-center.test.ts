@@ -708,12 +708,12 @@ test("the Control Center shows the new panels and no longer offers an action cap
     const bundle = await loadPageBundle(base);
     const html = bundle.html;
     const script = bundle.all;
-    for (const heading of ["Objective & subgoal", "World seed", "Observation rate", "Observation age", "Reaction p95"]) {
+    for (const heading of ["Objective & subgoal", "World seed", "Observation rate", "Observation age", "Reaction p95", "First reply p95"]) {
       assert.ok(script.includes(heading) || script.includes(heading.replace("&", "&amp;")), `the UI shows ${heading}`);
     }
     assert.ok(!script.includes("budget-input") && !script.includes("budget-form"), "the action-cap input is gone");
     assert.ok(!script.includes("setActionBudget") && !script.includes("Action cap"), "no UI path sets an action cap");
-    for (const id of ["loop-targets", "seed-form", "objective-panel"]) {
+    for (const id of ["loop-targets", "bots-chat-latency", "seed-form", "objective-panel"]) {
       assert.ok(html.includes(`id="${id}"`), `${id} is rendered by the page`);
     }
     assert.ok(!bundle.all.includes("training-form") && !bundle.all.includes("benchmark-form"), "the operator UI has no training or benchmark surface");
@@ -756,6 +756,11 @@ test("the snapshot carries live loop metrics without a training UI section", asy
     assert.equal(snapshot.agentLoop?.targets.length, 4, "each performance target is reported with its goal");
     assert.equal(snapshot.agentLoop?.observation.frequencyHz === null || typeof snapshot.agentLoop?.observation.frequencyHz === "number", true);
     assert.ok(snapshot.objective === null || typeof snapshot.objective === "object");
+    assert.ok("chatLatency" in snapshot, "chat response times travel with the snapshot");
+    assert.ok(
+      snapshot.chatLatency === null || snapshot.chatLatency === undefined || snapshot.chatLatency.targets.length === 4,
+      "a measured chat session reports its four response-time targets with their goal",
+    );
     assert.ok(!("training" in snapshot), "training is not exposed through the Control Center API");
   } finally {
     await fixture.close();

@@ -556,6 +556,7 @@ export async function attachMinecraftRunHost(options: MinecraftRunHostOptions): 
     taskFor: taskFromControlCenterRequest,
     progressTracker,
     metrics,
+    chat,
     autonomy,
     loop,
     worldSeed,

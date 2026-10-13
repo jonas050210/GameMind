@@ -20,7 +20,8 @@ export const DROWNING_FULL_AIR_TICKS = 300;
  * copies could drift apart without any test noticing, because only the drowning lines had a shared home.
  *
  *  - CRITICAL_HEALTH: at or below this, the reflex layer calls the state critical and combat refuses to start.
- *  - LOW_HEALTH: at or below this, health is a notice and the combat floor ("do not start a fight below").
+ *  - LOW_HEALTH: at or below this, health is a notice worth reporting.
+ *  - COMBAT_MIN_HEALTH: the combat floor. A fight is only started strictly *above* this line (see below).
  *  - CRITICAL_HUNGER: at or below this, the agent is starving and stops working on the task.
  *  - LOW_HUNGER: at or below this, food becomes something worth a detour.
  */
@@ -28,6 +29,21 @@ export const CRITICAL_HEALTH = 6;
 export const LOW_HEALTH = 10;
 export const CRITICAL_HUNGER = 4;
 export const LOW_HUNGER = 8;
+
+/**
+ * The combat floor, in half-hearts (14 = seven hearts). Raised from `LOW_HEALTH` (10): ten half-hearts left
+ * roughly two zombie hits on normal difficulty, which is not enough margin for a fight that also has to
+ * survive a second hostile arriving mid-engagement.
+ *
+ * The floor is **exclusive**: `combatIsAllowed` refuses at `health <= minHealth`, so the agent fights only
+ * strictly above 14. That is what makes the two neighbouring lines meet without overlapping — the decision
+ * model rests at `health <= REST_HEALTH_THRESHOLD` (also 14), so at exactly 14 the answer is "rest and eat",
+ * never "fight". Without the exclusive floor, both candidates would fire at 14 and the priority band order
+ * (safety before survival) would have started fights the agent should have rested through.
+ *
+ * Ordering invariant (tested): `CRITICAL_HEALTH < LOW_HEALTH < COMBAT_MIN_HEALTH <= 20`.
+ */
+export const COMBAT_MIN_HEALTH = 14;
 
 /**
  * Hunger lines the decision model and the reward shape share: food becomes the agent's priority at or

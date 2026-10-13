@@ -106,6 +106,7 @@ test("roadmap: operator decisions saved while a refresh is writing never fail an
       testRecordPath: path.join(directory, "tests.json"),
       episodeFiles: [],
       liveVerificationPath: path.join(directory, "live.json"),
+      proposalPaths: [],
     };
     await writeFile(options.testRecordPath, JSON.stringify({ measuredAt: "2026-10-01T00:00:00.000Z", passed: 10, failed: 2, failures: ["flaky: one", "flaky: two"] }));
     const service = new RoadmapService(options);

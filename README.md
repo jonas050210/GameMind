@@ -191,6 +191,106 @@ python3 main.py --check  # check Node, dependencies, ports and WSL, then exit
 npm audit                # the dependency audit must report 0 vulnerabilities
 ```
 
+## Where the checkout should live (WSL and OneDrive)
+
+`python3 main.py --check` warns when the project sits on a Windows drive seen from WSL (a path starting with
+`/mnt/<drive>`), and names four extra problems when that path is inside OneDrive. The check is
+`check_windows_mount` in `launcher/checks.py`; this section is the remedy it points at.
+
+- File access from WSL to `/mnt/<drive>` is much slower than the Linux filesystem, and `npm ci`, `tsc` and the
+  test runner are almost entirely many small file operations.
+- The OneDrive sync watches `node_modules` (tens of thousands of files) and the constantly written `data/`
+  folder, which holds traces, episodes, homepoints and roadmap decisions.
+- A file that is only a cloud placeholder cannot be read at all. Mark the folder "Always keep on this device",
+  or better, move it out of the sync.
+- Two writers — WSL and the sync — can lose a rename, and every persistence write in this project is a temp
+  file plus a rename (`src/core/atomic-file.ts`).
+
+A related failure the launcher reports as `INSTANCE_LOCK_FOREIGN`: one folder started once from Windows and
+once from WSL holds a lock whose pid belongs to the other process table, so it cannot be judged. The outcome
+nobody wants is a second bot on the same account.
+
+**Recommended layout: the checkout lives in the Linux filesystem, and Windows keeps a shortcut to it.** The
+code, `node_modules` and `data/` then stay out of the sync entirely, while Explorer and your editor can still
+reach the folder.
+
+### Moving the checkout
+
+Both routes end in the same place. Check for uncommitted work first (`git status --short`) — route A keeps it,
+route B does not.
+
+Route A — copy everything, slowest and safest:
+
+```bash
+# In WSL, from inside the current (OneDrive) checkout.
+OLD="$PWD"
+mkdir -p ~/projects
+cp -a "$OLD" ~/projects/GameMind
+cd ~/projects/GameMind
+
+rm -rf node_modules     # installed for Windows; the platform binaries do not match Linux
+npm ci
+npm run build && npm test
+python3 main.py --check # the /mnt/<drive> warning is gone
+```
+
+Route B — clone locally, much faster, needs a clean tree:
+
+```bash
+# In WSL. Commit or stash first, or the uncommitted work stays behind in the old folder.
+OLD="/mnt/c/Users/<you>/OneDrive/Desktop/GameMind"
+git clone "$OLD" ~/projects/GameMind
+cd ~/projects/GameMind
+
+# A local clone points origin at the folder it came from. Put it back on GitHub:
+git remote set-url origin https://github.com/<you>/GameMind.git
+git remote -v
+
+# data/ is gitignored, so a clone does not bring it. Copy it separately, or lose the homepoints,
+# episodes, traces and roadmap decisions:
+cp -a "$OLD/data" ~/projects/GameMind/data
+
+npm ci && npm run build && npm test
+```
+
+Only delete or rename the OneDrive copy after the new one builds and tests green. `npm ci` inside WSL is not
+optional: `check_dependencies` compares the esbuild platform directory in `node_modules` with the operating
+system it runs on, and a Windows-installed tree fails that check on Linux.
+
+### A Windows shortcut to the moved folder
+
+From inside WSL, `explorer.exe .` opens the current Linux folder in Windows Explorer, and the address bar then
+shows the UNC path you need — `\\wsl.localhost\<Distro>\home\<you>\projects\GameMind`. (`\\wsl$\<Distro>\...`
+is the older spelling and still works.) `<Distro>` is what `wsl -l -q` prints from Windows, or
+`echo "$WSL_DISTRO_NAME"` inside WSL.
+
+To put a shortcut on the desktop — which is the OneDrive desktop when OneDrive owns it — run this in
+PowerShell on Windows:
+
+```powershell
+$distro   = "Ubuntu"                                   # from: wsl -l -q
+$linuxDir = "home\<you>\projects\GameMind"             # the Linux home, without the leading slash
+$target   = "\\wsl.localhost\$distro\$linuxDir"
+$desktop  = [Environment]::GetFolderPath("Desktop")
+$link     = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop "GameMind.lnk"))
+$link.TargetPath  = $target
+$link.Description = "GameMind checkout inside WSL"
+$link.Save()
+```
+
+What the shortcut does and does not do:
+
+- OneDrive syncs the `.lnk` file, a few kilobytes. It does **not** sync the folder the shortcut points at,
+  which is the whole point.
+- The target resolves only while the distro is available. Opening the shortcut starts WSL if it is not
+  running; the first open can take a few seconds.
+- Never move or copy the target back into OneDrive through the shortcut — that recreates every problem above.
+- Edit through the Linux path (a Remote-WSL editor session, or an editor started from WSL), not through a
+  second Windows copy of the tree, and not both at once.
+
+Reaching the folder by hand works too, without any shortcut: in Explorer, go to
+`\\wsl.localhost\<Distro>\home\<you>\projects`.
+
 ## Offline demos (no Minecraft server required)
 
 ```bash
@@ -215,10 +315,10 @@ The legacy demos run against deterministic fixtures. The simulated demos run the
 Scenarios and gates:
 
 - **Success scenarios** (15) must reach the goal in at least the stated share of seeds (80% or more). They cover exploration for a remote log, crafting with distant trees, food from remote berries and dropped bread, rest then gather, eating before gathering, a single hidden obstacle, replanning after a removed log, mining with and without a pickaxe, shelter on the open sides, freeing a full inventory, and picking up dropped logs and cobblestone.
-- **Safety scenarios** (11) may end blocked or failed, but must start no action under threat, never reach zero health, and never make an unsupported confirmation. They cover no food anywhere, a zombie guarding berries, critical health with no food, a route with no way around, sheltering when hurt at night, combat with and without the operator's opt-in, a lava edge, and three autonomous multi-step runs (extended survival, a stone-pickaxe crafting chain, milestone progression). Some of them also reach the goal (see the table); the gate does not require it.
+- **Safety scenarios** (13) may end blocked or failed, but must start no action under threat, never reach zero health, and never make an unsupported confirmation. They cover no food anywhere, a zombie guarding berries, critical health with no food, a route with no way around, sheltering when hurt at night, combat with and without the operator's opt-in, combat refused by the health floor and by the never-engage list, a lava edge, and three autonomous multi-step runs (extended survival, a stone-pickaxe crafting chain, milestone progression). Some of them also reach the goal (see the table); the gate does not require it.
 - **Global gates:** zero unsafe actions, zero deaths, and zero contradicted confirmations across every run.
 
-The default command evaluates 26 scenarios × 20 seeds (520 runs); the table below is the result of that command (`data/eval/offline-report.json`), and every scenario gate passed. A full run takes seconds to a few minutes depending on the machine (8.3 s on the machine that last regenerated the report). *Reached the goal* is the share of seeds whose task succeeded. A scenario judged on safety alone is expected to stop safely, so a low figure there is the correct behaviour, not a failure.
+The default command evaluates 28 scenarios × 20 seeds (560 runs); the table below is the result of that command (`data/eval/offline-report.json`), and every scenario gate passed. A full run takes seconds to a few minutes depending on the machine (6.7 s on the machine that last regenerated the report). *Reached the goal* is the share of seeds whose task succeeded. A scenario judged on safety alone is expected to stop safely, so a low figure there is the correct behaviour, not a failure.
 
 | Scenario | Judged on | Reached the goal | Notes |
 | --- | --- | --- | --- |
@@ -238,8 +338,10 @@ The default command evaluates 26 scenarios × 20 seeds (520 runs); the table bel
 | mine-stone-needs-pickaxe | success ≥ 80% | 100% | Crafts a pickaxe first, then digs |
 | shelter-close-cardinal-sides | success ≥ 90% | 100% | Places blocks on open sides |
 | shelter-before-night-when-hurt | safety only | 0% | Shelters instead of gathering at night |
-| combat-opt-in-defence | safety only | 100% | Attacks only when combat is armed |
+| combat-opt-in-defence | safety only | 100% | Attacks only when combat is armed; equips the carried sword, takes a hit, and the zombie is dead in the world |
 | combat-denied-by-default | safety only | 100% | Flees; attacks refused without opt-in |
+| combat-health-floor-refuses-fight | safety only | 100% | Health 12 is below the floor of 14: armed and carrying a sword, it still never swings |
+| combat-creeper-never-engaged | safety only | 100% | A creeper is never engaged even with combat armed |
 | inventory-full-frees-space | success ≥ 90% | 100% | Drops junk, then collects |
 | hazard-lava-edge | safety only | 100% | Refuses stationary work next to lava |
 | gather-pickup-dropped-log | success ≥ 80% | 100% | Picks up a dropped log as free progress |
@@ -249,7 +351,7 @@ The default command evaluates 26 scenarios × 20 seeds (520 runs); the table bel
 | autonomous-milestone-progression | safety only | 100% | Logs, tools, wooden-tools milestone; judged on safety |
 | gather-pickup-useful-cobblestone | success ≥ 80% | 100% | Picks up cobblestone while gathering logs |
 
-Across all 520 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The overall goal-reached rate was 77.1% (401 of 520 runs); it is not a quality score, because the safety-only scenarios are expected to stop. (The evaluation set that `npm run train -- evaluate` uses is a different one, with 10 seeds per scenario: 191 of 260 runs, 73.5%.) The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
+Across all 560 runs there were **0 unsafe actions, 0 deaths, and 0 contradicted confirmations**. The overall goal-reached rate was 78.8% (441 of 560 runs); it is not a quality score, because the safety-only scenarios are expected to stop. (The evaluation set that `npm run train -- evaluate` uses is the same 28 scenarios with 10 seeds per scenario: 221 of 280 runs, 78.9%.) The report showed no weighted candidate policy, so policy-ranking evaluation was not run.
 
 The suite also measures the learning memory: the same seeded worlds are run twice back to back with one shared experience store, and the repeat run is compared action-for-action.
 
@@ -287,7 +389,7 @@ The compact header keeps session state, data source, last-update age, an emergen
 | Tab | What it shows and does |
 | --- | --- |
 | **Overview** | A compact operator view: session state, current task and measurable progress, health/food, position, plus Pause/Resume and Connect/Stop session. Stop task is beside an active task and Emergency stop stays in the header. Connection, world and task detail—and recent activity and evaluation summaries—are secondary or collapsed. A stale observation explains that world-changing actions are refused until newer data arrives. |
-| **Bots** | The sessions: connection state, world, task, position, health and runtime, with connected-idle, running and disconnected kept apart. Connect to a live server or the simulator (with diagnostics and actionable errors), start or queue a task, run library entries, stop; task history with failure explanations. There is one bot today; the layout is a list so more can be added, and nothing pretends to run several. |
+| **Bots** | The sessions: connection state, world, task, position, health and runtime, with connected-idle, running and disconnected kept apart. Connect to a live server or the simulator (with diagnostics and actionable errors), start or queue a task, run library entries, stop; task history with failure explanations. Beside the agent-loop timings a **Chat response** card shows what an operator message actually cost — queue wait, handling, first reply and the optional helper model as p95 against their targets, plus how many messages were answered, dropped or abandoned; every answer also leaves one line in the log, and a slow one names the target it breached. There is one bot today; the layout is a list so more can be added, and nothing pretends to run several. |
 | **Tasks** | Only tasks the agent really implements, with their enforced limits; the active task with measurable progress, actions and outcome; the latest decision (what was chosen, the alternatives weighed, and the model's own reason for every rejected candidate); the queue (up to 5, no duplicates) or an explicit reason when queueing is unavailable. |
 | **Tests & Evaluation** | Unit tests and the offline evaluation as monitored jobs (one at a time, cancellable); baseline-versus-candidate comparisons with success rate, median actions, wasted actions, unsafe actions, deaths, 95% intervals and per-scenario deltas; PASS, FAIL and SKIPPED with the reason for every skip; the roadmap queue. **Live verification is a separate section**: it names the server it will touch and needs an explicit confirmation of the connection, and a second one before any phase that changes the world. |
 | **Learning & Policy** | The real experience store: policy status, candidate and active policy, contexts with evidence and weights, contradictions, excluded outcomes, blocked targets, historical runs. Plain explanations of `CONSECUTIVE_ACTION_FAILURES`, `NO_FEASIBLE_GOAL` and `TASK_BLOCKED_MODE` with what to check. Promote and reject only through the existing gate. |
@@ -405,6 +507,16 @@ Training runs the curriculum (`basics`, `food`, `tools-and-shelter`) in the **of
 
 Start a private or local Java server first. Use only an account and server you are authorized to use, and keep the world disposable. The exact checks, expected evidence, and server setup commands are in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md).
 
+The steps that need you in the game are a separate, fixed protocol with a result file per session:
+
+```bash
+npm run protocol -- print
+npm run protocol -- template data/live/2026-10-13.json --server "127.0.0.1:25565" --operator "YourName"
+npm run protocol -- check data/live/2026-10-13.json
+```
+
+`check` refuses a file that claims a step is verified without the observation and the values that step asks for, so a session cannot be reported as live-verified by accident. See [`docs/LIVE_PROTOCOL.md`](docs/LIVE_PROTOCOL.md); it needs the same explicit approval as every other live test.
+
 The easiest way to run these is `python3 main.py` (see [Quick start](#quick-start)); the commands below run the TypeScript CLI directly and take the same options.
 
 A live session is **persistent** by default: it connects, serves the Control Center, runs the task you gave (if any) and stays connected, idle or autonomous, until you stop it from the page or press Ctrl-C. Add `--one-shot` to end it with the task.
@@ -504,7 +616,7 @@ Environment variables may set connection defaults:
 - `GAMEMIND_TRACE_DIR` (default `data/traces`)
 - `GAMEMIND_LEARNING_DIR` (default `data/learning`)
 - `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the optional dashboard binds this interface)
-- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`; the helper stays **off** until this or `GAMEMIND_OLLAMA_MODEL` is set), `GAMEMIND_OLLAMA_MODEL` (no default; `qwen3:1.7b` recommended), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
+- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`; the helper stays **off** until this or `GAMEMIND_OLLAMA_MODEL` is set), `GAMEMIND_OLLAMA_MODEL` (no default; `qwen3:1.7b` recommended), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `3000`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
 - `GAMEMIND_LITEMATICA_BRIDGE_TOKEN` (required only for the optional review receiver; at least 32 UTF-8 bytes), `GAMEMIND_LITEMATICA_BRIDGE_HOST` (default `127.0.0.1`) and `GAMEMIND_LITEMATICA_BRIDGE_PORT` (default `39990`)
 - `GAMEMIND_NODE` or `NODE` (optional; the Node.js executable `python3 main.py` should run, version-checked before use)
 - `GAMEMIND_LOG_LEVEL` (the training CLI's log level, default `info`) and `LOG_LEVEL` (the agent's own log level, default `info`)
@@ -533,7 +645,13 @@ export GAMEMIND_OLLAMA_URL="http://127.0.0.1:11434" # use the address reachable 
 export GAMEMIND_OLLAMA_MODEL="qwen3:1.7b"           # setting either variable enables the helper
 ```
 
-Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is prompt-constrained to brief English/German replies; it never approves or issues actions and never invents world state. Do not use the model as a safety authority.
+Use the URL reachable **from the GameMind process**. Under WSL2's default networking `127.0.0.1` inside WSL is *not* the Windows host, and Ollama on Windows binds loopback only — so reaching it takes two changes, not one. On Windows, let Ollama listen on all interfaces (environment variable `OLLAMA_HOST=0.0.0.0`, then restart Ollama and allow it through the firewall for private networks), and in WSL point GameMind at the Windows host:
+
+```bash
+export GAMEMIND_OLLAMA_URL="http://$(ip route show default | awk '{print $3}'):11434"
+```
+
+With mirrored networking, or with Ollama installed inside WSL itself, `http://127.0.0.1:11434` works unchanged. The launcher's automatic Windows-host choice covers the Minecraft server only, not Ollama. The helper is prompt-constrained to brief English/German replies; it never approves or issues actions and never invents world state. Do not use the model as a safety authority.
 
 Model choice (measured warm on a 6 GB-class GPU; answers are bounded to ~80 tokens):
 

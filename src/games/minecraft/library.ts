@@ -34,6 +34,7 @@ import {
   minecraftPlaceableBlockNames,
 } from "./mining.js";
 import { verifySkillPostcondition } from "./skill-contracts.js";
+import { COMBAT_MIN_HEALTH, CRITICAL_HEALTH } from "../../core/survival-thresholds.js";
 import { normalizeHomepointName } from "./companion-modes.js";
 
 // ---------------------------------------------------------------------------
@@ -875,7 +876,7 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
       id: "follow.afk",
       category: "Following & Companionship",
       title: "AFK accompany",
-      description: "Follows the named player while also defending (up to 4 swings) against hostiles within 4 blocks when health is ≥10. Combat must be armed; otherwise follow-only with flee-on-threat.",
+      description: "Follows the named player while also defending (up to 4 swings) against hostiles within 4 blocks while health is above the combat floor of 14, and never against a class the engage/avoid table rules out (creepers, endermen). Combat must be armed; otherwise follow-only with flee-on-threat.",
       status: "implemented",
       statusReason: null,
       requiresConnection: true,
@@ -1101,23 +1102,23 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
     "combat.attack",
     "Combat & Protection",
     "Attack hostile (bounded)",
-    "Attacks one identified hostile for at most 6 swings. Triple opt-in: adapter switch + safety policy + task context. Also requires held weapon, health above floor, and a single target in range. Every refusal names its gate.",
+    "Attacks one identified, engageable hostile for at most 6 swings. Triple opt-in: adapter switch + safety policy + task context. Also requires held weapon, health above floor, and a single target in range. Every refusal names its gate.",
     "minecraft.attack-hostile",
     MINECRAFT_ATTACK_HOSTILE_CAPABILITY,
     [
       { name: "entityId", label: "Entity id", type: "string", required: true, maxLength: 48, help: "From the Visible entities panel." },
       { name: "maxHits", label: "Max swings", type: "integer", required: false, def: 4, min: 1, max: 6 },
       dangerField,
-      { name: "minHealth", label: "Min health to engage", type: "number", required: false, def: 10, min: 1, max: 20 },
-      { name: "retreatHealth", label: "Retreat below", type: "number", required: false, def: 6, min: 0.5, max: 20 },
+      { name: "minHealth", label: "Min health to engage (exclusive)", type: "number", required: false, def: COMBAT_MIN_HEALTH, min: 1, max: 20, help: "The agent fights only strictly above this; at exactly this value it rests and eats instead." },
+      { name: "retreatHealth", label: "Retreat below", type: "number", required: false, def: CRITICAL_HEALTH, min: 0.5, max: 20 },
       { name: "requiredDamage", label: "Required weapon damage", type: "number", required: false, def: 4, min: 1, max: 20 },
     ],
     (p) => ({
       entityId: p["entityId"],
       maxHits: p["maxHits"] ?? 4,
       dangerRadius: p["dangerRadius"] ?? 6,
-      minHealth: p["minHealth"] ?? 10,
-      retreatHealth: p["retreatHealth"] ?? 6,
+      minHealth: p["minHealth"] ?? COMBAT_MIN_HEALTH,
+      retreatHealth: p["retreatHealth"] ?? CRITICAL_HEALTH,
       requiredDamage: p["requiredDamage"] ?? 4,
     }),
   );
@@ -1126,7 +1127,7 @@ export function createMinecraftLibraryRegistry(): LibraryRegistry {
       id: "combat.mode",
       category: "Combat & Protection",
       title: "Combat mode (armed defence)",
-      description: "Arms combat (adapter + safety policy together) and defends: up to 4 swings at hostiles within 4 blocks when health is ≥10, otherwise survival retreat. Disarm from Safety & Control when done.",
+      description: "Arms combat (adapter + safety policy together) and defends: up to 4 swings at engageable hostiles within 4 blocks while health is above the combat floor of 14, otherwise survival retreat. Disarm from Safety & Control when done.",
       status: "implemented",
       statusReason: null,
       requiresConnection: true,

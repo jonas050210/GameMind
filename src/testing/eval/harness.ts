@@ -24,8 +24,16 @@ export interface EvaluationRun {
   readonly died: boolean;
   readonly simulatedMs: number;
   readonly metrics: MinecraftTaskResult["metrics"];
-  readonly worldStats: { readonly damageTaken: number; readonly minHealth: number; readonly starvationTicks: number };
+  readonly worldStats: {
+    readonly damageTaken: number;
+    readonly minHealth: number;
+    readonly starvationTicks: number;
+    /** Hostiles that died in the simulated world. A fight is proven by this, not by an adapter claim. */
+    readonly hostilesKilled: number;
+  };
   readonly actionGoals: readonly string[];
+  /** Goals whose action the adapter reported as succeeded; an attempted-and-failed goal is not in here. */
+  readonly successfulActionGoals: readonly string[];
   /** Goal and target of each action (`goalId@targetKey`): the finer choice the policy makes. */
   readonly actionChoices: readonly string[];
   /** Failed or unverified actions, with the adapter's specific failure code where available. */
@@ -160,8 +168,10 @@ export async function runEvaluationOnce(
       damageTaken: world.stats.damageTaken,
       minHealth: world.stats.minHealth,
       starvationTicks: world.stats.starvationTicks,
+      hostilesKilled: world.stats.hostilesKilled,
     },
     actionGoals: result.actions.map((action) => action.goalId),
+    successfulActionGoals: result.actions.filter((action) => action.status === "succeeded").map((action) => action.goalId),
     actionChoices: result.actions.map((action) => `${action.goalId}@${action.targetKey ?? ""}`),
     actionFailures: result.actions
       .filter((action) => action.status !== "succeeded" || !action.confirmed || action.verification === "unverified")
@@ -225,12 +235,21 @@ export function aggregateScenario(
   }
   const matches = (goal: string, prefixes: readonly string[]): boolean =>
     prefixes.some((prefix) => goal === prefix || goal.startsWith(prefix));
-  if (scenario.requiredGoals && scenario.requiredGoals.length > 0) {
-    const satisfied = runs.filter((run) => matches(run.actionGoals.join(","), scenario.requiredGoals ?? [])).length;
+  if (scenario.requiredSuccessfulGoals && scenario.requiredSuccessfulGoals.length > 0) {
+    const satisfied = runs.filter((run) => matches(run.successfulActionGoals.join(","), scenario.requiredSuccessfulGoals ?? [])).length;
     gates.push({
-      name: "required-goal",
+      name: "required-successful-goal",
       passed: satisfied === seeds,
-      detail: `${satisfied}/${seeds} seed(s) executed one of ${scenario.requiredGoals.join(", ")}; goals are read from executed actions, not from the plan.`,
+      detail: `${satisfied}/${seeds} seed(s) completed one of ${scenario.requiredSuccessfulGoals.join(", ")}; a goal that was attempted and failed does not count.`,
+    });
+  }
+  if (scenario.requiredHostileDeaths !== undefined) {
+    const wanted = scenario.requiredHostileDeaths;
+    const satisfied = runs.filter((run) => run.worldStats.hostilesKilled >= wanted).length;
+    gates.push({
+      name: "hostile-deaths",
+      passed: satisfied === seeds,
+      detail: `${satisfied}/${seeds} seed(s) left at least ${wanted} hostile(s) dead in the simulated world, which is a world fact and not an adapter claim.`,
     });
   }
   if (scenario.forbiddenGoals && scenario.forbiddenGoals.length > 0) {

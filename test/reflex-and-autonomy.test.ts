@@ -4,7 +4,8 @@ import { AutonomyController, subgoalSignature } from "../src/games/minecraft/aut
 import { generateAutonomousTask } from "../src/games/minecraft/autonomous-task.js";
 import type { MinecraftObservation } from "../src/games/minecraft/observation.js";
 import { assessReflex, newlyUrgent, REFLEX_THRESHOLDS } from "../src/games/minecraft/reflex.js";
-import { CRITICAL_HEALTH, CRITICAL_HUNGER, LOW_HEALTH, LOW_HUNGER } from "../src/core/survival-thresholds.js";
+import { COMBAT_MIN_HEALTH, CRITICAL_HEALTH, CRITICAL_HUNGER, LOW_HEALTH, LOW_HUNGER } from "../src/core/survival-thresholds.js";
+import { REST_HEALTH_THRESHOLD } from "../src/games/minecraft/decision-model.js";
 import { minecraftAttackHostileInputSchema } from "../src/games/minecraft/capabilities.js";
 import { ProgressTracker } from "../src/games/minecraft/progress-tracker.js";
 import type { MinecraftTaskResult } from "../src/games/minecraft/task-runner.js";
@@ -17,8 +18,19 @@ test("health and hunger lines have one home: the reflex, the combat defaults and
   );
   assert.ok(CRITICAL_HEALTH < LOW_HEALTH && CRITICAL_HUNGER < LOW_HUNGER, "critical lines sit below the notice lines");
   const combat = minecraftAttackHostileInputSchema.parse({ entityId: "zombie-1" });
-  assert.equal(combat.minHealth, LOW_HEALTH, "the combat floor is the low-health line");
+  assert.equal(combat.minHealth, COMBAT_MIN_HEALTH, "the combat floor has one home, like every other line");
   assert.equal(combat.retreatHealth, CRITICAL_HEALTH, "retreating starts at the critical line");
+  // Ordering invariant: the floor is exclusive, so at exactly COMBAT_MIN_HEALTH the agent rests instead of
+  // fighting. Resting covers health <= REST_HEALTH_THRESHOLD and combat needs health > COMBAT_MIN_HEALTH; the
+  // two lines meet at the same number without overlapping, which is only true while this holds.
+  assert.ok(
+    CRITICAL_HEALTH < LOW_HEALTH && LOW_HEALTH < COMBAT_MIN_HEALTH && COMBAT_MIN_HEALTH <= 20,
+    `critical (${CRITICAL_HEALTH}) < low (${LOW_HEALTH}) < combat floor (${COMBAT_MIN_HEALTH}) <= 20`,
+  );
+  assert.ok(
+    COMBAT_MIN_HEALTH <= REST_HEALTH_THRESHOLD,
+    "the combat floor never sits above the resting line, or health between them would fight instead of heal",
+  );
 });
 
 function state(overrides: Partial<MinecraftObservation> & { playerOverrides?: Partial<MinecraftObservation["player"]> } = {}): MinecraftObservation {

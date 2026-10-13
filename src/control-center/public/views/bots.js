@@ -114,22 +114,67 @@ function safety(snapshot) {
   );
 }
 
+/** The p95 of a sample window, or null when nothing has been measured yet. */
+function p95(summary) {
+  return summary && summary.p95Ms !== null ? `${fmtNumber(summary.p95Ms, 0)} ms` : null;
+}
+
+/** One list of measured-versus-target rows, shared by every panel that has a timing contract. */
+function targetList(targets) {
+  if (!targets || !targets.length) return null;
+  return h(
+    "div",
+    null,
+    h(
+      "ul",
+      { class: "targets" },
+      targets.map((target) => h(
+        "li",
+        null,
+        target.met === null ? badge("not measured", "neutral") : target.met ? badge("met", "good") : badge("missed", "warn"),
+        ` ${target.label}: ${target.measuredMs === null ? "unknown" : `${fmtNumber(target.measuredMs, 0)} ms`} (target ${fmtNumber(target.targetMs, 0)} ms)`,
+      )),
+    ),
+  );
+}
+
 function loop(snapshot) {
   const loopState = snapshot.agentLoop;
   if (!loopState) return card({ title: "Agent loop" }, empty("Not measured", "The observation loop is measured while a session runs."));
-  const sample = (summary) => (summary && summary.p95Ms !== null ? `${fmtNumber(summary.p95Ms, 0)} ms` : null);
   return card(
     { title: "Agent loop", subtitle: "Measured timing of the fast observation loop" },
     kv([
       ["Observation rate", loopState.observation.frequencyHz !== null ? `${fmtNumber(loopState.observation.frequencyHz, 1)} per second` : null],
       ["Observation age", loopState.observation.ageMs !== null ? `${fmtNumber(loopState.observation.ageMs, 0)} ms${loopState.observation.stale ? " (stale)" : ""}` : null],
-      ["Reaction p95", sample(loopState.reactionMs)],
-      ["Decision p95", sample(loopState.decisionMs)],
-      ["Action p95", sample(loopState.actionMs)],
+      ["Reaction p95", p95(loopState.reactionMs)],
+      ["Decision p95", p95(loopState.decisionMs)],
+      ["Action p95", p95(loopState.actionMs)],
       ["Observation errors", `${fmtNumber(loopState.observation.errors)} of ${fmtNumber(loopState.observation.total)}`],
       ["Time idle", loopState.idle.idleFraction !== null ? fmtPercent(loopState.idle.idleFraction, 0) : null],
     ]),
-    h("div", null, loopState.targets.length ? h("ul", { class: "targets" }, loopState.targets.map((target) => h("li", null, target.met === null ? badge("not measured", "neutral") : target.met ? badge("met", "good") : badge("missed", "warn"), ` ${target.label}: ${target.measuredMs === null ? "unknown" : `${fmtNumber(target.measuredMs, 0)} ms`} (target ${fmtNumber(target.targetMs, 0)} ms)`))) : null),
+    targetList(loopState.targets),
+  );
+}
+
+function chatResponse(snapshot) {
+  const chat = snapshot.chatLatency;
+  if (!chat) {
+    return card(
+      { title: "Chat response" },
+      empty("Not measured", "Chat response times are measured while an authorized live chat session runs. Nothing is estimated here."),
+    );
+  }
+  return card(
+    { title: "Chat response", subtitle: "From an operator message to the answer, measured in the running process" },
+    kv([
+      ["Messages", `${fmtNumber(chat.messages.received)} answered, ${fmtNumber(chat.messages.ignored)} dropped`],
+      ["First reply p95", p95(chat.firstReplyMs)],
+      ["Queue wait p95", p95(chat.queueWaitMs)],
+      ["Handling p95", p95(chat.handleMs)],
+      ["Helper model p95", p95(chat.responderMs)],
+      ["Abandoned", `${fmtNumber(chat.messages.timedOut)} of ${fmtNumber(chat.messages.received)}`],
+    ]),
+    targetList(chat.targets),
   );
 }
 
@@ -277,6 +322,7 @@ export function renderBots(ctx) {
     "bots-diagnostics": diagnostics(snapshot, now),
     "bots-safety": safety(snapshot),
     "loop-targets": loop(snapshot),
+    "bots-chat-latency": chatResponse(snapshot),
     "bots-history": history(snapshot),
     "bots-library": library(snapshot),
   };

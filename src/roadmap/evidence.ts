@@ -4,6 +4,8 @@ import { episodeProvenanceOf, type EpisodeProvenance } from "../core/learning/ep
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { AgentLoopPerformance } from "../games/minecraft/runtime-metrics.js";
+import { loadProposals } from "./proposals.js";
+import type { RoadmapCandidate } from "./model.js";
 
 /**
  * Reads the evidence the roadmap rules work from. Every number here comes from a file a real run wrote, or
@@ -49,6 +51,11 @@ export interface RuntimeEvidence {
 
 export interface EvidenceBundle {
   readonly profiles: readonly AutonomyProfileEvidence[];
+  /**
+   * Operator-authored proposals. They are candidates, not measurements: every one carries `measuredAt: null`,
+   * so they can never reopen an implemented, verified or dismissed finding, and they never move `evidenceAt`.
+   */
+  readonly proposals: readonly RoadmapCandidate[];
   readonly tests: TestRunEvidence | null;
   readonly episodes: EpisodeEvidence | null;
   readonly liveVerification: { readonly measuredAt: string; readonly summary: string } | null;
@@ -60,6 +67,11 @@ export interface EvidenceSource {
   readonly path: string;
   readonly available: boolean;
   readonly measuredAt: string | null;
+  /**
+   * Why the source produced nothing although it exists — a malformed proposals file, for instance. Absent when
+   * there is nothing to explain, so a simply missing file stays a plain unavailable source.
+   */
+  readonly problem?: string;
 }
 
 export interface EvidenceLoadOptions {
@@ -71,6 +83,11 @@ export interface EvidenceLoadOptions {
   readonly episodeFiles: readonly string[];
   /** Hand-written or scripted record of a live verification run (data/evidence/live-verification.json). */
   readonly liveVerificationPath: string;
+  /**
+   * Operator proposal files, in priority order (later paths win on a duplicate fingerprint). Required, so every
+   * caller states where proposals come from instead of silently having none.
+   */
+  readonly proposalPaths: readonly string[];
   readonly runtime: RuntimeEvidence | null;
 }
 
@@ -203,8 +220,16 @@ export async function loadEvidence(options: EvidenceLoadOptions): Promise<{ bund
   const tests = await loadTests(options.testRecordPath);
   const episodeResult = await loadEpisodes(options.episodeFiles);
   const live = await loadLiveVerification(options.liveVerificationPath);
+  const proposals = await loadProposals(options.proposalPaths);
 
   const sources: EvidenceSource[] = [
+    ...proposals.files.map((file): EvidenceSource => ({
+      name: `operator proposals ${file.path} (${file.proposals.length})`,
+      path: file.path,
+      available: file.proposals.length > 0,
+      measuredAt: null,
+      ...(file.problem ? { problem: file.problem } : {}),
+    })),
     {
       name: "autonomy profiles",
       path: options.profileDirectory,
@@ -233,6 +258,7 @@ export async function loadEvidence(options: EvidenceLoadOptions): Promise<{ bund
   return {
     bundle: {
       profiles,
+      proposals: proposals.candidates,
       tests,
       episodes: episodeResult.evidence,
       liveVerification: live,

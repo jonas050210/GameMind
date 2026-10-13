@@ -1,5 +1,6 @@
 import type { EvidenceBundle } from "./evidence.js";
 import type { RoadmapCandidate, RoadmapCategory, RoadmapEvidence } from "./model.js";
+import { withoutCollisions } from "./proposals.js";
 
 /** Source mix of the episode evidence, so a reader can see how much of a number is simulator data. */
 function provenanceMix(episodes: { readonly total: number; readonly byProvenance?: Readonly<Record<string, number>> }): string {
@@ -318,6 +319,12 @@ export function deriveCandidates(bundle: EvidenceBundle): RoadmapCandidate[] {
     severity: 1,
     measuredAt: null,
   });
+
+  // 8. Operator proposals. They arrive validated and already carry `measuredAt: null`, so they can never
+  //    reopen a settled finding. A proposal whose fingerprint a rule above already derived is dropped: the
+  //    measured finding wins, because two candidates sharing one fingerprint would produce two list entries
+  //    fighting over the same saved decision.
+  candidates.push(...withoutCollisions(bundle.proposals, candidates).kept);
 
   return candidates;
 }

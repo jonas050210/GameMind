@@ -42,6 +42,7 @@ function candidate(overrides: Partial<RoadmapCandidate> & { fingerprint: string 
 function bundle(overrides: Partial<EvidenceBundle> = {}): EvidenceBundle {
   return {
     profiles: [],
+    proposals: [],
     tests: null,
     episodes: null,
     liveVerification: null,
@@ -269,6 +270,7 @@ test("evidence: reads real report files, and marks absent sources unavailable in
       testRecordPath: path.join(directory, "tests.json"),
       episodeFiles: [path.join(directory, "no-episodes.jsonl")],
       liveVerificationPath: path.join(directory, "no-live.json"),
+      proposalPaths: [],
       runtime: null,
     });
     assert.equal(loaded.bundle.profiles.length, 1);
@@ -291,6 +293,7 @@ test("service: decisions survive a restart, concurrent refreshes share one run, 
       testRecordPath: path.join(directory, "tests.json"),
       episodeFiles: [],
       liveVerificationPath: path.join(directory, "live.json"),
+      proposalPaths: [],
     };
     await writeFile(options.testRecordPath, JSON.stringify({ measuredAt: T0, passed: 467, failed: 1, failures: ["flaky: thing"] }));
     const first = new RoadmapService(options);

@@ -27,6 +27,8 @@ export interface RoadmapServiceOptions {
   readonly testRecordPath: string;
   readonly episodeFiles: readonly string[];
   readonly liveVerificationPath: string;
+  /** Operator proposal files, later paths winning on a duplicate fingerprint (see `proposals.ts`). */
+  readonly proposalPaths: readonly string[];
   readonly now?: () => Date;
 }
 
@@ -146,6 +148,7 @@ export class RoadmapService {
         testRecordPath: this.options.testRecordPath,
         episodeFiles: this.options.episodeFiles,
         liveVerificationPath: this.options.liveVerificationPath,
+        proposalPaths: this.options.proposalPaths,
         runtime: this.runtime,
       });
       const candidates = deriveCandidates(loaded.bundle);
@@ -192,7 +195,7 @@ export class RoadmapService {
       counts,
       resolved,
       error,
-      note: "Items come from recorded evidence only. Defects are measured failures; hypotheses have an unestablished cause; ideas are never suggested as the next task.",
+      note: "Defects are measured failures; hypotheses have an unestablished cause; ideas are never suggested as the next task. Operator proposals carry no measurement of their own, so they can never reopen a settled item.",
     };
   }
 
@@ -247,6 +250,9 @@ export function defaultRoadmapOptions(dataRoot = "data", now?: () => Date): Road
     testRecordPath: join(dataRoot, "evidence", "tests.json"),
     episodeFiles: [join(dataRoot, "training", "experience", "episodes.jsonl"), join(dataRoot, "learning", "episodes.jsonl")],
     liveVerificationPath: join(dataRoot, "evidence", "live-verification.json"),
+    // The tracked file is versioned with the code; the local one is gitignored and wins on a duplicate
+    // fingerprint, so an operator can try a proposal before committing it.
+    proposalPaths: [join("config", "roadmap-proposals.json"), join(dataRoot, "roadmap", "proposals.json")],
     ...(now ? { now } : {}),
   };
 }

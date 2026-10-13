@@ -107,6 +107,8 @@ export interface ControlCenterSource {
   readonly landmarkMemory?: import("./landmark-memory.js").LandmarkMemory | null;
   /** Measured timing of the fast observation loop, decisions and actions. */
   readonly metrics?: import("./runtime-metrics.js").RuntimeMetrics | null;
+  /** Authorized live chat controller; its measured response times are shown next to the loop timings. */
+  readonly chat?: import("./minecraft-chat-controller.js").MinecraftChatController | null;
   /** Subgoal strategy layer whose cooldowns and outcomes are shown as the objective. */
   readonly autonomy?: import("./autonomy-controller.js").AutonomyController | null;
   /** The fast loop itself, for its running and in-flight state. */
@@ -826,6 +828,7 @@ export function createControlCenterSource(source: ControlCenterSource): {
         : null,
       offlineNote: source.offlineNote ?? null,
       agentLoop: source.metrics?.summary() ?? null,
+      chatLatency: source.chat?.chatLatency() ?? null,
       objective: source.autonomy?.snapshot() ?? null,
       worldSeed: source.worldSeed
         ? {

@@ -25,6 +25,7 @@ import { minecraftCraftTaskItemNames, minecraftFoodNames, minecraftPickupNames, 
 import { generateLargeHouseBlueprint } from "./house-blueprint.js";
 import { bestPickaxeTier, minecraftMiningRequirements } from "./mining.js";
 import type { MinecraftChatResponder } from "./ollama-chat-responder.js";
+import { ChatLatencyMetrics, chatLatencyBreaches, type ChatLatency, type ChatLatencySample, type ChatMessageTiming } from "./chat-latency.js";
 
 export interface MinecraftChatMessage {
   readonly username: string;
@@ -84,6 +85,12 @@ export interface MinecraftChatControllerOptions {
   /** How long a yes/no reply remains valid. Expired delivery/resume prompts fail closed. */
   readonly confirmationTimeoutMs?: number;
   readonly deliveryTimeoutMs?: number;
+  /**
+   * How long one queued chat step may take before the queue abandons it and moves on. Defaults to
+   * {@link CHAT_HANDLE_TIMEOUT_MS}; injectable so tests can exercise the recovery path in milliseconds
+   * instead of waiting out the production value.
+   */
+  readonly chatTimeoutMs?: number;
   /** Optional local model for brief conversational guidance only; recognized commands never use it. */
   readonly chatResponder?: MinecraftChatResponder;
 }
@@ -135,11 +142,27 @@ const CHAT_REPLY_MAX_CHARS = 240;
 /** A single queued chat command that takes longer than this is abandoned so the queue cannot jam behind it. */
 const CHAT_HANDLE_TIMEOUT_MS = 20_000;
 
+/**
+ * Chat controls answered without waiting for the queue. `status` only reads; the others change what the agent
+ * does, so they also supersede queued work that has not reached its side effect yet. `come` and `follow` are
+ * here because they are how the operator keeps the agent near them - waiting behind an unrelated slow command
+ * is exactly the moment they are needed.
+ */
+const CHAT_PRIORITY_MODES: ReadonlySet<string> = new Set(["status", "stop", "hold", "come", "follow"]);
+
+/** Thrown when a chat step is abandoned; lets a caller tell a timeout from a command that failed. */
+export class ChatTimeoutError extends Error {
+  constructor(readonly timeoutMs: number, label: string) {
+    super(`Chat command timed out after ${timeoutMs} ms: ${label.slice(0, 40)}`);
+    this.name = "ChatTimeoutError";
+  }
+}
+
 /** Rejects if `work` does not settle in time; the caller reports the failure and the queue moves on. */
 export function withChatTimeout<T>(work: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Chat command timed out after ${timeoutMs} ms: ${label.slice(0, 40)}`)), timeoutMs);
+    timer = setTimeout(() => reject(new ChatTimeoutError(timeoutMs, label)), timeoutMs);
     timer.unref?.();
   });
   return Promise.race([work, timeout]).finally(() => {
@@ -152,6 +175,13 @@ export class MinecraftChatController {
   private unsubscribers: Array<() => void> = [];
   private stopped = false;
   private processing: Promise<void> = Promise.resolve();
+  private readonly latency = new ChatLatencyMetrics();
+  /**
+   * The message being answered right now, so `say` attributes its first reply to the message that caused it.
+   * Saved and restored around every answer because priority controls bypass the queue and can interleave
+   * with a queued command.
+   */
+  private activeTiming: ChatMessageTiming | null = null;
   private readonly recentMessages = new Map<string, number>();
   private workflowGeneration = 0;
   private activeTask: MinecraftTask | null = null;
@@ -166,6 +196,10 @@ export class MinecraftChatController {
   private deathPosition: { readonly x: number; readonly y: number; readonly z: number } | null = null;
   private deliveryGeneration = 0;
   private questionTimer: NodeJS.Timeout | null = null;
+  /** Bumped by every queue-bypassing control that changes behaviour, so queued work can see it was overtaken. */
+  private priorityGeneration = 0;
+  /** The priority generation in force when the message being handled now was let through; null outside the queue. */
+  private queuedPriorityAt: number | null = null;
   private helperUnavailableNoted = false;
 
   constructor(private readonly options: MinecraftChatControllerOptions) {
@@ -180,9 +214,15 @@ export class MinecraftChatController {
     this.unsubscribers.push(this.options.transport.onChatMessage((message) => {
       // This check is intentionally repeated even though the adapter exposes an operator setting.
       // No other player, including a look-alike with different letter case, can start an action.
-      if (message.username !== this.options.operatorUsername) return;
+      if (message.username !== this.options.operatorUsername) {
+        this.latency.messageIgnored();
+        return;
+      }
       const normalized = message.message.normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("en-US");
-      if (!normalized) return;
+      if (!normalized) {
+        this.latency.messageIgnored();
+        return;
+      }
       const command = parseMinecraftChatCommand(message.message);
       const confirmationStage = command?.kind === "confirm"
         ? this.pendingDelivery ? "delivery"
@@ -198,35 +238,49 @@ export class MinecraftChatController {
       // Identical confirmations in two successive approval stages are distinct operator decisions.
       const fingerprint = `${message.username}\u0000${confirmationStage}\u0000${normalized}`;
       const previousAt = this.recentMessages.get(fingerprint);
-      if (previousAt !== undefined && now - previousAt < CHAT_DUPLICATE_WINDOW_MS) return;
+      if (previousAt !== undefined && now - previousAt < CHAT_DUPLICATE_WINDOW_MS) {
+        this.latency.messageIgnored();
+        return;
+      }
       this.recentMessages.set(fingerprint, now);
       while (this.recentMessages.size > CHAT_DEDUPE_MAX_ENTRIES) {
         const oldest = this.recentMessages.keys().next().value;
         if (oldest === undefined) break;
         this.recentMessages.delete(oldest);
       }
-      if (command?.kind === "mode" && (command.mode === "status" || command.mode === "stop" || command.mode === "hold")) {
+      const timing = this.latency.messageReceived();
+      if (command?.kind === "mode" && CHAT_PRIORITY_MODES.has(command.mode)) {
         // A queued project preflight or local-model reply must never delay status or the operator's stop.
-        void this.handleMode(command.mode).catch((error: unknown) => {
-          this.options.logger.error({ err: error, mode: command.mode }, "Priority Minecraft chat control failed");
-          this.say("Der Steuerbefehl ist fehlgeschlagen. Der laufende Auftrag wird vorsichtshalber gestoppt.");
-          if (command.mode !== "status") this.options.requestTaskStop("priority chat control failed");
-        });
+        // The control itself is still bounded: a hanging adapter call must not leave the operator without an
+        // answer, and for anything but `status` the fallback stops the task instead of trusting the mode call.
+        if (command.mode !== "status") this.priorityGeneration += 1;
+        this.answerOutsideQueue(
+          timing,
+          () => withChatTimeout(this.handleMode(command.mode), this.chatTimeoutMs, `mode ${command.mode}`),
+          (error: unknown) => {
+            this.options.logger.error({ err: error, mode: command.mode }, "Priority Minecraft chat control failed");
+            this.say("Der Steuerbefehl ist fehlgeschlagen. Der laufende Auftrag wird vorsichtshalber gestoppt.");
+            if (command.mode !== "status") this.options.requestTaskStop("priority chat control failed");
+          },
+        );
         return;
       }
 
       if (command?.kind === "help") {
         // Help has no side effects; it must answer even while a task or a slow reply holds the queue.
-        for (const line of describeMinecraftChatHelp(detectChatLanguage(message.message, "en"))) this.say(line);
+        this.answerOutsideQueue(timing, () => {
+          for (const line of describeMinecraftChatHelp(detectChatLanguage(message.message, "en"))) this.say(line);
+        });
         return;
       }
 
       const receivedPosition = this.positionAtChatReceipt();
       this.processing = this.processing
-        .then(() => withChatTimeout(this.handle(message.message, receivedPosition), CHAT_HANDLE_TIMEOUT_MS, message.message))
+        .then(() => this.answerInQueue(timing, message.message, receivedPosition))
         .catch((error: unknown) => {
-          this.options.logger.error({ err: error }, "Operator chat command failed");
-          this.say("Der Chatbefehl ist fehlgeschlagen; ich habe keine erfolgreiche Aktion bestätigt.");
+          // Safety net: the answer itself reports its own failures, so only a bug in the queue or the
+          // measurement reaches this. It must not be able to jam the chain either.
+          this.options.logger.error({ err: error }, "Minecraft chat queue link failed");
         });
     }));
     if (this.options.transport.onDeath) this.unsubscribers.push(this.options.transport.onDeath(() => this.onDeath()));
@@ -246,8 +300,93 @@ export class MinecraftChatController {
     this.pendingMaterialApproval = null;
   }
 
+  /** One queued message: wait for the chain, handle it under the queue timeout, then report what it cost. */
+  private async answerInQueue(
+    timing: ChatMessageTiming,
+    raw: string,
+    receivedPosition: { readonly x: number; readonly y: number; readonly z: number } | null,
+  ): Promise<void> {
+    const outer = this.activeTiming;
+    const outerPriorityAt = this.queuedPriorityAt;
+    this.activeTiming = timing;
+    // Captured before the first await, so a control that bypasses the queue while this message is being
+    // handled is still visible at the point where the message would take over the agent.
+    this.queuedPriorityAt = this.priorityGeneration;
+    this.latency.handlingStarted(timing);
+    let failure: unknown = null;
+    try {
+      await withChatTimeout(this.handle(raw, receivedPosition), this.chatTimeoutMs, raw);
+    } catch (error: unknown) {
+      failure = error;
+      this.options.logger.error({ err: error }, "Operator chat command failed");
+      this.say("Der Chatbefehl ist fehlgeschlagen; ich habe keine erfolgreiche Aktion bestätigt.");
+    } finally {
+      this.reportLatency(this.latency.handlingFinished(timing, { timedOut: failure instanceof ChatTimeoutError }));
+      this.activeTiming = outer;
+      this.queuedPriorityAt = outerPriorityAt;
+    }
+  }
+
+  /**
+   * One message answered without the queue: priority controls and help. `answer` runs immediately, so a stop
+   * is never delayed by measurement; a promise it returns is waited for only to time the answer.
+   */
+  private answerOutsideQueue(
+    timing: ChatMessageTiming,
+    answer: () => Promise<void> | void,
+    onFailure: (error: unknown) => void = () => undefined,
+  ): void {
+    const outer = this.activeTiming;
+    this.activeTiming = timing;
+    this.latency.handlingStarted(timing);
+    const finish = (error: unknown): void => {
+      if (error !== null) onFailure(error);
+      this.reportLatency(this.latency.handlingFinished(timing, { timedOut: error instanceof ChatTimeoutError }));
+      this.activeTiming = outer;
+    };
+    let outcome: Promise<void> | void;
+    try {
+      outcome = answer();
+    } catch (error: unknown) {
+      finish(error);
+      return;
+    }
+    if (outcome === undefined) {
+      finish(null);
+      return;
+    }
+    void outcome.then(() => finish(null), (error: unknown) => finish(error));
+  }
+
+  /** One log line per answered message, and a warning naming the target it breached. */
+  private reportLatency(sample: ChatLatencySample | null): void {
+    if (sample === null) return;
+    const breaches = chatLatencyBreaches(sample);
+    if (breaches.length > 0) {
+      this.options.logger.warn({ chat: sample, breaches }, "Minecraft chat answer breached a response-time target");
+      return;
+    }
+    this.options.logger.debug({ chat: sample }, "Minecraft chat latency");
+  }
+
+  /**
+   * True when a control that bypasses the queue arrived while the queued message now running was handled.
+   * The message may still answer, but it must not take over the agent afterwards: the operator's newer
+   * command is the one that counts. `deliverToOperator` is covered by `deliveryGeneration` instead, which
+   * `cancelPendingWorkflow` already bumps, so it aborts between its own steps.
+   */
+  private supersededByPriority(): boolean {
+    return this.queuedPriorityAt !== null && this.priorityGeneration !== this.queuedPriorityAt;
+  }
+
+  /** Measured chat response times: for the Control Center, and for reading a live session afterwards. */
+  chatLatency(): ChatLatency {
+    return this.latency.summary();
+  }
+
   private say(message: string): void {
     if (this.stopped) return;
+    if (this.activeTiming !== null) this.latency.replySent(this.activeTiming);
     // Mineflayer chat has no line breaks: a multi-line reply becomes one chat message per line, so a
     // command list arrives as a readable list instead of a run-on sentence.
     for (const line of message.split(/\r\n|\r|\n/)) this.sayChunks(line);
@@ -279,6 +418,11 @@ export class MinecraftChatController {
     this.questionTimer = null;
   }
 
+  /** One queued chat step may take this long before the queue abandons it and moves on. */
+  private get chatTimeoutMs(): number {
+    return this.options.chatTimeoutMs ?? CHAT_HANDLE_TIMEOUT_MS;
+  }
+
   /**
    * Tells the operator once per session why the optional local helper is silent (no Ollama server, missing
    * model, or answers the safety filter refused), so terse deterministic replies do not look like a bug.
@@ -297,9 +441,16 @@ export class MinecraftChatController {
     if (expiresAt === undefined) return;
     this.questionTimer = setTimeout(() => {
       this.questionTimer = null;
-      this.processing = this.processing.then(() => this.expirePendingQuestion()).catch((error: unknown) => {
-        this.options.logger.warn({ err: error }, "Could not expire a Minecraft chat confirmation");
-      });
+      // This link is appended outside the message handler, so it needs a timeout of its own. Without one a
+      // hang while resuming follow mode leaves `processing` unsettled forever and blocks every later
+      // message permanently, instead of costing the queue one timeout like a hung command does.
+      // `expirePendingQuestion` clears all pending approvals before its only await, so an expiry abandoned
+      // here has still failed closed: nothing is left that a late "ja" could act on.
+      this.processing = this.processing
+        .then(() => withChatTimeout(this.expirePendingQuestion(), this.chatTimeoutMs, "confirmation deadline"))
+        .catch((error: unknown) => {
+          this.options.logger.warn({ err: error }, "Could not expire a Minecraft chat confirmation");
+        });
     }, Math.max(0, expiresAt - Date.now()));
     this.questionTimer.unref?.();
   }
@@ -350,7 +501,9 @@ export class MinecraftChatController {
       }
       const responder = this.options.chatResponder;
       if (responder) {
+        const responderStartedAt = Date.now();
         const reply = await responder.reply(raw);
+        if (this.activeTiming !== null) this.latency.recordResponder(this.activeTiming, Math.max(0, Date.now() - responderStartedAt));
         if (this.stopped) return;
         if (reply) {
           this.say(reply);
@@ -683,6 +836,11 @@ export class MinecraftChatController {
   }
 
   private async startTask(task: MinecraftTask, order: ResourceOrder | null): Promise<void> {
+    if (this.supersededByPriority()) {
+      this.options.logger.info({ task: taskName(task) }, "Queued chat command superseded by a newer control; no task started");
+      this.say(`Ich habe „${taskName(task)}“ nicht gestartet: Dein Steuerbefehl danach hat Vorrang. Sage es erneut, wenn ich es ausführen soll.`);
+      return;
+    }
     if (this.options.taskRunning() && !this.options.currentTask()) {
       this.say("Der Task-Scheduler ist beschäftigt; ich kann den Chat-Auftrag gerade nicht sicher annehmen.");
       return;

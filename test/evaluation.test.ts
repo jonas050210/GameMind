@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { evaluationScenarios } from "../src/testing/eval/scenarios.js";
-import { evaluationSeeds, runEvaluationOnce, runEvaluationSuite } from "../src/testing/eval/harness.js";
+import { evaluationScenarios, type EvaluationScenario } from "../src/testing/eval/scenarios.js";
+import { aggregateScenario, evaluationSeeds, runEvaluationOnce, runEvaluationSuite, type EvaluationRun } from "../src/testing/eval/harness.js";
 
 test("the offline evaluation gates hold on a regression sample of seeds", async () => {
   const report = await runEvaluationSuite(evaluationScenarios(), evaluationSeeds(8));
@@ -14,6 +14,89 @@ test("the offline evaluation gates hold on a regression sample of seeds", async 
   assert.equal(report.totals.unverifiedConfirmations, 0, "no confirmation may contradict the observed state");
   assert.equal(report.totals.deaths, 0, "no seed may reach zero health");
   assert.equal(report.passed, true);
+});
+
+test("an attacking zombie is fought and killed offline, and every rule that refuses a fight is obeyed", async () => {
+  const scenarios = evaluationScenarios();
+  const byId = (id: string): EvaluationScenario => {
+    const scenario = scenarios.find((candidate) => candidate.id === id);
+    assert.ok(scenario, `scenario '${id}' exists`);
+    return scenario;
+  };
+
+  // The fight itself. Before the simulated adapter equipped a carried weapon like the live one does, this
+  // scenario "passed" its goal gate on a swing that failed with COMBAT_NO_WEAPON: the goal was
+  // executed, so nothing showed that no fight ever happened. These assertions are about world facts.
+  const fight = byId("combat-opt-in-defence");
+  const fightRuns: EvaluationRun[] = [];
+  for (const seed of evaluationSeeds(4)) fightRuns.push(await runEvaluationOnce(fight, seed));
+  assert.ok(fightRuns.every((run) => run.worldStats.hostilesKilled === 1), "every seed leaves the zombie dead in the world");
+  assert.ok(fightRuns.every((run) => run.worldStats.damageTaken > 0), "the zombie attacks first, so this is a real fight and not a target practice");
+  assert.ok(fightRuns.every((run) => run.successfulActionGoals.includes("defend")), "the swing succeeded; an attempt that failed does not count");
+  assert.ok(fightRuns.every((run) => run.actionFailures.every((failure) => failure.goalId !== "defend")), "no seed has a failed attack");
+  assert.ok(fightRuns.every((run) => !run.died), "the agent survives the fight it chose");
+  assert.ok(aggregateScenario(fight, fightRuns).passed, "every gate of the combat scenario holds");
+
+  // The refusals. Each of these has fighting enabled or a weapon carried, so only the rule under test can
+  // be what stops the swing.
+  for (const id of ["combat-denied-by-default", "combat-health-floor-refuses-fight", "combat-creeper-never-engaged"]) {
+    const scenario = byId(id);
+    for (const seed of evaluationSeeds(3)) {
+      const run = await runEvaluationOnce(scenario, seed);
+      assert.ok(!run.actionGoals.includes("defend"), `${id}: no swing may be attempted`);
+      assert.equal(run.worldStats.hostilesKilled, 0, `${id}: the hostile stays alive`);
+      assert.ok(!run.died, `${id}: the agent survives without fighting`);
+      assert.ok(aggregateScenario(scenario, [run]).passed, `${id}: gates hold on seed ${seed}`);
+    }
+  }
+});
+
+function evaluationRun(overrides: Partial<EvaluationRun> = {}): EvaluationRun {
+  return {
+    scenarioId: "fake",
+    seed: 0,
+    status: "succeeded",
+    success: true,
+    safe: true,
+    died: false,
+    simulatedMs: 4_000,
+    metrics: { actions: 4, wastedActions: 0, unsafeActions: 0, unverifiedConfirmations: 0, progressEvents: 1 } as unknown as EvaluationRun["metrics"],
+    worldStats: { damageTaken: 0, minHealth: 20, starvationTicks: 0, hostilesKilled: 0 },
+    actionGoals: [],
+    successfulActionGoals: [],
+    actionChoices: [],
+    actionFailures: [],
+    failureCode: null,
+    ...overrides,
+  };
+}
+
+function gateOf(scenario: EvaluationScenario, runs: EvaluationRun[], name: string): { passed: boolean; detail: string } {
+  const gate = aggregateScenario(scenario, runs).gates.find((candidate) => candidate.name === name);
+  assert.ok(gate, `${scenario.id} has a '${name}' gate`);
+  return gate;
+}
+
+test("a required goal counts only when it succeeded, a forbidden one counts even when it failed", () => {
+  // The two gates are deliberately asymmetric. A requirement is a claim that behaviour happened, so an
+  // attempt that failed must not satisfy it - that asymmetry is the whole reason `requiredGoals`, which read
+  // every executed action whatever its status, no longer exists. A prohibition is about what the agent was
+  // willing to do, so a forbidden swing counts as a violation even when it landed on nothing.
+  const freeing = evaluationScenarios().find((candidate) => candidate.id === "inventory-full-frees-space");
+  const refusing = evaluationScenarios().find((candidate) => candidate.id === "combat-denied-by-default");
+  assert.ok(freeing && refusing);
+
+  const attemptedOnly = evaluationRun({ actionGoals: ["free-inventory"], successfulActionGoals: [] });
+  const gate = gateOf(freeing, [attemptedOnly], "required-successful-goal");
+  assert.equal(gate.passed, false, "a goal that was executed and failed must not satisfy the requirement");
+  assert.match(gate.detail, /0\/1 seed/);
+
+  const completed = evaluationRun({ actionGoals: ["free-inventory"], successfulActionGoals: ["free-inventory"] });
+  assert.equal(gateOf(freeing, [completed], "required-successful-goal").passed, true, "the same goal, succeeded, does");
+
+  const failedSwing = evaluationRun({ actionGoals: ["defend"], successfulActionGoals: [] });
+  assert.equal(gateOf(refusing, [failedSwing], "forbidden-goal").passed, false, "a forbidden attempt is a violation even when it failed");
+  assert.equal(gateOf(refusing, [evaluationRun({ actionGoals: ["explore:north"] })], "forbidden-goal").passed, true);
 });
 
 test("evaluation runs retain specific action failures for intermittent-action diagnosis", async () => {

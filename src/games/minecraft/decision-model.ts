@@ -28,7 +28,7 @@ import {
   minecraftPlaceableBlockNames,
   miningDropFor,
 } from "./mining.js";
-import { COMBAT_APPROACH_MAX_BLOCKS, UNARMED_DAMAGE, bestWeapon, combatIsAllowed, hitBudgetFor } from "./combat.js";
+import { COMBAT_APPROACH_MAX_BLOCKS, UNARMED_DAMAGE, bestWeapon, combatIsAllowed, combatTargetRule, hitBudgetFor } from "./combat.js";
 import { SHELTER_CARDINAL_DIRECTIONS, SHELTER_SEAL_TOTAL, analyzeShelterSealFromObservation } from "./shelter.js";
 import { chooseExplorationWaypoint } from "./exploration.js";
 import { buildLocalTerrainModel } from "./terrain-model.js";
@@ -44,6 +44,7 @@ import type {
 import type { CraftableMinecraftItem } from "./recipes.js";
 import {
   countItemAndEquipment,
+  isEatLastFood,
   isMinecraftFoodName,
   isMinecraftLogName,
   minecraftFoodNutrition,
@@ -52,7 +53,7 @@ import {
   plankNameForLog,
 } from "./recipes.js";
 import { isHostileMinecraftEntity } from "./threats.js";
-import { CRITICAL_HEALTH, CRITICAL_HUNGER, FOOD_PRIORITY_HUNGER, LOW_HUNGER, REGEN_HUNGER } from "../../core/survival-thresholds.js";
+import { COMBAT_MIN_HEALTH, CRITICAL_HEALTH, CRITICAL_HUNGER, FOOD_PRIORITY_HUNGER, LOW_HUNGER, REGEN_HUNGER } from "../../core/survival-thresholds.js";
 import { describeSessionField, isSurvivalLike, type SessionFieldInfo } from "./live-session.js";
 import { blockKey, WorldMemory, type ItemSighting } from "./world-memory.js";
 export { isHostileMinecraftEntity } from "./threats.js";
@@ -61,7 +62,12 @@ const FOOD_PRIORITY_THRESHOLD = FOOD_PRIORITY_HUNGER; // Lowered from 10: proact
 const LOW_FOOD_EXPLORATION_THRESHOLD = LOW_HUNGER; // Raised from 6: explore for food earlier
 const CRITICAL_FOOD_THRESHOLD = CRITICAL_HUNGER;
 const REGEN_FOOD_THRESHOLD = REGEN_HUNGER;
-const REST_HEALTH_THRESHOLD = 14; // Raised from 12: rest earlier to prevent death
+/**
+ * Resting starts at or below this health. Exported so the ordering against the combat floor can be tested:
+ * resting covers `health <= 14` and combat requires `health > COMBAT_MIN_HEALTH` (14), so at exactly 14 the
+ * agent rests instead of fighting. The two lines meet without overlapping.
+ */
+export const REST_HEALTH_THRESHOLD = 14; // Raised from 12: rest earlier to prevent death
 const REST_TARGET_HEALTH = 18; // Raised from 16: heal to safer level
 const REST_CHUNK_MS = 10_000;
 const CRITICAL_HEALTH_THRESHOLD = CRITICAL_HEALTH;
@@ -718,6 +724,18 @@ function defendCandidate(
   if (!available(context, "minecraft.attack-hostile")) return null;
   const hostile = threats.nearby[0];
   if (!hostile) return null;
+  // Checked before anything about weapons: a target the agent will never fight must not make it craft a sword
+  // first. Without this, an unarmed agent next to an enderman planned `prepare-weapon` and only found out the
+  // fight was refused after the table and the materials were already spent.
+  const targetRule = combatTargetRule(hostile.name);
+  if (targetRule.policy === "avoid") {
+    context.ledger?.note(
+      { goalId: "defend", targetKey: `hostile:${hostile.id}`, priorityBand: BAND_SAFETY },
+      "threatened",
+      `'${hostile.name}' is never engaged: ${targetRule.reason}`,
+    );
+    return null;
+  }
   const hasWeapon = bestWeapon([
     ...(state.equipment.hand ? [{ name: state.equipment.hand.name }] : []),
     ...state.inventory.map((item) => ({ name: item.name })),
@@ -743,8 +761,8 @@ function defendCandidate(
   const verdict = combatIsAllowed({
     enabled: true,
     health: state.player.health,
-    minHealth: 10,
-    retreatHealth: 6,
+    minHealth: COMBAT_MIN_HEALTH,
+    retreatHealth: CRITICAL_HEALTH,
     hostileCountNearby: threats.nearby.length,
     maxEngageableHostiles: 1,
     weapon: weapon ? { name: weapon.name, damage: weapon.damage } : null,
@@ -783,8 +801,8 @@ function defendCandidate(
       entityId: hostile.id,
       maxHits: hitBudgetFor(hostile.name, weapon?.damage ?? UNARMED_DAMAGE),
       dangerRadius: task.dangerRadius,
-      minHealth: 10,
-      retreatHealth: 6,
+      minHealth: COMBAT_MIN_HEALTH,
+      retreatHealth: CRITICAL_HEALTH,
       requiredDamage: MIN_WEAPON_DAMAGE,
     },
     targetKey,
@@ -1163,9 +1181,13 @@ function eatCandidate(state: MinecraftObservation, context: MinecraftDecisionCon
     .map((item) => ({ item, nutrition: minecraftFoodNutrition[item.name as keyof typeof minecraftFoodNutrition] }))
     .filter(({ item }) => !isExcluded(context, `eat:${item.name}`))
     .sort((left, right) => {
+      // Risk tier first, arithmetic second. At a nearly full bar the least wasteful item is the smallest one,
+      // so waste-first would choose raw chicken — with its chance of draining hunger again — exactly when the
+      // meal is worth least. Cooked and plant food is always eaten first when it is carried.
+      const tier = (isEatLastFood(left.item.name) ? 1 : 0) - (isEatLastFood(right.item.name) ? 1 : 0);
       const leftWaste = Math.max(0, left.nutrition - (20 - hunger));
       const rightWaste = Math.max(0, right.nutrition - (20 - hunger));
-      return leftWaste - rightWaste || right.nutrition - left.nutrition || left.item.name.localeCompare(right.item.name);
+      return tier || leftWaste - rightWaste || right.nutrition - left.nutrition || left.item.name.localeCompare(right.item.name);
     });
   const selected = options[0];
   if (!selected) return null;
