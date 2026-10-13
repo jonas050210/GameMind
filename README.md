@@ -616,7 +616,7 @@ Environment variables may set connection defaults:
 - `GAMEMIND_TRACE_DIR` (default `data/traces`)
 - `GAMEMIND_LEARNING_DIR` (default `data/learning`)
 - `GAMEMIND_CONTROL_HOST` (default `127.0.0.1`; the optional dashboard binds this interface)
-- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`; the helper stays **off** until this or `GAMEMIND_OLLAMA_MODEL` is set), `GAMEMIND_OLLAMA_MODEL` (no default; `qwen3:1.7b` recommended), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `1800`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
+- `GAMEMIND_OLLAMA_URL` (default `http://127.0.0.1:11434`; the helper stays **off** until this or `GAMEMIND_OLLAMA_MODEL` is set), `GAMEMIND_OLLAMA_MODEL` (no default; `qwen3:1.7b` recommended), `GAMEMIND_OLLAMA_TIMEOUT_MS` (default `3000`), `GAMEMIND_OLLAMA_COLD_TIMEOUT_MS` (default `8000`, the longer budget for the first request while Ollama loads the model), `GAMEMIND_OLLAMA_COOLDOWN_MS` (default `30000`) and `GAMEMIND_OLLAMA_MAX_REJECTIONS` (default `5`; after this many answers in a row that the safety filter refuses, the helper pauses for the session)
 - `GAMEMIND_LITEMATICA_BRIDGE_TOKEN` (required only for the optional review receiver; at least 32 UTF-8 bytes), `GAMEMIND_LITEMATICA_BRIDGE_HOST` (default `127.0.0.1`) and `GAMEMIND_LITEMATICA_BRIDGE_PORT` (default `39990`)
 - `GAMEMIND_NODE` or `NODE` (optional; the Node.js executable `python3 main.py` should run, version-checked before use)
 - `GAMEMIND_LOG_LEVEL` (the training CLI's log level, default `info`) and `LOG_LEVEL` (the agent's own log level, default `info`)
@@ -645,7 +645,13 @@ export GAMEMIND_OLLAMA_URL="http://127.0.0.1:11434" # use the address reachable 
 export GAMEMIND_OLLAMA_MODEL="qwen3:1.7b"           # setting either variable enables the helper
 ```
 
-Use the URL reachable **from the GameMind process**. If Ollama runs on Windows and GameMind is in WSL, `127.0.0.1` works only when WSL's localhost forwarding/network mode makes it reachable; otherwise set the Windows-host address explicitly. The helper is prompt-constrained to brief English/German replies; it never approves or issues actions and never invents world state. Do not use the model as a safety authority.
+Use the URL reachable **from the GameMind process**. Under WSL2's default networking `127.0.0.1` inside WSL is *not* the Windows host, and Ollama on Windows binds loopback only — so reaching it takes two changes, not one. On Windows, let Ollama listen on all interfaces (environment variable `OLLAMA_HOST=0.0.0.0`, then restart Ollama and allow it through the firewall for private networks), and in WSL point GameMind at the Windows host:
+
+```bash
+export GAMEMIND_OLLAMA_URL="http://$(ip route show default | awk '{print $3}'):11434"
+```
+
+With mirrored networking, or with Ollama installed inside WSL itself, `http://127.0.0.1:11434` works unchanged. The launcher's automatic Windows-host choice covers the Minecraft server only, not Ollama. The helper is prompt-constrained to brief English/German replies; it never approves or issues actions and never invents world state. Do not use the model as a safety authority.
 
 Model choice (measured warm on a 6 GB-class GPU; answers are bounded to ~80 tokens):
 
