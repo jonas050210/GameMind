@@ -507,6 +507,16 @@ Training runs the curriculum (`basics`, `food`, `tools-and-shelter`) in the **of
 
 Start a private or local Java server first. Use only an account and server you are authorized to use, and keep the world disposable. The exact checks, expected evidence, and server setup commands are in [`docs/LIVE_VERIFICATION.md`](docs/LIVE_VERIFICATION.md).
 
+The steps that need you in the game are a separate, fixed protocol with a result file per session:
+
+```bash
+npm run protocol -- print
+npm run protocol -- template data/live/2026-10-13.json --server "127.0.0.1:25565" --operator "YourName"
+npm run protocol -- check data/live/2026-10-13.json
+```
+
+`check` refuses a file that claims a step is verified without the observation and the values that step asks for, so a session cannot be reported as live-verified by accident. See [`docs/LIVE_PROTOCOL.md`](docs/LIVE_PROTOCOL.md); it needs the same explicit approval as every other live test.
+
 The easiest way to run these is `python3 main.py` (see [Quick start](#quick-start)); the commands below run the TypeScript CLI directly and take the same options.
 
 A live session is **persistent** by default: it connects, serves the Control Center, runs the task you gave (if any) and stays connected, idle or autonomous, until you stop it from the page or press Ctrl-C. Add `--one-shot` to end it with the task.

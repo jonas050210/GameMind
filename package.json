@@ -41,6 +41,7 @@
     "task:minecraft:mine": "tsx src/cli.ts --task mine-stone --one-shot",
     "task:minecraft:shelter": "tsx src/cli.ts --task build-shelter --one-shot",
     "policy:status": "tsx src/cli.ts --policy status",
+    "protocol": "tsx src/testing/live/protocol-cli.ts",
     "test:live": "tsx src/testing/live/live-test-runner.ts",
     "test:live:quick": "tsx src/testing/live/live-test-runner.ts --scenario live-connection",
     "profile:autonomy": "tsx src/testing/autonomy-profile.ts",

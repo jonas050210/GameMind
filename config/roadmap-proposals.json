@@ -6,37 +6,19 @@
       "title": "Chat hang: every queued link is bounded now, but abandoned work is not cancelled and nothing is measured",
       "category": "reliability",
       "kind": "hypothesis",
-      "explanation": "Operator report from live play: chat stops responding. Reading the code rules out the first suspect, and one gap found since is now fixed. The controller serialises every message on `this.processing`, and every link is bounded by `withChatTimeout`: the message chain, the confirmation-deadline link and the priority controls. The deadline link used to append `expirePendingQuestion()` with no timeout, so a hang while resuming follow mode blocked every later message for the rest of the session; it is now abandoned after one timeout, and since `expirePendingQuestion` clears all pending approvals before its only await, an abandoned expiry still fails closed. A regression test hangs `setMode(\"follow\")` and asserts the queue recovers. `status`, `stopp`, `hold` bypass the queue; `hilfe` answers at once. Every message is now timed - queue wait, handling, first reply, helper model - and logged, so a recurrence becomes a number. What remains: a timeout rejects without cancelling the work underneath, which keeps running and may mutate state later; and the operator symptom is still unconfirmed. If it recurs while the chat latency numbers look healthy, the cause is outside this chain.",
+      "explanation": "Operator report from live play: chat stops responding. Reading the code ruled out the first suspect. The controller serialises every message on `this.processing`, and every link is bounded by `withChatTimeout`: the message chain, the confirmation-deadline link and the priority controls. The deadline link used to append `expirePendingQuestion()` with no timeout, so a hang while resuming follow mode blocked every later message for good; it is now abandoned after one timeout, and since `expirePendingQuestion` clears all pending approvals before its only await, an abandoned expiry still fails closed. `status`, `stopp`, `hold`, `komm`, `komm zu mir` and `folge mir` bypass the queue, and queued work that has not started yields to them; `hilfe` answers at once. Every message is now timed - queue wait, handling, first reply, helper model - and logged, so a recurrence becomes a number. What remains: a timeout rejects without cancelling the work underneath, which keeps running and may mutate state later; and the operator symptom is still unconfirmed. If it recurs while the chat latency numbers look healthy, the cause is outside this chain.",
       "expectedBenefit": "Chat becomes trustworthy and diagnosable, which is the precondition for every other live test.",
       "effort": 2,
       "impact": 3,
       "urgency": 4,
       "confidence": 0.5,
-      "dependencies": ["reliability.live-protocol-results"],
+      "dependencies": ["One recorded protocol session (npm run protocol), step chat-still-answers-later"],
       "evidence": [
         { "source": "src/games/minecraft/minecraft-chat-controller.ts", "metric": "CHAT_HANDLE_TIMEOUT_MS", "value": "20000, wraps every queued link including the confirmation deadline" },
         { "source": "test/minecraft-chat-controller.test.ts", "metric": "regression test", "value": "a hung follow resume must not block later messages" },
         { "source": "operator report", "metric": "live symptom", "value": "chat hangs, not yet recorded" }
       ],
       "severity": 3
-    },
-    {
-      "fingerprint": "reliability.live-protocol-results",
-      "title": "One canonical live-test protocol with a recorded result file",
-      "category": "reliability",
-      "kind": "known-limitation",
-      "explanation": "docs/LIVE_VERIFICATION.md has 19 sections and `npm run test:live` runs scenarios, but there is no single fixed protocol with preconditions, expected values and a written result per step. LIVE_FINDINGS.md §5 also shows the risk of over-claiming: the last evidence came from a flying-squid 1.12 stand-in, not a vanilla server, and combat was never verified there because no mob was client-visible.",
-      "expectedBenefit": "Every live claim becomes checkable, and 'verified' stops meaning 'ran once somewhere'.",
-      "effort": 2,
-      "impact": 5,
-      "urgency": 4,
-      "confidence": 0.9,
-      "dependencies": ["A disposable 1.20.4 Java server, as in docs/LIVE_VERIFICATION.md"],
-      "evidence": [
-        { "source": "docs/LIVE_FINDINGS.md", "metric": "scope note", "value": "nothing verified against a live server" },
-        { "source": "src/testing/live/live-verifier.ts", "metric": "exit codes", "value": "0 pass, 1 phase failed, 2 unreachable" }
-      ],
-      "severity": 2
     },
     {
       "fingerprint": "reliability.sim-hostile-fidelity",
@@ -140,7 +122,7 @@
       "impact": 4,
       "urgency": 3,
       "confidence": 0.9,
-      "dependencies": ["reliability.live-protocol-results", "autonomy.exit-shelter-skill"],
+      "dependencies": ["One recorded protocol session (npm run protocol), step shelter-breaks-out", "autonomy.exit-shelter-skill"],
       "evidence": [
         { "source": "docs/LIVE_VERIFICATION.md", "metric": "coverage", "value": "§13 mining and shelter, not yet run on vanilla" }
       ],
